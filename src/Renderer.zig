@@ -49,7 +49,6 @@ pub const VTable = struct {
     draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
     recreateSwapchain: *const fn (*Implementation, io: std.Io) anyerror!void,
     updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
-    forEachMesh: *const fn (*Implementation, std.Io, *anyopaque, *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void,
 };
 
 /// Adds a chunk mesh to the renderer, this function may be called on any thread.
@@ -80,10 +79,6 @@ pub fn recreateSwapchain(self: *@This(), io: std.Io) !void {
 
 pub fn updateCameraDirection(self: *@This(), view_dir: @Vector(3, f32)) void {
     return self.vtable.updateCameraDirection(self.userdata, view_dir);
-}
-
-pub fn forEachMesh(self: *@This(), io: std.Io, userdata: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void {
-    return self.vtable.forEachMesh(self.userdata, io, userdata, callback);
 }
 
 pub const AntiAliasing = enum {

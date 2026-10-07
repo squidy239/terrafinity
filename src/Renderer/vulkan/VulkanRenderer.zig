@@ -171,7 +171,6 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
             .draw = vtableDraw,
             .recreateSwapchain = vtableRecreateSwapchain,
             .updateCameraDirection = vtableUpdateCameraDirection,
-            .forEachMesh = vtableForEachMesh,
         },
     };
 }
@@ -562,9 +561,4 @@ fn vtableUpdateCameraDirection(user_data: *Renderer.Implementation, view_dir: @V
     const front = Renderer.cameraFrontFromViewDirection(view_dir);
     const norm = zm.Vec3f.norm(.{ .data = front }).data;
     self.camera.updateFront(norm);
-}
-
-fn vtableForEachMesh(user_data: *Renderer.Implementation, io: std.Io, callback_user_data: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void {
-    const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    try self.chunk.forEachMesh(io, callback_user_data, callback);
 }

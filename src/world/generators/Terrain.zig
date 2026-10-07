@@ -836,7 +836,7 @@ pub const DefaultGenerator = struct {
         cave_noise_zone.end();
 
         const CaveInterp = interpolation.MultilinearInterpolator(f32, 3, .{ H, V, H }, .{ ChunkSize, ChunkSize, ChunkSize });
-        const cave_values = CaveInterp.init(@bitCast(grid_flat)).sampleGrid();
+        const cave_values = CaveInterp.init(std.mem.bytesAsValue(CaveInterp.Points, std.mem.asBytes(&grid_flat)).*).sampleGrid();
         carveCavesApply(chunk_blocks, float_pos, one_d_scale, gen_params, &cave_values);
     }
 
@@ -1044,7 +1044,7 @@ pub const DefaultGenerator = struct {
         var coarse: [N * N]f32 = undefined;
         noise_state.fillNoise2DGrid(&coarse, &warped_x, &warped_z);
         const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
-        const samples = Interp.init(@bitCast(coarse)).sampleGrid();
+        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(&coarse)).*).sampleGrid();
         for (0..ChunkSize) |x| {
             const row: [ChunkSize]f32 = samples[x];
             for (0..ChunkSize) |z| out[x * ChunkSize + z] = row[z];
@@ -1111,7 +1111,7 @@ pub const DefaultGenerator = struct {
             }
         }
         const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
-        const samples = Interp.init(@bitCast(prod)).sampleGrid();
+        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(&prod)).*).sampleGrid();
         for (0..ChunkSize) |x| {
             const row: [ChunkSize]f32 = samples[x];
             for (0..ChunkSize) |z| out[x * ChunkSize + z] = row[z];
@@ -1201,7 +1201,7 @@ pub const DefaultGenerator = struct {
             }
         }
         const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
-        const samples = Interp.init(@bitCast(delta)).sampleGrid();
+        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(&delta)).*).sampleGrid();
         for (0..ChunkSize) |x| {
             const row: [ChunkSize]f32 = samples[x];
             for (0..ChunkSize) |z| extra[x * ChunkSize + z] += row[z];
@@ -1249,7 +1249,7 @@ pub const DefaultGenerator = struct {
             }
         }
         const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
-        const samples = Interp.init(@bitCast(lattice)).sampleGrid();
+        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(&lattice)).*).sampleGrid();
         var out: [ChunkSize][ChunkSize]f32 = undefined;
         for (0..ChunkSize) |x| {
             const row: [ChunkSize]f32 = samples[x];

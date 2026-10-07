@@ -12,7 +12,8 @@ const EntityTypes = @import("entity/EntityTypes.zig");
 const Item = @import("entity/Item.zig");
 const Physics = @import("entity/Physics.zig");
 const Key = @import("Key.zig");
-const ConcurrentHashMap = @import("libs/ConcurrentHashMap.zig").ConcurrentHashMap;
+const ChunkClipmap = @import("ChunkClipmap.zig");
+const ChunkStreamer = @import("ChunkStreamer.zig");
 const utils = @import("libs/utils.zig");
 pub const Renderer = @import("Renderer.zig");
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
@@ -38,20 +39,20 @@ generator: ?generator_loader.GeneratorInstance,
 world_storage: World.WorldStorage,
 spawn: EntityRegistry.SpawnConfig,
 game_arena: std.heap.ArenaAllocator,
-loaded_or_meshed: ConcurrentHashMap(World.ChunkPos, NodeData, std.hash_map.AutoContext(World.ChunkPos), 128),
+/// Only `streamPass` touches it, except `completions`, which tasks push to.
+streamer: ChunkStreamer = .{},
 
 entity_registry: EntityRegistry,
 
 selected_inventory_row: std.atomic.Value(u32) = .init(0),
 selected_inventory_col: std.atomic.Value(u32) = .init(0),
 
-last_chunk_load: std.Io.Timestamp = .zero,
-chunk_load_is_running: std.atomic.Value(bool) = .init(false),
-load_future: ?std.Io.Future(@typeInfo(@TypeOf(loadChunks)).@"fn".return_type.?) = null,
-
-last_mesh_unload: std.Io.Timestamp = .zero,
-mesh_unload_is_running: std.atomic.Value(bool) = .init(false),
-mesh_unload_future: ?std.Io.Future(@typeInfo(@TypeOf(unloadChunkMeshes)).@"fn".return_type.?) = null,
+/// A pass runs when tasks finished, when the player crossed a chunk at the lowest
+/// level, or every `loader_frequency_ms` so settings changes and unloads progress.
+last_stream: std.Io.Timestamp = .zero,
+last_stream_center: ChunkClipmap.Position = @splat(std.math.maxInt(i32)),
+stream_is_running: std.atomic.Value(bool) = .init(false),
+stream_future: ?std.Io.Future(@typeInfo(@TypeOf(streamPass)).@"fn".return_type.?) = null,
 
 last_save: std.Io.Timestamp = .zero,
 save_is_running: std.atomic.Value(bool) = .init(false),
@@ -86,182 +87,6 @@ debug_menu: struct {
     opaque_faces: std.atomic.Value(u64) = .init(0),
     transparent_faces: std.atomic.Value(u64) = .init(0),
 } = .{},
-
-const NodeData = struct {
-    /// How many direct children are currently subtree-covered.
-    covered_children: [World.scale_factor][World.scale_factor][World.scale_factor]bool = empty_coverage,
-    /// True when this chunk is queued or currently in the renderer.
-    /// False for ghost entries that exist only to track child coverage.
-    is_active: bool = false,
-    /// True when this chunk is queued for rendering but not yet processed.
-    is_queued: bool = false,
-
-    structures_generated: bool,
-
-    const empty_coverage = @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(false))));
-    const full_coverage = @as([World.scale_factor][World.scale_factor][World.scale_factor]bool, @splat(@splat(@splat(true))));
-
-    pub fn noCoveredChildren(state: NodeData) bool {
-        return std.meta.eql(state.covered_children, empty_coverage);
-    }
-
-    pub fn allCoveredChildren(state: NodeData) bool {
-        return std.meta.eql(state.covered_children, full_coverage);
-    }
-
-    pub fn isCovering(state: NodeData) bool {
-        return state.allCoveredChildren() or state.is_active;
-    }
-};
-
-/// Bubbles coverage to the parent while the aggregate flips and prunes empty ghosts.
-/// Callers pass a `highest` snapshot so one walk uses a consistent cutoff.
-fn markSubtree(
-    self: *@This(),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    pos: World.ChunkPos,
-    covered: bool,
-    highest: i32,
-) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree" });
-    defer zone.end();
-    if (pos.level < 0) return;
-    const parent = pos.parent();
-    if (parent.level > highest) return;
-    const pos_in_parent = pos.posInParent();
-
-    var bubble_up = false;
-    {
-        const bucket = self.loaded_or_meshed.getBucket(parent);
-        const p = pos_in_parent;
-
-        // Skip the exclusive lock when the slot already holds the target value.
-        // The synthetic entry on a miss only fills the examined slot.
-        {
-            const mark_subtree_fast = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree_fast" });
-            defer mark_subtree_fast.end();
-            const initial = bucket.get(io, parent) orelse if (covered)
-                @as(NodeData, .{ .structures_generated = false })
-            else
-                return;
-            if (initial.covered_children[p[0]][p[1]][p[2]] == covered) return;
-        }
-
-        const mark_subtree_write = tracy.Zone.begin(.{ .src = @src(), .name = "mark_subtree_write" });
-        defer mark_subtree_write.end();
-        try bucket.lock.lock(io);
-        defer bucket.lock.unlock(io);
-
-        var state: NodeData = if (covered)
-            bucket.hash_map.get(parent) orelse .{ .structures_generated = false }
-        else
-            bucket.hash_map.get(parent) orelse return;
-
-        // Another thread may flip the slot while this thread waits, so check again.
-        if (state.covered_children[p[0]][p[1]][p[2]] == covered) {
-            return;
-        }
-
-        const was_covering = state.isCovering();
-        state.covered_children[p[0]][p[1]][p[2]] = covered;
-        const is_covering = state.isCovering();
-
-        if (!covered and state.noCoveredChildren() and !state.is_active and !state.is_queued) {
-            _ = bucket.hash_map.remove(parent);
-        } else {
-            try bucket.hash_map.put(allocator, parent, state);
-        }
-
-        bubble_up = was_covering != is_covering;
-    }
-
-    if (bubble_up) try self.markSubtree(io, allocator, parent, covered, highest);
-}
-
-fn canUnloadMeshView(self: *@This(), io: std.Io, view: ViewSnapshot, chunk_pos: World.ChunkPos) bool {
-    if (chunk_pos.level < 0) return !view.keepChunkLoaded(chunk_pos);
-    var parent = chunk_pos;
-    if (parent.level > view.highest_level) return true;
-    while (parent.level < view.highest_level) {
-        parent = parent.parent();
-        std.debug.assert(parent.level <= view.highest_level);
-        if (self.loaded_or_meshed.get(io, parent)) |par| {
-            if (par.is_active) {
-                const state = self.loaded_or_meshed.get(io, chunk_pos) orelse return true;
-                if (state.allCoveredChildren()) return true;
-                // Keep this mesh while the player is close enough that the loader
-                // could still be refining the area, so a stale low-res view does
-                // not flash before the higher-res chunks land. The check is
-                // geometric only, so it cannot race the loader or leak if the
-                // loader stalls. Level bounds apply: the loader never refines
-                // out-of-bounds levels, so stale levels drain without lingering.
-                const refine_radius = view.render_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor };
-                return !keepLoaded(view.lowest_level, view.highest_level, view.player_pos, chunk_pos, null, refine_radius);
-            }
-        }
-    }
-    std.debug.assert(parent.level == view.highest_level);
-
-    if (!keepLoaded(null, null, view.player_pos, parent, null, view.render_distance)) return true;
-
-    const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
-    bucket.lock.lockSharedUncancelable(io);
-    defer bucket.lock.unlockShared(io);
-    const state = bucket.hash_map.get(chunk_pos) orelse return false;
-    return state.allCoveredChildren();
-}
-
-fn tryRemoveChunkFromLoaded(
-    self: *@This(),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    chunk_pos: World.ChunkPos,
-    view: ViewSnapshot,
-) !void {
-    const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
-    var was_covering: bool = false;
-    var is_covering: bool = false;
-    {
-        try bucket.lock.lock(io);
-        defer bucket.lock.unlock(io);
-
-        var state = bucket.hash_map.get(chunk_pos) orelse return;
-
-        const was_active = state.is_active;
-        const was_queued = state.is_queued;
-
-        // Leave ghost nodes that still track coverage alone.
-        if (!was_active and !was_queued) {
-            std.debug.assert(!state.noCoveredChildren());
-            return;
-        }
-
-        was_covering = state.isCovering();
-
-        state.is_active = false;
-        state.is_queued = false;
-
-        is_covering = state.isCovering();
-
-        if (state.noCoveredChildren()) {
-            _ = bucket.hash_map.remove(chunk_pos);
-        } else {
-            try bucket.hash_map.put(allocator, chunk_pos, state);
-        }
-    }
-    if (was_covering and !is_covering) try self.markSubtree(io, allocator, chunk_pos, false, view.highest_level);
-}
-
-/// Removes a chunk's mesh and loaded entry once it falls outside the keep gate.
-/// Returns whether the chunk was actually unloaded.
-fn removeChunkIfUnloadable(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos, view: ViewSnapshot) !bool {
-    if (view.keepChunkLoaded(chunk_pos)) return false;
-    if (!self.canUnloadMeshView(io, view, chunk_pos)) return false;
-    try self.tryRemoveChunkFromLoaded(io, self.allocator, chunk_pos, view);
-    try self.renderer.removeChunk(io, chunk_pos);
-    return true;
-}
 
 pub const Options = struct {
     mouse_sensitivity: f32 = 0.5,
@@ -389,7 +214,6 @@ pub fn init(
         .vulkan_renderer = undefined,
         .renderer = undefined,
         .generator = null,
-        .loaded_or_meshed = .init,
         .world_storage = undefined,
         .spawn = undefined,
         .world = undefined,
@@ -600,9 +424,8 @@ fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, fol
 fn stopBackgroundWork(self: *@This(), io: std.Io) void {
     self.running.store(false, .unordered);
 
-    cancelFuture(io, &self.mesh_unload_future);
     cancelFuture(io, &self.save_future);
-    cancelFuture(io, &self.load_future);
+    cancelFuture(io, &self.stream_future);
     cancelFuture(io, &self.entity_drain_future);
     self.group.cancel(io);
     self.group.await(io) catch {};
@@ -616,7 +439,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.entity_registry.deinit(io, self.allocator, &self.world);
     self.world.deinit(io, self.allocator);
     if (self.generator) |*generator| generator.deinit();
-    self.loaded_or_meshed.deinit(io, self.allocator);
+    self.streamer.deinit(self.allocator);
     self.allocator.free(self.world_path);
 
     self.game_arena.deinit();
@@ -733,12 +556,47 @@ fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
     const loader_frequency_ms = self.options.loader_frequency_ms;
     const mesh_unload_frequency_ms = self.options.mesh_unload_frequency_ms;
     const save_frequency_ms = self.options.save_frequency_ms;
+    const lowest_level = self.options.lowest_level;
     self.options_lock.unlockShared(io);
 
-    try restartFuture(io, &self.chunk_load_is_running, &self.last_chunk_load, &self.load_future, loader_frequency_ms, loadChunks, .{ self, io, allocator });
-    try restartFuture(io, &self.mesh_unload_is_running, &self.last_mesh_unload, &self.mesh_unload_future, mesh_unload_frequency_ms, unloadChunkMeshes, .{ self, io });
+    try self.startStreamPass(io, allocator, lowest_level, loader_frequency_ms, mesh_unload_frequency_ms);
     try restartFuture(io, &self.save_is_running, &self.last_save, &self.save_future, save_frequency_ms, saveFuture, .{ self, io });
 }
+
+/// Starts a streaming pass when one has work, so the frame never polls the whole area.
+fn startStreamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator, lowest_level: i32, loader_frequency_ms: u64, unload_interval_ms: u64) !void {
+    if (self.stream_is_running.load(.seq_cst)) return;
+    const now: std.Io.Timestamp = .now(io, .awake);
+    // Every level's window derives from the lowest level's, so one comparison catches any crossing.
+    const center = ChunkClipmap.centerFor(self.playerBlock(io), lowest_level);
+    const moved = !@reduce(.And, center == self.last_stream_center);
+    const due = self.last_stream.durationTo(now).toMilliseconds() > loader_frequency_ms;
+    if (!moved and !due and !self.streamer.completions.pending.load(.acquire)) return;
+    self.last_stream = now;
+    self.last_stream_center = center;
+    try spawnTask(io, &self.stream_is_running, &self.stream_future, streamPass, .{ self, io, allocator, unload_interval_ms });
+}
+
+fn streamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator, unload_interval_ms: u64) !void {
+    defer self.stream_is_running.store(false, .seq_cst);
+    const host: StreamHost = .{ .game = self, .allocator = allocator };
+    try self.streamer.pass(io, self.allocator, self.snapshotView(io), .now(io, .awake), unload_interval_ms, host);
+    self.debug_menu.meshes.store(self.streamer.meshCount(), .unordered);
+}
+
+/// What the streamer needs from the game: chunk tasks and mesh removal.
+const StreamHost = struct {
+    game: *Game,
+    allocator: std.mem.Allocator,
+
+    pub fn dispatch(host: StreamHost, io: std.Io, request: ChunkStreamer.Request) void {
+        host.game.groupAsync(io, streamChunk, .{ host.game, io, host.allocator, request });
+    }
+
+    pub fn removeMesh(host: StreamHost, io: std.Io, pos: World.ChunkPos) !void {
+        return host.game.renderer.removeChunk(io, pos);
+    }
+};
 
 fn restartFuture(
     io: std.Io,
@@ -1011,56 +869,21 @@ fn getCameraFront(self: *@This(), io: std.Io) @Vector(3, f32) {
     return Renderer.cameraFrontFromViewDirection(self.player.viewDirection(io));
 }
 
-const Levels = struct { lowest: i32, highest: i32 };
+/// The block holding the player, the integer origin every chunk-window computation shares.
+fn playerBlock(self: *@This(), io: std.Io) World.BlockPos {
+    return @intFromFloat(@floor(self.getPlayerPos(io)));
+}
 
-fn getLevels(self: *@This(), io: std.Io) Levels {
-    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getLevels" });
-    defer z.end();
+fn snapshotView(self: *@This(), io: std.Io) ChunkStreamer.View {
+    const player_block = self.playerBlock(io);
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
-    return .{ .lowest = self.options.lowest_level, .highest = self.options.highest_level };
-}
-
-/// Snapshots everything geometry culling depends on. Bulk passes take it once so per-entry checks stay lock-free.
-const ViewSnapshot = struct {
-    lowest_level: i32,
-    highest_level: i32,
-    player_pos: @Vector(3, f64),
-    render_distance: @Vector(2, u32),
-    lod_overlap: i32,
-
-    fn innerGenRadius(self: @This(), level: i32) @Vector(2, u32) {
-        return innerRadiusFor(self.lowest_level, self.render_distance, self.lod_overlap, level);
-    }
-
-    fn keepChunkLoaded(self: @This(), chunk_pos: World.ChunkPos) bool {
-        return keepLoaded(self.lowest_level, self.highest_level, self.player_pos, chunk_pos, self.innerGenRadius(chunk_pos.level), self.render_distance);
-    }
-};
-
-/// Stops each generation ring short of the child ring it feeds by the overlap. Detail levels never mark coverage, so the refinement floor stays at 0.
-fn innerRadiusFor(lowest_level: i32, gen_distance: @Vector(2, u32), lod_overlap: i32, level: i32) @Vector(2, u32) {
-    if (level <= lowest_level or (lowest_level < 0 and level == 0)) return @splat(0);
-    const half: @Vector(2, i32) = @intCast(gen_distance / @Vector(2, u32){ World.scale_factor, World.scale_factor });
-    const hole: @Vector(2, i32) = @max(half - @as(@Vector(2, i32), @splat(lod_overlap)), @as(@Vector(2, i32), @splat(0)));
-    return @intCast(hole);
-}
-
-fn snapshotView(self: *@This(), io: std.Io) ViewSnapshot {
-    // One short shared hold covers every options field; per-entry checks stay lock-free.
-    self.options_lock.lockSharedUncancelable(io);
-    const lowest_level = self.options.lowest_level;
-    const highest_level = self.options.highest_level;
-    const render_distance: @Vector(2, u32) = .{ self.options.render_distance_x, self.options.render_distance_y };
-    const lod_overlap = self.options.lod_overlap;
-    self.options_lock.unlockShared(io);
-    return .{
-        .lowest_level = lowest_level,
-        .highest_level = highest_level,
-        .player_pos = self.getPlayerPos(io),
-        .render_distance = render_distance,
-        .lod_overlap = lod_overlap,
-    };
+    return .{ .player_block = player_block, .settings = .{
+        .lowest_level = self.options.lowest_level,
+        .highest_level = self.options.highest_level,
+        .render_distance = .{ self.options.render_distance_x, self.options.render_distance_y },
+        .lod_overlap = self.options.lod_overlap,
+    } };
 }
 
 fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
@@ -1080,16 +903,27 @@ fn isUniformInvisible(io: std.Io, chunk: *Chunk) !bool {
     };
 }
 
+/// Runs one streamer request and always reports it back, so a canceled or failed
+/// task never strands the chunk as queued.
+fn streamChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, request: ChunkStreamer.Request) !void {
+    var meshed = false;
+    defer self.streamer.completions.push(io, .{ .pos = request.pos, .kind = request.kind, .meshed = meshed });
+    switch (request.kind) {
+        // The task may start long after it was queued, so skip a chunk the player has left.
+        .load => |settings| {
+            const view: ChunkStreamer.View = .{ .settings = settings, .player_block = self.playerBlock(io) };
+            if (!view.keeps(request.pos)) return;
+        },
+        .remesh => {},
+    }
+    try self.meshChunk(io, allocator, request.pos, request.kind == .load);
+    meshed = true;
+}
+
 /// Generates a missing chunk and its neighbors, then adds or replaces its mesh.
-fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool, view: ViewSnapshot) !void {
+fn meshChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, generate_structures: bool) !void {
     const gen_mesh_add = tracy.Zone.begin(.{ .src = @src(), .name = "GenMeshAndAdd" });
     defer gen_mesh_add.end();
-    // A dying task would strand the queued flag and skip the chunk forever, so always release it. Failures then retry on a later pass.
-    defer self.clearQueuedFlag(io, chunk_pos);
-    // Queued tasks capture a stale segment snapshot, so re-snapshot the keep gate here. The passed view remains only the coverage cutoff.
-    const gate_view = self.snapshotView(io);
-    if (try self.removeChunkIfUnloadable(io, chunk_pos, gate_view)) return;
-
     const chunk = try self.world.loadChunk(io, allocator, chunk_pos, generate_structures);
     defer chunk.release();
 
@@ -1109,58 +943,22 @@ fn addChunkToRender(self: *@This(), io: std.Io, allocator: std.mem.Allocator, ch
         defer chunk.unlockShared(io);
         try self.renderer.addChunk(io, chunk_pos, chunk.encoding, &neighbor_faces);
     }
-    const mark = tracy.Zone.begin(.{ .src = @src(), .name = "mark" });
-    defer mark.end();
-
-    var was_covering = false;
-    var is_covering = false;
-    {
-        const mark_write = tracy.Zone.begin(.{ .src = @src(), .name = "mark_write" });
-        defer mark_write.end();
-        const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
-        try bucket.lock.lock(io);
-        defer bucket.lock.unlock(io);
-        var state: NodeData = bucket.hash_map.get(chunk_pos) orelse .{ .structures_generated = generate_structures };
-
-        was_covering = state.isCovering();
-
-        state.is_active = true;
-        state.is_queued = false;
-        if (generate_structures) state.structures_generated = true;
-
-        is_covering = state.isCovering();
-        try bucket.hash_map.put(allocator, chunk_pos, state);
-    }
-
-    if (!was_covering and is_covering)
-        try self.markSubtree(io, allocator, chunk_pos, true, view.highest_level);
 }
 
-fn clearQueuedFlag(self: *@This(), io: std.Io, chunk_pos: World.ChunkPos) void {
-    const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
-    // getPtr drops its lock before returning, so the write needs its own.
-    bucket.lock.lockUncancelable(io);
-    defer bucket.lock.unlock(io);
-    if (bucket.hash_map.getPtr(chunk_pos)) |state| state.is_queued = false;
-}
-
-fn addChunkToRenderAsync(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, gen_structures: bool, view: ViewSnapshot) !void {
-    {
-        const bucket = self.loaded_or_meshed.getBucket(chunk_pos);
-        try bucket.lock.lock(io);
-        defer bucket.lock.unlock(io);
-        const entry = try bucket.hash_map.getOrPutValue(allocator, chunk_pos, .{ .structures_generated = gen_structures });
-        entry.value_ptr.is_queued = true;
-    }
-
-    self.groupAsync(io, addChunkToRender, .{ self, io, allocator, chunk_pos, gen_structures, view });
+fn remesh(game: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos) !void {
+    try game.streamer.completions.reserve(io, game.allocator, 1);
+    try game.streamChunk(io, allocator, .{ .pos = chunk_pos, .kind = .remesh });
 }
 
 fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
+    // Remesh even outside the keep set, or a lingering or detached mesh keeps showing pre-edit blocks; the streamer drops a mesh nothing needs.
+    // Levels outside the streamed range hold no meshes, and edits propagate past them.
+    const settings = game.snapshotView(io).settings;
+    if (chunk_pos.level < settings.lowest_level or chunk_pos.level > settings.highest_level) return;
     // A transient remesh failure leaves the edited chunk active but unmessed until the
     // next edit; log it and continue. A storage-level Unrecoverable still aborts.
-    game.addChunkToRender(io, allocator, chunk_pos, false, game.snapshotView(io)) catch |err| switch (err) {
+    remesh(game, io, allocator, chunk_pos) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.Unrecoverable => {
             std.log.err("remesh after edit failed at {any}: {any}", .{ chunk_pos, err });
@@ -1168,160 +966,6 @@ fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.Chu
         },
         else => |e| std.log.err("remesh after edit failed at {any}: {any}", .{ chunk_pos, e }),
     };
-}
-
-fn keepLoaded(lowest_level: ?i32, highest_level: ?i32, player_pos: @Vector(3, f64), chunk_pos: World.ChunkPos, inner_chunk_range: ?@Vector(2, u32), outer_chunk_range: ?@Vector(2, u32)) bool {
-    if (lowest_level) |l| if (chunk_pos.level < l) return false;
-    if (highest_level) |h| if (chunk_pos.level > h) return false;
-
-    // Derive the player chunk through the same integer path as the loader. A float divide can disagree at exact boundaries from pow dust.
-    const player_block: World.BlockPos = @intFromFloat(@floor(player_pos));
-    const player_chunk_pos: @Vector(3, f64) = World.ChunkPos.fromGlobalBlockPos(player_block, chunk_pos.level).position;
-    const chunk_center: @Vector(3, f64) = chunk_pos.position;
-
-    if (inner_chunk_range) |icr| {
-        const inner: @Vector(3, f64) = .{ icr[0], icr[1], icr[0] };
-        if (isInside(player_chunk_pos, chunk_center, inner)) return false;
-    }
-
-    if (outer_chunk_range) |ocr| {
-        const outer: @Vector(3, f64) = .{ ocr[0], ocr[1], ocr[0] };
-        if (isOutside(player_chunk_pos, chunk_center, outer)) return false;
-    }
-    return true;
-}
-
-fn isInside(point: @Vector(3, f64), center: @Vector(3, f64), radius: @Vector(3, f64)) bool {
-    return @reduce(.And, point > (center - radius)) and @reduce(.And, point < center + radius);
-}
-
-fn isOutside(point: @Vector(3, f64), center: @Vector(3, f64), radius: @Vector(3, f64)) bool {
-    return @reduce(.Or, point < center - radius) or @reduce(.Or, point > center + radius);
-}
-
-fn loadChunks(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    const z = tracy.Zone.begin(.{ .src = @src(), .name = "addChunksToLoad" });
-    defer z.end();
-    defer self.chunk_load_is_running.store(false, .seq_cst);
-    var levels = self.getLevels(io);
-    var level = levels.lowest;
-    var group: std.Io.Group = .init;
-    defer group.cancel(io);
-    var error_int: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(@intFromError(error.NoError));
-    while (level <= levels.highest) : (level += 1) {
-        levels = self.getLevels(io);
-        group.async(io, loadChunksSpiral, .{ self, io, allocator, level, &error_int });
-    }
-    try group.await(io);
-
-    const load_error = @errorFromInt(error_int.swap(@intFromError(error.NoError), .seq_cst));
-    switch (load_error) {
-        error.NoError => {},
-        error.Canceled => unreachable,
-        else => |e| return e,
-    }
-}
-
-/// Walks one level top to bottom in a spiral around the player chunk.
-fn loadChunksSpiral(game: *@This(), io: std.Io, allocator: std.mem.Allocator, level: i32, error_int: *std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror)))) Io.Cancelable!void {
-    const spiral_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "loadChunksSpiral" });
-    defer spiral_zone.end();
-    var view = game.snapshotView(io);
-    var player_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(view.player_pos), level);
-    var amount_tested: u64 = 0;
-    var spiral_pos: [2]i32 = .{ 0, 0 };
-    var segment_index: usize = 0;
-
-    // One snapshot per segment keeps the filter and its tasks on the same center and radii. A player-chunk crossing resets the spiral.
-    while (true) : (view = game.snapshotView(io)) {
-        if (!game.running.load(.unordered)) return;
-        const fresh_chunk_pos = World.ChunkPos.fromGlobalBlockPos(@floor(view.player_pos), level);
-        if (!std.meta.eql(player_chunk_pos, fresh_chunk_pos)) {
-            player_chunk_pos = fresh_chunk_pos;
-            segment_index = 0;
-            spiral_pos = .{ 0, 0 };
-            amount_tested = 0;
-        }
-        const outer_radius = view.render_distance;
-        if (amount_tested >= (2 * outer_radius[0] + 1) * (2 * outer_radius[0] + 1)) break;
-
-        try io.checkCancel();
-
-        const inner_radius = view.innerGenRadius(level);
-        const segment_end = spiralSegmentEnd(spiral_pos, &segment_index);
-        var line_step: i32 = 0;
-        while (advanceSpiralLine(&spiral_pos, &line_step, segment_end)) {
-            if (!game.running.load(.unordered)) return;
-            amount_tested += 1;
-
-            var y: i32 = -@as(i32, @intCast(outer_radius[1]));
-            while (y <= outer_radius[1]) : (y += 1) {
-                const chunk_pos: World.ChunkPos = .{ .position = [3]i32{ spiral_pos[0] + player_chunk_pos.position[0], y + player_chunk_pos.position[1], spiral_pos[1] + player_chunk_pos.position[2] }, .level = level };
-
-                if (!keepLoaded(null, null, view.player_pos, chunk_pos, inner_radius, outer_radius)) continue;
-
-                const needs_load = if (game.loaded_or_meshed.get(io, chunk_pos)) |node_data|
-                    (!node_data.is_active and !node_data.is_queued) or !node_data.structures_generated
-                else
-                    true;
-
-                if (needs_load) {
-                    game.addChunkToRenderAsync(io, allocator, chunk_pos, true, view) catch |err| switch (err) {
-                        error.Canceled => return error.Canceled,
-                        else => |e| error_int.store(@intFromError(e), .unordered),
-                    };
-                }
-            }
-        }
-    }
-}
-
-fn unloadChunkMeshes(self: *@This(), io: std.Io) !void {
-    const unload = tracy.Zone.begin(.{ .src = @src(), .name = "UnloadMeshes" });
-    defer unload.end();
-    defer self.mesh_unload_is_running.store(false, .seq_cst);
-
-    const view = self.snapshotView(io);
-
-    const ChunkCollector = struct {
-        game: *Game,
-        io: std.Io,
-        view: ViewSnapshot,
-        chunks: u64 = 0,
-        err: ?anyerror = null,
-
-        pub fn callback(userdata: *anyopaque, chunk_pos: World.ChunkPos) error{Failed}!void {
-            const ctx: *@This() = @ptrCast(@alignCast(userdata));
-            ctx.chunks += 1;
-            _ = ctx.game.removeChunkIfUnloadable(ctx.io, chunk_pos, ctx.view) catch |err| {
-                ctx.err = err;
-                return error.Failed;
-            };
-        }
-    };
-    var ctx = ChunkCollector{
-        .game = self,
-        .io = io,
-        .view = view,
-    };
-
-    self.renderer.forEachMesh(io, &ctx, ChunkCollector.callback) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        error.Failed => if (ctx.err) |e| return e,
-    };
-    self.debug_menu.meshes.store(ctx.chunks, .unordered);
-
-    var it = self.loaded_or_meshed.iterator();
-    defer it.deinit(io);
-    while (try it.next(io)) |entry| {
-        const key = entry.key_ptr.*;
-        if (view.keepChunkLoaded(key)) continue;
-        if (!entry.value_ptr.is_active and !entry.value_ptr.is_queued) continue;
-
-        it.pause(io);
-        if (self.canUnloadMeshView(io, view, key)) try self.tryRemoveChunkFromLoaded(io, self.allocator, key, view);
-        try it.unpause(io);
-    }
 }
 
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_pos: @Vector(3, f64)) !void {
@@ -1373,25 +1017,4 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
         _ = game.player.main_inventory.set(io, 0, block_slots + @as(u32, @intCast(i)), .{ .item_type = item_type, .amount = 1 });
     }
     game.renderer.updateCameraDirection(game.player.viewDirection(io));
-}
-
-fn spiralSegmentEnd(start: [2]i32, segment_index: *usize) [2]i32 {
-    const directions: [4][2]i32 = .{ .{ 0, 1 }, .{ 1, 0 }, .{ 0, -1 }, .{ -1, 0 } };
-    const segment_length: i32 = @intCast(segment_index.* / 2 + 1);
-    const direction = directions[segment_index.* % 4];
-    segment_index.* += 1;
-    return .{ start[0] + direction[0] * segment_length, start[1] + direction[1] * segment_length };
-}
-
-fn advanceSpiralLine(position: *[2]i32, step: *i32, target: [2]i32) bool {
-    defer step.* += 1;
-    if (step.* == 0) return true;
-    if (position[0] == target[0] and position[1] == target[1]) return false;
-    std.debug.assert(position[0] == target[0] or position[1] == target[1]);
-    if (position[0] == target[0]) {
-        position[1] += if (position[1] < target[1]) 1 else -1;
-    } else {
-        position[0] += if (position[0] < target[0]) 1 else -1;
-    }
-    return !(position[0] == target[0] and position[1] == target[1]);
 }

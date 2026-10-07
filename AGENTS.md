@@ -126,7 +126,7 @@ Anything that can block or introduce nondeterminism takes an `Io` instance.
 ## Footguns
 
 - **`std.atomic.Value(i128)` fails codegen in Debug** (seen on 0.16). Never pad non-power-of-2 atomics (i96 timestamps) to i128; lock the plain integer or truncate to i64.
-- **`@bitCast` of a nested array inside a generic type's function segfaults the 0.17 compiler in ReleaseFast** (Debug and ReleaseSafe compile). Reinterpret with `std.mem.bytesAsValue(T, std.mem.asBytes(&x)).*`, or take the target shape as the parameter type so the caller's `@bitCast` does the work.
+- **`@bitCast` to or from a nested array inside any generic function segfaults the 0.17 compiler in ReleaseFast and ReleaseSafe** (Debug compiles, so a Debug-only gate misses it). This includes a call site like `Interp.init(@bitCast(flat))` inside a `comptime`-parameterized function. Always reinterpret with `std.mem.bytesAsValue(T, std.mem.asBytes(&x)).*`.
 - **Never `@splat` a runtime bool into a bool vector** (silent lane garbage in Debug on 0.16). Splat a comptime bool or build the mask from a vector comparison; verify against a scalar reference.
 - **Dead code hides bugs:** uninstantiated functions are never analyzed, so a removed API can survive in an uncalled function.
 - **`@typeInfo` has no `.slice`:** slices are `.pointer` with `size == .slice`.
@@ -220,6 +220,13 @@ The upload drain (`submitBatch` + `retireCompletedUploads` + `processRetired`) r
 The cull shader reads `scene.persistent.buffer` every frame, so CPU writes to `persistent.mapped` (`writeCandidate`/`markInactive`/`releaseCandidate`/`growPersistentCandidates`) are only safe when no GPU command can be reading it. `beginFrame`'s timeline throttle (waits `frame_number - max_frames_in_flight + 1`) proves the graphics queue idle, so the frame thread's window between `beginFrame` and the first recorded cull is the only sound place to touch candidates — a background task cannot self-gate this. The drain task therefore only _records_ cheap `Publication` ops (`retire`/`remove`/`free_index`) under `retire_mutex`; `publishPending` (frame thread) applies them. Worker-thread flush drains (`flushUploads`, full-queue `pushPendingUpload`) record the same way. Teardown cancels + awaits the drain future before draining queues.
 
 `publishPending` must NOT hold `retire_mutex` while applying (the drain task can hold it for a whole pass). Swap the whole `ArrayList` out under the mutex (`std.mem.swap` with a frame-private scratch) and apply lock-free. Stealing a _slice_ is a memory-safety bug: `clearRetainingCapacity` keeps the backing buffer, so the drain task's next appends overwrite it mid-iteration. `retired_meshes` has its own `retired_meshes_mutex` because apply-step appends race the drain's `processRetired` sweep. Lock order: `retire_mutex` → `retired_meshes_mutex`.
+
+## Chunk streaming (ChunkStreamer + ChunkClipmap)
+
+- **Single owner:** only `ChunkStreamer.pass` (one background task, never overlapping) reads or writes the clipmap, so cells are plain values. Load and remesh tasks report through `completions`; never read clipmap state from a task or the editor callback.
+- **Reserve before dispatch:** every task's completion slot is reserved (`completions.reserve`) before the task starts, so its `defer push` cannot fail, even during cancel. A dispatched task must push exactly once.
+- **Evict before claim:** `recenter` evicts every level's leaving slab under the old centers first, so coverage bubbles through the windows it was counted in, then moves the centers. A window position's parent always lies in the parent window, so `setCoverage` unwraps parent lookups; the streamer fuzz test panics if that breaks.
+- **Work scales with the change:** recentering walks the rows of the old window or keep box but only visits `window(old) \ window(new)` and `keep(new) \ keep(old)`; only a settings change (debounced 300 ms) or a teleport touches the whole window. An active chunk evicted past the margin (`lingering_margin`) keeps its mesh in the `detached` set, which has no cells; `unloadDetached` hands it back to its slot if it re-enters the window, and otherwise drops it once an in-window ancestor is active or it is past `detached_reach`. A late load result for a detached position keeps its mesh.
 
 ## Entity update scheduler (EntityRegistry)
 

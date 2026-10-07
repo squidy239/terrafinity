@@ -28,12 +28,6 @@ const cull_shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, @embed
 const RenderBufferKey = union(enum) {
     @"opaque": ChunkPos,
     transparent: ChunkPos,
-
-    pub fn toPos(self: RenderBufferKey) ChunkPos {
-        return switch (self) {
-            inline .@"opaque", .transparent => |pos| pos,
-        };
-    }
 };
 
 const batch_size = 64;
@@ -846,17 +840,6 @@ fn processRetired(self: *ChunkRenderer, io: std.Io) !void {
             self.uploader.freeMesh(io, entry.mesh, current_graphics_val);
             _ = items.swapRemove(i);
         }
-    }
-}
-
-pub fn forEachMesh(self: *ChunkRenderer, io: std.Io, callback_user_data: *anyopaque, callback: *const fn (*anyopaque, ChunkPos) error{Failed}!void) (std.Io.Cancelable || error{Failed})!void {
-    var it = self.meshes.iterator();
-    defer it.deinit(io);
-    while (try it.next(io)) |entry| {
-        const chunk_pos = entry.key_ptr.*.toPos();
-        it.pause(io);
-        try callback(callback_user_data, chunk_pos);
-        try it.unpause(io);
     }
 }
 

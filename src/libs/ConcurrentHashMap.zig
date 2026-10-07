@@ -76,7 +76,6 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             map: *Map,
             bkt_index: usize = 0,
             bkt_iter: ?Bkt.Map.Iterator = null,
-            paused: bool = false,
 
             pub fn next(it: *Iterator, io: std.Io) !?Bkt.Map.Entry {
                 while (true) {
@@ -100,25 +99,8 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
                 }
             }
 
-            /// Pauses the iterator. Iteration may not be complete or ordered if the map
-            /// is modified while paused. Should be followed by unpause.
-            pub fn pause(it: *Iterator, io: std.Io) void {
-                // Releasing a lock this iterator does not hold wedges the bucket.
-                if (it.paused or it.bkt_iter == null) return;
-                it.map.buckets[it.bkt_index].lock.unlockShared(io);
-                it.paused = true;
-            }
-
-            pub fn unpause(it: *Iterator, io: std.Io) !void {
-                if (!it.paused) return;
-                try it.map.buckets[it.bkt_index].lock.lockShared(io);
-                it.paused = false;
-            }
-
             pub fn deinit(it: *Iterator, io: std.Io) void {
-                if (it.bkt_iter != null) {
-                    if (!it.paused) it.map.buckets[it.bkt_index].lock.unlockShared(io);
-                }
+                if (it.bkt_iter != null) it.map.buckets[it.bkt_index].lock.unlockShared(io);
                 it.* = undefined;
             }
         };
