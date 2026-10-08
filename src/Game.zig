@@ -34,7 +34,7 @@ player: *EntityTypes.Player,
 player_entity: *Entity,
 vulkan_renderer: Renderer.Vulkan,
 renderer: Renderer,
-generator: ?generator_loader.GeneratorInstance,
+generator: generator_loader.GeneratorInstance,
 world_storage: World.WorldStorage,
 spawn: EntityRegistry.SpawnConfig,
 game_arena: std.heap.ArenaAllocator,
@@ -68,22 +68,12 @@ deferred_error: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(
 
 options: *Options,
 options_lock: *std.Io.RwLock,
-running: std.atomic.Value(bool),
-/// True when `handleButtonActions` ran this frame; otherwise the frame zeroes stale movement.
-input_handled: bool = false,
 
 last_frametime: std.Io.Timestamp,
 
 debug_menu: struct {
-    fps: std.atomic.Value(f32) = .init(0),
+    fps: f32 = 0,
     meshes: std.atomic.Value(u64) = .init(0),
-    entities: std.atomic.Value(u64) = .init(0),
-    opaque_drawn: std.atomic.Value(u32) = .init(0),
-    transparent_drawn: std.atomic.Value(u32) = .init(0),
-    occluded: std.atomic.Value(u32) = .init(0),
-    frustum_culled: std.atomic.Value(u32) = .init(0),
-    opaque_faces: std.atomic.Value(u64) = .init(0),
-    transparent_faces: std.atomic.Value(u64) = .init(0),
 } = .{},
 
 pub const Options = struct {
@@ -209,11 +199,10 @@ pub fn init(
         .options = game_options,
         .world_path = owned_world_path,
         .options_lock = game_options_lock,
-        .running = .init(true),
         .allocator = undefined,
         .vulkan_renderer = undefined,
         .renderer = undefined,
-        .generator = null,
+        .generator = undefined,
         .world_storage = undefined,
         .spawn = undefined,
         .world = undefined,
@@ -232,7 +221,7 @@ pub fn init(
     const arena = game.game_arena.allocator();
     errdefer game.game_arena.deinit();
 
-    var world_options = WorldOptions.fromWorldFolder(folder, io, arena) catch |err| switch (err) {
+    const world_options = WorldOptions.fromWorldFolder(folder, io, arena) catch |err| switch (err) {
         error.FileNotFound => WorldOptions.default,
         else => return err,
     };
@@ -264,7 +253,7 @@ pub fn init(
         .source = generator_source,
         .config_dir = config_dir,
     };
-    try game.generator.?.saveConfig(io);
+    try game.generator.saveConfig(io);
 
     const storage_path = try std.Io.Dir.path.joinZ(game.allocator, &.{ folder, "storage" });
     {
@@ -282,7 +271,7 @@ pub fn init(
         .chunks = try .init(allocator, chunk_cache_capacity, .{ .name = "chunk cache" }),
         .grids = try .init(allocator, chunk_grid_capacity, .{ .name = "grid cache" }),
         .config = world_options.world_config,
-        .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.?.source },
+        .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.source },
         .edit_callback = .{
             .function = editorCallback,
             .context = @ptrCast(game),
@@ -296,7 +285,7 @@ pub fn init(
     errdefer game.entity_registry.deinit(io, game.allocator, &game.world);
 
     game.spawn = world_options.spawn;
-    const spawn_pos = try game.resolveSpawnPos(io, allocator, folder, &world_options);
+    const spawn_pos = try game.resolveSpawnPos(io, allocator);
     try game.spawnPlayer(io, allocator, spawn_pos);
 }
 
@@ -368,7 +357,7 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
 
 /// Runs one propose-plus-resolve batch for both spawn phases. Abstention fails hard because no fallback spawn exists without a radius bound.
 fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, center: [3]f64, radius: f64, attempts: u32, phase: u8) !?@Vector(3, f64) {
-    const generator = game.generator orelse return error.GeneratorNotFound;
+    const generator = game.generator;
     for (0..spawn_rounds) |round| {
         var nonce: u64 = undefined;
         io.random(std.mem.asBytes(&nonce));
@@ -391,12 +380,17 @@ fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, cent
 pub fn resetSpawn(self: *@This(), io: std.Io) !void {
     self.spawn.pos = .{ 0, 0, 0 };
     self.spawn.found = false;
+    try self.saveSpawn(io);
+}
+
+/// `spawn` is the only copy after init, so this is its only save path.
+fn saveSpawn(self: *@This(), io: std.Io) !void {
     var world_folder = try std.Io.Dir.cwd().openDir(io, self.world_path, .{});
     defer world_folder.close(io);
     try utils.saveZon(io, world_folder, "config/Spawn.zon", self.spawn);
 }
 
-fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, folder: []const u8, world_options: *WorldOptions) !@Vector(3, f64) {
+fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !@Vector(3, f64) {
     if (game.spawn.found) {
         // Same radius on retry: growing it would abandon the island.
         if (try game.trySpawnRounds(io, allocator, game.spawn.pos, @floatFromInt(game.spawn.range), spawn_phase2_attempts, 2)) |pos| return pos;
@@ -408,8 +402,7 @@ fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, fol
         std.log.info("spawn phase 1 accepted {d:.1}, {d:.1}, {d:.1}", .{ pos[0], pos[1], pos[2] });
         game.spawn.pos = pos;
         game.spawn.found = true;
-        world_options.spawn = game.spawn;
-        try world_options.save(io, folder);
+        try game.saveSpawn(io);
         return pos;
     }
     std.log.err("spawn phase 1 failed: all tested spawn locations blocked around {d:.1}, {d:.1}, {d:.1}", .{ game.spawn.center[0], game.spawn.center[1], game.spawn.center[2] });
@@ -417,8 +410,6 @@ fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, fol
 }
 
 fn stopBackgroundWork(self: *@This(), io: std.Io) void {
-    self.running.store(false, .unordered);
-
     cancelFuture(io, &self.save_future);
     cancelFuture(io, &self.stream_future);
     cancelFuture(io, &self.entity_drain_future);
@@ -433,7 +424,7 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.player_entity.release();
     self.entity_registry.deinit(io, self.allocator, &self.world);
     self.world.deinit(io, self.allocator);
-    if (self.generator) |*generator| generator.deinit();
+    self.generator.deinit();
     self.streamer.deinit(self.allocator);
     self.allocator.free(self.world_path);
 
@@ -457,21 +448,13 @@ pub fn recreateWorld(
     const world_path = allocator.dupe(u8, self.world_path) catch return error.RecreatePathAllocationFailed;
     defer allocator.free(world_path);
 
-    if (self.generator) |*generator| {
-        generator.generator.api.config_set_seeds(&io, generator.config);
-        generator.saveConfig(io) catch return error.RecreateConfigSaveFailed;
-    }
+    self.generator.generator.api.config_set_seeds(&io, self.generator.config);
+    self.generator.saveConfig(io) catch return error.RecreateConfigSaveFailed;
 
     self.stopBackgroundWork(io);
     // A full save is required before clear(): a skipped shard would be destroyed unsaved.
-    self.world.saveAll(io) catch {
-        self.running.store(true, .unordered);
-        return error.RecreateChunkSaveFailed;
-    };
-    self.world_storage.clear() catch {
-        self.running.store(true, .unordered);
-        return error.RecreateStorageClearFailed;
-    };
+    self.world.saveAll(io) catch return error.RecreateChunkSaveFailed;
+    self.world_storage.clear() catch return error.RecreateStorageClearFailed;
 
     self.deinit(io);
     try self.init(io, allocator, game_options, options_lock, world_path, vk_ctx, generators);
@@ -495,7 +478,8 @@ fn cancelFuture(io: std.Io, future: anytype) void {
     }
 }
 
-pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx: Renderer.FrameDrawContext, viewport: @Vector(2, u32)) !void {
+/// `actions` is null while a menu takes gameplay input.
+pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx: Renderer.FrameDrawContext, viewport: @Vector(2, u32), actions: ?*const Key.ActionSet) !void {
     const frame_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "frame" });
     defer frame_zone.end();
     const now: std.Io.Timestamp = .now(io, .awake);
@@ -503,39 +487,33 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     self.last_frametime = now;
     const frame_ns = @max(frame_time.nanoseconds, 1);
     const current_fps: f32 = std.time.ns_per_s / @as(f32, @floatFromInt(frame_ns));
-    const fps = self.debug_menu.fps.load(.unordered);
-    self.debug_menu.fps.store(std.math.lerp(fps, current_fps, 0.01), .unordered);
+    self.debug_menu.fps = std.math.lerp(self.debug_menu.fps, current_fps, 0.01);
+
+    // Apply any tuning edits before the body integrates this frame.
+    const tuning = self.playerTuning(io);
+    self.player.applyTuning(tuning);
+    if (actions) |held| {
+        try self.handleButtonActions(io, held, tuning, @intCast(frame_ns));
+    } else {
+        // No movement step replaced the velocity this frame; zero the stale drift
+        // (Survival keeps Y so gravity still pulls).
+        const body = &self.player.body;
+        body.velocity = if (self.player.game_mode == .Survival) @Vector(3, f64){ 0, body.velocity[1], 0 } else @as(@Vector(3, f64), @splat(0));
+    }
 
     const asyncs: tracy.Zone = .begin(.{ .src = @src(), .name = "asyncs" });
 
     try restartFutures(self, io);
     try self.startStreamPass(io, allocator);
     try startEntityDrain(self, io, allocator);
-    // Apply any tuning edits before the body integrates this frame.
-    self.player.applyTuning(self.playerTuning(io));
-    // A menu gates gameplay input off, so no movement step replaced the velocity
-    // this frame; zero the stale drift (Survival keeps Y so gravity still pulls).
-    if (!self.input_handled) {
-        const body = &self.player.body;
-        body.velocity = if (self.player.game_mode == .Survival) @Vector(3, f64){ 0, body.velocity[1], 0 } else @as(@Vector(3, f64), @splat(0));
-    }
-    self.input_handled = false;
     // The player is updated synchronously every frame so the camera never waits
     // on the background drain.
     try self.updatePlayer(io, allocator, EntityRegistry.nowNs(io));
     self.publishPlayerBlock(io);
     asyncs.end();
-    self.debug_menu.entities.store(self.entity_registry.count(), .unordered);
     const player_pos = self.player.body.pos;
 
     try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos);
-
-    self.debug_menu.opaque_drawn.store(self.vulkan_renderer.frame_stats.opaque_drawn, .unordered);
-    self.debug_menu.transparent_drawn.store(self.vulkan_renderer.frame_stats.transparent_drawn, .unordered);
-    self.debug_menu.occluded.store(self.vulkan_renderer.frame_stats.hiz_occluded, .unordered);
-    self.debug_menu.frustum_culled.store(self.vulkan_renderer.frame_stats.frustum_culled, .unordered);
-    self.debug_menu.opaque_faces.store(self.vulkan_renderer.frame_stats.opaque_faces, .unordered);
-    self.debug_menu.transparent_faces.store(self.vulkan_renderer.frame_stats.transparent_faces, .unordered);
 
     try self.handleErrors();
 }
@@ -556,7 +534,6 @@ const stream_poll_ms = 16;
 /// A pass is short-lived, so it never holds a worker the chunk loads need.
 fn startStreamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     if (self.stream_is_running.load(.seq_cst)) return;
-    if (!self.running.load(.unordered)) return;
     const now: std.Io.Timestamp = .now(io, .awake);
     const due = self.last_stream.durationTo(now).toMilliseconds() >= stream_poll_ms;
     if (!due and !self.streamer.completions.pending.load(.acquire)) return;
@@ -635,8 +612,6 @@ fn updateEntities(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
 /// skips frames instead of overlapping.
 fn startEntityDrain(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     if (self.entity_update_is_running.load(.seq_cst)) return;
-    // Never spawn into teardown; stopBackgroundWork owns shutdown from here.
-    if (!self.running.load(.unordered)) return;
     try spawnTask(io, &self.entity_update_is_running, &self.entity_drain_future, updateEntities, .{ self, io, allocator });
 }
 
@@ -696,15 +671,20 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     }
 }
 
-pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet) !void {
+fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet, tuning: EntityTypes.Player.Tuning, elapsed_ns: u64) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleButtonActions" });
     defer z.end();
-    self.input_handled = true;
     switch (self.player.game_mode) {
         .Creative, .Spectator => self.flyMove(actions),
-        .Survival => try self.walkMove(io, actions),
+        .Survival => try self.player.walk(io, self.allocator, &self.world, .{
+            .wish = wishDirectionHorizontal(self.player.view_direction, actions),
+            .sprint = actions.contains(.sprint),
+            .jump = actions.contains(.up),
+            .elapsed_ns = elapsed_ns,
+            .tuning = tuning,
+        }),
     }
-    self.setSelectedSlot(actions);
+    self.player.navigateHotbar(actions);
     if (actions.contains(.spawn_explosive)) self.spawnExplosive(io) catch |err|
         std.log.err("error spawning explosive: {any}", .{err});
     const item = self.player.selectedItem() orelse return;
@@ -720,22 +700,6 @@ pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSe
     groupAsync(self, io, itemAction, .{ self, io, item, use });
 }
 
-fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
-    const player = self.player;
-    const inventory = &player.main_inventory;
-    const first_hotbar = @backingInt(Key.Action.hotbar_key_0);
-    const hotbar_key_count = 10;
-    inline for (0..hotbar_key_count) |slot| {
-        if (actions.contains(@fromBackingInt(@intCast(first_hotbar + slot)))) player.selectSlot(player.selected_row, @intCast(slot));
-    }
-    const row = player.selected_row;
-    const col = player.selected_col;
-    if (actions.contains(.hotbar_left)) player.selectSlot(row, if (col == 0) inventory.width - 1 else col - 1);
-    if (actions.contains(.hotbar_right)) player.selectSlot(row, (col + 1) % inventory.width);
-    if (actions.contains(.hotbar_up) or actions.contains(.hotbar_scroll_up)) player.selectSlot(if (row == 0) inventory.height - 1 else row - 1, col);
-    if (actions.contains(.hotbar_down) or actions.contains(.hotbar_scroll_down)) player.selectSlot((row + 1) % inventory.height, col);
-}
-
 fn spawnExplosive(self: *@This(), io: std.Io) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnExplosive" });
     defer z.end();
@@ -745,7 +709,7 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
     const entity = try self.entity_registry.spawn(io, self.allocator, &self.world, EntityTypes.Explosive.init(
         pos,
         looking,
-        std.Io.Timestamp.now(io, .awake).toNanoseconds(),
+        EntityRegistry.nowNs(io),
     ), .{ .initial_delay_ms = 0 });
     entity.release();
 }
@@ -780,17 +744,6 @@ fn wishDirection(camera_front: @Vector(3, f32), actions: *const Key.ActionSet) @
 
 fn flyMove(self: *@This(), actions: *const Key.ActionSet) void {
     self.player.fly(wishDirection(self.getCameraFront(), actions));
-}
-
-fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
-    const now = std.Io.Timestamp.now(io, .awake);
-    try self.player.walk(io, self.allocator, &self.world, .{
-        .wish = wishDirectionHorizontal(self.player.view_direction, actions),
-        .sprint = actions.contains(.sprint),
-        .jump = actions.contains(.up),
-        .elapsed_ns = @intCast(@max(self.last_frametime.durationTo(now).nanoseconds, 0)),
-        .tuning = self.playerTuning(io),
-    });
 }
 
 /// Unit horizontal wish from yaw only, so looking up or down never scales walking.
@@ -900,7 +853,7 @@ fn meshChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos
             const zone_faces = tracy.Zone.begin(.{ .src = @src(), .name = "extract_faces" });
             defer zone_faces.end();
             inline for (&neighbor_faces, std.enums.values(Chunk.Encoding.FaceRotation)) |*face, rotation|
-                face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert(), true);
+                face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert());
         }
 
         const chunk_add = tracy.Zone.begin(.{ .src = @src(), .name = "chunk_add" });

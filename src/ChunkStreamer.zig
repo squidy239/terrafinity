@@ -14,13 +14,13 @@ const ChunkStreamer = @This();
 
 /// Extra chunks each window holds past the keep set, so a lingering mesh survives
 /// this much travel at its level before eviction detaches it.
-pub const lingering_margin = 2;
+const lingering_margin = 2;
 /// A detached mesh farther than this many window radii from the player is dropped
 /// even while nothing covers it yet, which bounds the set and clears teleports.
-pub const detached_reach = 2;
+const detached_reach = 2;
 /// Streaming settings must hold still this long before the clipmap is rebuilt,
 /// so dragging a slider rebuilds once, on release.
-pub const settings_debounce_ms = 300;
+const settings_debounce_ms = 300;
 
 current: ?Current = null,
 pending_settings: ?struct { settings: Settings, since: std.Io.Timestamp } = null,
@@ -36,8 +36,6 @@ detached: std.AutoHashMapUnmanaged(World.ChunkPos, void) = .empty,
 loads_in_flight: std.AutoHashMapUnmanaged(World.ChunkPos, void) = .empty,
 /// Load candidates of the running pass.
 loads: std.ArrayList(World.ChunkPos) = .empty,
-/// Completions taken by the running pass.
-taken: std.ArrayList(Completion) = .empty,
 active_count: u64 = 0,
 last_unload: std.Io.Timestamp = .zero,
 
@@ -63,7 +61,7 @@ pub const Settings = struct {
     lod_overlap: i32,
 
     /// The chunks of `level` to keep loaded around the window `center`.
-    pub fn keepRegion(settings: Settings, level: i32, center: ChunkClipmap.Position) ChunkClipmap.Region {
+    fn keepRegion(settings: Settings, level: i32, center: ChunkClipmap.Position) ChunkClipmap.Region {
         const distance = settings.render_distance;
         const hole = settings.holeRadius(level);
         return .{ .center = center, .outer = horizontal(distance), .hole = horizontal(hole) };
@@ -93,7 +91,7 @@ pub const View = struct {
     }
 };
 
-pub const Kind = enum { load, remesh };
+const Kind = enum { load, remesh };
 
 pub const Request = struct {
     pos: World.ChunkPos,
@@ -112,6 +110,8 @@ pub const Completion = struct {
 pub const Completions = struct {
     mutex: std.Io.Mutex = .init,
     list: std.ArrayList(Completion) = .empty,
+    /// The pass's half of the double buffer, swapped with `list` by `take`.
+    taken: std.ArrayList(Completion) = .empty,
     /// Tasks whose completion is not pushed yet. `list` always has room for all of
     /// them, so a task can report from a `defer`, even while it is being canceled.
     in_flight: usize = 0,
@@ -127,13 +127,6 @@ pub const Completions = struct {
         completions.in_flight += count;
     }
 
-    /// Returns room reserved for tasks that were never dispatched.
-    fn release(completions: *Completions, io: std.Io, count: usize) void {
-        completions.mutex.lockUncancelable(io);
-        defer completions.mutex.unlock(io);
-        completions.in_flight -= count;
-    }
-
     pub fn push(completions: *Completions, io: std.Io, completion: Completion) void {
         completions.mutex.lockUncancelable(io);
         defer completions.mutex.unlock(io);
@@ -142,19 +135,21 @@ pub const Completions = struct {
         completions.pending.store(true, .release);
     }
 
-    /// Swaps every pushed completion into `out`, which must not be read concurrently.
-    fn take(completions: *Completions, io: std.Io, gpa: std.mem.Allocator, out: *std.ArrayList(Completion)) !void {
+    /// Returns every pushed completion, valid until the next `take`. Only the pass may call it.
+    fn take(completions: *Completions, io: std.Io, gpa: std.mem.Allocator) ![]const Completion {
         try completions.mutex.lock(io);
         defer completions.mutex.unlock(io);
-        out.clearRetainingCapacity();
-        try out.ensureTotalCapacity(gpa, completions.in_flight);
-        std.mem.swap(std.ArrayList(Completion), out, &completions.list);
+        completions.taken.clearRetainingCapacity();
+        try completions.taken.ensureTotalCapacity(gpa, completions.in_flight);
+        std.mem.swap(std.ArrayList(Completion), &completions.taken, &completions.list);
         completions.pending.store(false, .release);
+        return completions.taken.items;
     }
 
     fn deinit(completions: *Completions, gpa: std.mem.Allocator) void {
         std.debug.assert(completions.in_flight == 0);
         completions.list.deinit(gpa);
+        completions.taken.deinit(gpa);
     }
 };
 
@@ -166,7 +161,6 @@ pub fn deinit(streamer: *ChunkStreamer, gpa: std.mem.Allocator) void {
     streamer.detached.deinit(gpa);
     streamer.loads_in_flight.deinit(gpa);
     streamer.loads.deinit(gpa);
-    streamer.taken.deinit(gpa);
     streamer.* = undefined;
 }
 
@@ -252,8 +246,8 @@ fn rebuild(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, view: V
             streamer.setCoverage(pos, true);
             if (!keep.contains(pos.position)) try streamer.addLingering(gpa, pos, state);
         }
-        const load: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = level_index, .action = .load };
-        try keep.forEachDifference(null, load, @TypeOf(load).visit);
+        const load: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = level_index };
+        try keep.forEachDifference(null, load, @TypeOf(load).load);
     }
 }
 
@@ -269,8 +263,8 @@ fn recenter(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, player
     for (clipmap.levels, 0..) |*lvl, index| {
         const level_index = clipmap.levelIndex(index);
         const new_window = clipmap.window(ChunkClipmap.centerFor(player_block, level_index));
-        const evict: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = level_index, .action = .evict };
-        try clipmap.window(lvl.center).forEachDifference(new_window, evict, @TypeOf(evict).visit);
+        const evict: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = level_index };
+        try clipmap.window(lvl.center).forEachDifference(new_window, evict, @TypeOf(evict).evict);
     }
 
     for (clipmap.levels, 0..) |*lvl, index| {
@@ -278,10 +272,9 @@ fn recenter(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, player
         const old_keep = current.settings.keepRegion(level_index, lvl.center);
         lvl.center = ChunkClipmap.centerFor(player_block, level_index);
         const new_keep = current.settings.keepRegion(level_index, lvl.center);
-        var visitor: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = level_index, .action = .leave };
-        try old_keep.forEachDifference(new_keep, visitor, @TypeOf(visitor).visit);
-        visitor.action = .load;
-        try new_keep.forEachDifference(old_keep, visitor, @TypeOf(visitor).visit);
+        const visitor: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = level_index };
+        try old_keep.forEachDifference(new_keep, visitor, @TypeOf(visitor).leave);
+        try new_keep.forEachDifference(old_keep, visitor, @TypeOf(visitor).load);
     }
 }
 
@@ -292,23 +285,24 @@ fn Visitor(comptime Host: type) type {
         gpa: std.mem.Allocator,
         host: Host,
         level: i32,
-        action: enum { evict, leave, load },
 
-        fn visit(visitor: @This(), position: ChunkClipmap.Position) !void {
+        fn load(visitor: @This(), position: ChunkClipmap.Position) !void {
+            try visitor.streamer.loads.append(visitor.gpa, .{ .level = visitor.level, .position = position });
+        }
+
+        fn evict(visitor: @This(), position: ChunkClipmap.Position) !void {
             const streamer = visitor.streamer;
             const pos: World.ChunkPos = .{ .level = visitor.level, .position = position };
-            if (visitor.action == .load) return streamer.loads.append(visitor.gpa, pos);
-            const clipmap = &streamer.current.?.clipmap;
-            switch (visitor.action) {
-                .evict => {
-                    const state = clipmap.get(pos).?;
-                    if (state.isCovering()) streamer.setCoverage(pos, false);
-                    try streamer.detach(visitor.io, visitor.gpa, pos, state.*, visitor.host);
-                    state.* = .{};
-                },
-                .leave => if (clipmap.get(pos)) |state| if (state.active) try streamer.addLingering(visitor.gpa, pos, state),
-                .load => unreachable,
-            }
+            const state = streamer.current.?.clipmap.get(pos).?;
+            if (state.isCovering()) streamer.setCoverage(pos, false);
+            try streamer.detach(visitor.io, visitor.gpa, pos, state.*, visitor.host);
+            state.* = .{};
+        }
+
+        fn leave(visitor: @This(), position: ChunkClipmap.Position) !void {
+            const pos: World.ChunkPos = .{ .level = visitor.level, .position = position };
+            const state = visitor.streamer.current.?.clipmap.get(pos) orelse return;
+            if (state.active) try visitor.streamer.addLingering(visitor.gpa, pos, state);
         }
     };
 }
@@ -343,10 +337,10 @@ fn addLingeringAssumeCapacity(streamer: *ChunkStreamer, pos: World.ChunkPos, sta
 
 /// Applies every finished task. The caller runs passes cancel-protected and treats any error as fatal, so a partly applied batch is never resumed.
 fn applyCompletions(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, host: anytype) !void {
-    try streamer.completions.take(io, gpa, &streamer.taken);
-    try streamer.lingering.ensureUnusedCapacity(gpa, streamer.taken.items.len);
-    try streamer.loads.ensureUnusedCapacity(gpa, streamer.taken.items.len);
-    for (streamer.taken.items) |completion| try streamer.apply(io, completion, host);
+    const taken = try streamer.completions.take(io, gpa);
+    try streamer.lingering.ensureUnusedCapacity(gpa, taken.len);
+    try streamer.loads.ensureUnusedCapacity(gpa, taken.len);
+    for (taken) |completion| try streamer.apply(io, completion, host);
 }
 
 /// Applies one task result. Capacity for one lingering and one load entry is reserved by the caller.
@@ -417,27 +411,25 @@ fn dispatchLoads(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, h
     const current = &streamer.current.?;
     defer streamer.loads.clearRetainingCapacity();
 
-    var wanted: usize = 0;
+    // Candidates can repeat; the total order makes repeats adjacent.
+    std.mem.sort(World.ChunkPos, streamer.loads.items, &current.clipmap, loadsFirst);
+    var unique: usize = 0;
+    var previous: ?World.ChunkPos = null;
     for (streamer.loads.items) |pos| {
+        if (previous) |prev| if (!loadsFirst(&current.clipmap, prev, pos)) continue;
+        previous = pos;
         const state = current.clipmap.get(pos) orelse continue;
         if (state.active or !current.keeps(pos) or streamer.loads_in_flight.contains(pos)) continue;
-        streamer.loads.items[wanted] = pos;
-        wanted += 1;
-    }
-    if (wanted == 0) return;
-
-    try streamer.loads_in_flight.ensureUnusedCapacity(gpa, @intCast(wanted));
-    try streamer.completions.reserve(io, gpa, wanted);
-    // Candidates can repeat; marking them in flight here keeps the dispatchers off shared state.
-    var unique: usize = 0;
-    for (streamer.loads.items[0..wanted]) |pos| {
-        if (streamer.loads_in_flight.getOrPutAssumeCapacity(pos).found_existing) continue;
         streamer.loads.items[unique] = pos;
         unique += 1;
     }
-    streamer.completions.release(io, wanted - unique);
+    if (unique == 0) return;
+
+    try streamer.loads_in_flight.ensureUnusedCapacity(gpa, @intCast(unique));
+    try streamer.completions.reserve(io, gpa, unique);
+    // Marking loads in flight here keeps the dispatchers off shared state.
     const candidates = streamer.loads.items[0..unique];
-    std.mem.sort(World.ChunkPos, candidates, &current.clipmap, loadsFirst);
+    for (candidates) |pos| streamer.loads_in_flight.putAssumeCapacityNoClobber(pos, {});
 
     // One dispatcher per level: when the pool is full, `async` runs a load inline on
     // its dispatcher, and the other levels keep spawning on the threads that free up.
@@ -464,10 +456,14 @@ fn dispatchLevel(comptime Host: type) fn (std.Io, Host, []const World.ChunkPos, 
     }.run;
 }
 
-/// Orders by level, then ring around the player.
+/// Orders by level, then ring around the player, then position, so only equal positions tie.
 fn loadsFirst(clipmap: *const ChunkClipmap, a: World.ChunkPos, b: World.ChunkPos) bool {
     if (a.level != b.level) return a.level < b.level;
-    return ring(clipmap, a) < ring(clipmap, b);
+    const a_ring = ring(clipmap, a);
+    const b_ring = ring(clipmap, b);
+    if (a_ring != b_ring) return a_ring < b_ring;
+    inline for (0..3) |axis| if (a.position[axis] != b.position[axis]) return a.position[axis] < b.position[axis];
+    return false;
 }
 
 fn ring(clipmap: *const ChunkClipmap, pos: World.ChunkPos) u32 {

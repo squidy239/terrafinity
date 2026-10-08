@@ -289,7 +289,7 @@ pub fn saveAll(self: *World, io: std.Io) !void {
 
     var failed = std.atomic.Value(bool).init(false);
     for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
-        group.async(io, saveShard, .{ self, shard, lock, io, true, &failed });
+        group.async(io, saveShard, .{ self, shard, lock, io, .{ .blocking = &failed } });
     }
     try group.await(io);
     if (failed.load(.seq_cst)) return error.SaveFailed;
@@ -306,7 +306,7 @@ pub fn trySaveAll(self: *World, io: std.Io) !void {
     defer group.cancel(io);
 
     for (&self.chunks.shards, &self.chunks.shard_locks) |*shard, *lock| {
-        group.async(io, saveShard, .{ self, shard, lock, io, false, null });
+        group.async(io, saveShard, .{ self, shard, lock, io, .best_effort });
     }
     try group.await(io);
 }
@@ -322,14 +322,13 @@ fn saveShard(
     shard: *ChunkMapType.Shard,
     lock: *std.Io.Mutex,
     io: std.Io,
-    blocking: bool,
-    failed: ?*std.atomic.Value(bool),
+    mode: union(enum) { blocking: *std.atomic.Value(bool), best_effort },
 ) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
     while (true) {
-        if (blocking) {
+        if (mode == .blocking) {
             lock.lockUncancelable(io);
         } else if (!lock.tryLock()) {
             return;
@@ -351,7 +350,7 @@ fn saveShard(
         var save_failed = false;
         var chunk_contended = false;
         for (window.items) |item| {
-            const locked = if (blocking) blk: {
+            const locked = if (mode == .blocking) blk: {
                 item.chunk.encoding_lock.lockSharedUncancelable(io);
                 break :blk true;
             } else item.chunk.encoding_lock.tryLockShared(io);
@@ -365,7 +364,7 @@ fn saveShard(
 
             self.save(io, item.chunk, item.pos) catch |err| {
                 save_failed = true;
-                if (failed) |f| f.store(true, .release);
+                if (mode == .blocking) mode.blocking.store(true, .release);
                 std.log.err("error saving chunk: {any}, {any}\n", .{ item.pos, err });
             };
             item.chunk.release();
@@ -434,11 +433,8 @@ pub const Editor = struct {
         }
     };
 
-    const EditErrorStruct = packed struct(u32) {
-        exists: bool = false,
-        err: @Int(.unsigned, @bitSizeOf(anyerror)) = undefined,
-        _: @Int(.unsigned, 32 - @bitSizeOf(anyerror) - 1) = undefined,
-    };
+    /// First task error as its error int; 0 is never a valid error int, so it means no error.
+    const ErrorStore = std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror)));
 
     pub inline fn placeBlock(self: *Editor, block: Block, pos: @Vector(3, i64), level: i32) !void {
         const chunk_pos: ChunkPos = .fromLocalBlockPos(pos, level);
@@ -496,24 +492,34 @@ pub const Editor = struct {
 
         var remesh_neighbors: std.AutoHashMap(ChunkPos, void) = .init(self.temp_allocator);
         defer remesh_neighbors.deinit();
-        var remesh_mutex: std.Io.Mutex = .init;
 
         var group: std.Io.Group = .init;
         defer group.cancel(io);
 
-        var err_store: std.atomic.Value(EditErrorStruct) = .init(.{});
+        var err_store: ErrorStore = .init(0);
 
         {
             const edit = tracy.Zone.begin(.{ .src = @src(), .name = "edit" });
             defer edit.end();
+            // Each task writes only its own slot, indexed by edit-buffer iteration order.
+            const sides_changed = try self.temp_allocator.alloc([6]bool, self.edit_buffer.count());
+            defer self.temp_allocator.free(sides_changed);
             var it = self.edit_buffer.iterator();
-            while (it.next()) |diff_chunk| {
-                const chunk_pos = diff_chunk.key_ptr.*;
+            for (sides_changed) |*sides| {
+                const diff_chunk = it.next().?;
                 const encoding: Chunk.Encoding = .fromBlocks(&diff_chunk.value_ptr.grid);
-                group.async(io, editChunk, .{ self, io, allocator, chunk_pos, encoding, &remesh_neighbors, &remesh_mutex, &err_store });
+                group.async(io, editChunk, .{ self, io, allocator, diff_chunk.key_ptr.*, encoding, sides, &err_store });
             }
             try group.await(io);
-            if (err_store.raw.exists) return @errorFromInt(err_store.raw.err);
+            if (err_store.raw != 0) return @errorFromInt(err_store.raw);
+
+            it = self.edit_buffer.iterator();
+            for (sides_changed) |sides| {
+                const chunk_pos = it.next().?.key_ptr.*;
+                for (sides, std.enums.values(Chunk.Encoding.FaceRotation)) |changed, rotation| {
+                    if (changed) try remesh_neighbors.put(.{ .level = chunk_pos.level, .position = chunk_pos.position + rotation.direction() }, {});
+                }
+            }
         }
 
         if (self.propagate_changes) {
@@ -538,7 +544,7 @@ pub const Editor = struct {
                 }
             }
             try group.await(io);
-            if (err_store.raw.exists) return @errorFromInt(err_store.raw.err);
+            if (err_store.raw != 0) return @errorFromInt(err_store.raw);
         }
     }
 
@@ -547,15 +553,12 @@ pub const Editor = struct {
         self.edit_buffer.clearAndFree(self.temp_allocator);
     }
 
-    pub fn propagateToParent(
-        self: *Editor,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        chunk: *Chunk,
-        chunk_pos: ChunkPos,
-    ) !bool {
+    fn propagateToParent(self: *Editor, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos) !bool {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
+
+        const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
+        defer chunk.release();
 
         const parent_pos = chunk_pos.parent();
         const simplified_size = ChunkSize / scale_factor;
@@ -609,18 +612,7 @@ pub const Editor = struct {
         return changed_parent;
     }
 
-    pub fn propagateToParentByCoords(
-        self: *Editor,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        chunk_pos: ChunkPos,
-    ) !bool {
-        const chunk = try self.world.loadChunk(io, allocator, chunk_pos, false);
-        defer chunk.release();
-        return self.propagateToParent(io, allocator, chunk, chunk_pos);
-    }
-
-    pub fn mergeChunk(world: *World, io: std.Io, chunk_pos: ChunkPos, chunk: *Chunk, merge: Chunk.Encoding) ![6]bool {
+    fn mergeChunk(world: *World, io: std.Io, chunk_pos: ChunkPos, chunk: *Chunk, merge: Chunk.Encoding) ![6]bool {
         var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
         var sides_changed: [6]bool = @splat(false);
 
@@ -668,11 +660,11 @@ pub const Editor = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         chunk_pos: ChunkPos,
-        err_store: *std.atomic.Value(EditErrorStruct),
+        err_store: *ErrorStore,
     ) std.Io.Cancelable!void {
         callback.function(io, allocator, chunk_pos, callback.context) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => |e| err_store.store(.{ .exists = true, .err = @intFromError(e) }, .seq_cst),
+            else => |e| err_store.store(@intFromError(e), .seq_cst),
         };
     }
 
@@ -682,34 +674,22 @@ pub const Editor = struct {
         allocator: std.mem.Allocator,
         chunk_pos: ChunkPos,
         encoding: Chunk.Encoding,
-        remesh_neighbors: *std.AutoHashMap(ChunkPos, void),
-        remesh_mutex: *std.Io.Mutex,
-        err_store: *std.atomic.Value(EditErrorStruct),
+        sides_changed: *[6]bool,
+        err_store: *ErrorStore,
     ) std.Io.Cancelable!void {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
         const chunk = self.world.loadChunk(io, allocator, chunk_pos, false) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => return err_store.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+            else => return err_store.store(@intFromError(err), .seq_cst),
         };
         defer chunk.release();
 
-        const sides_changed = mergeChunk(self.world, io, chunk_pos, chunk, encoding) catch |err| switch (err) {
+        sides_changed.* = mergeChunk(self.world, io, chunk_pos, chunk, encoding) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => return err_store.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+            else => return err_store.store(@intFromError(err), .seq_cst),
         };
-
-        for (sides_changed, std.enums.values(Chunk.Encoding.FaceRotation)) |changed, rotation| {
-            if (!changed) continue;
-            const neighbor_pos: ChunkPos = .{ .level = chunk_pos.level, .position = chunk_pos.position + rotation.direction() };
-            const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "editChunk_lock_remesh" });
-            defer zone_lock.end();
-            try remesh_mutex.lock(io);
-            defer remesh_mutex.unlock(io);
-            remesh_neighbors.put(neighbor_pos, {}) catch |err|
-                return err_store.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst);
-        }
     }
 
     /// Fans the freshly edited chunks out to their parents, coalescing the
@@ -720,7 +700,7 @@ pub const Editor = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         group: *std.Io.Group,
-        err_store: *std.atomic.Value(EditErrorStruct),
+        err_store: *ErrorStore,
     ) !void {
         // Group edited children by parent so siblings merge and remesh once.
         var by_parent: std.AutoHashMap(ChunkPos, std.ArrayList(ChunkPos)) = .init(self.temp_allocator);
@@ -742,7 +722,7 @@ pub const Editor = struct {
             group.async(io, propagateLodGroup, .{ self, io, allocator, entry.value_ptr.items, err_store });
         }
         try group.await(io);
-        if (err_store.raw.exists) return @errorFromInt(err_store.raw.err);
+        if (err_store.raw != 0) return @errorFromInt(err_store.raw);
     }
 
     /// Climbs the LOD chain for one parent group, merging and flushing each
@@ -753,7 +733,7 @@ pub const Editor = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         siblings: []const ChunkPos,
-        err_store: *std.atomic.Value(EditErrorStruct),
+        err_store: *ErrorStore,
     ) std.Io.Cancelable!void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "propagate" });
         defer zone.end();
@@ -773,9 +753,9 @@ pub const Editor = struct {
         while (level < max_propagate_level) {
             var any_changed = false;
             for (current) |pos| {
-                const changed = propagation_editor.propagateToParentByCoords(io, allocator, pos) catch |err| switch (err) {
+                const changed = propagation_editor.propagateToParent(io, allocator, pos) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
-                    else => return err_store.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+                    else => return err_store.store(@intFromError(err), .seq_cst),
                 };
                 if (changed) any_changed = true;
             }
@@ -786,7 +766,7 @@ pub const Editor = struct {
             parent_pos = current[0].parent();
             propagation_editor.flush(io, allocator) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
-                else => return err_store.store(.{ .exists = true, .err = @intFromError(err) }, .seq_cst),
+                else => return err_store.store(@intFromError(err), .seq_cst),
             };
             current = (&parent_pos)[0..1];
             level += 1;
@@ -962,10 +942,10 @@ fn tryGenStructures(
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    if (!chunk.structures_generated.load(.seq_cst)) {
-        try runPlaceStructures(self, io, allocator, chunk, chunk_pos);
-        chunk.structures_generated.store(true, .seq_cst);
-    }
+    // Two loaders may both place; the flag is set only after placement so no loader sees it early.
+    if (chunk.structures_generated.load(.seq_cst)) return;
+    try runPlaceStructures(self, io, allocator, chunk, chunk_pos);
+    chunk.structures_generated.store(true, .seq_cst);
 }
 
 fn save(self: *World, io: std.Io, chunk: *Chunk, chunk_pos: ChunkPos) !void {
@@ -1017,13 +997,12 @@ pub fn makeTestingWorld(
     grids: usize,
     chunks: usize,
 ) !void {
-    const gen = try DefaultGenerator.init(allocator, 1024 * 1024, .default);
+    const gen = try DefaultGenerator.init(allocator, 1024 * 1024, .default, 0);
     errdefer {
         var g = gen;
         g.terrain_height_cache.deinit(allocator);
     }
     generator.* = gen;
-    generator.params.seed = 0;
 
     const chunk_count = @max(std.mem.alignForward(usize, chunks, 256), 256);
     const grid_count = @max(std.mem.alignForward(usize, grids, 256), 256);

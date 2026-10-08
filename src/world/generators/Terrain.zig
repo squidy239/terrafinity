@@ -76,6 +76,7 @@ pub const DefaultGenerator = struct {
     };
 
     params: Params,
+    seed: u64,
     terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.keyFromValue, ChunkHeightsKey.hash, .{}, thc_fragments),
 
     const ChunkHeightsValue = struct {
@@ -99,12 +100,13 @@ pub const DefaultGenerator = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) !DefaultGenerator {
+    pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params, seed: u64) !DefaultGenerator {
         const terrain_height_cache_size = @max(std.math.floorPowerOfTwo(u64, max_cache_bytes / @sizeOf(ChunkHeightsValue)), 256 * thc_fragments);
         std.log.info("Creating terrain height cache with size {d} ({d} bytes)", .{ terrain_height_cache_size, terrain_height_cache_size * @sizeOf(ChunkHeightsValue) });
         return DefaultGenerator{
             .terrain_height_cache = try .init(allocator, terrain_height_cache_size, .{ .name = "terrain_height_cache" }),
             .params = params,
+            .seed = seed,
         };
     }
 
@@ -136,7 +138,7 @@ pub const DefaultGenerator = struct {
     }
 
     pub const Params = struct {
-        /// Null generates a random seed; setSeeds fills it in.
+        /// The host fills a null seed before create; every noise seed derives from it.
         seed: ?u64 = null,
         terrain_scale: f32 = 1,
         terrain_block_randomness: f32 = 0.25,
@@ -331,17 +333,12 @@ pub const DefaultGenerator = struct {
             },
         },
 
-        pub fn setSeeds(self: *Params, io: std.Io) void {
-            const seed = self.seed orelse blk: {
-                var random_seed: u64 = undefined;
-                io.random(std.mem.asBytes(&random_seed));
-                self.seed = random_seed;
-                break :blk random_seed;
-            };
+        /// Mixes the world seed into every noise seed, so configured noise seeds still vary the result.
+        pub fn setSeeds(self: *Params, seed: u64) void {
             // Salts differentiate the noise streams; the large warp shares salt 4 with the large height noise.
             const noise_salts = .{ 1, 3, 4, 4, 6 };
             inline for (.{ &self.cave_noise, &self.terrain_noise, &self.large_terrain_noise, &self.large_terrain_noise_warp, &self.surface_noise }, noise_salts) |noise, salt| {
-                noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed +% salt));
+                noise.seed ^= @bitCast(std.hash.Murmur2_32.hashUint64(seed +% salt));
             }
         }
 
@@ -366,7 +363,6 @@ pub const DefaultGenerator = struct {
                 .assumed_slope = self.erosion_assumed_slope,
                 .assumed_slope_amount = self.erosion_assumed_slope_amount,
                 .fade_slope = self.erosion_fade_slope,
-                .fade_altitude = self.erosion_fade_altitude,
             };
         }
     };
@@ -405,7 +401,7 @@ pub const DefaultGenerator = struct {
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, min_global_y, 0 }, chunk_pos.level).position[1]) {
             block_grid = @splat(@splat(@splat(.stone)));
         } else {
-            var rng = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
+            var rng = std.Random.DefaultPrng.init(self.seed +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
             var rand = rng.random();
             const heights = try self.getTerrainHeight(io, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
             const gen_terrain_zone = tracy.Zone.begin(.{ .src = @src(), .name = "GenTerrainBlocks" });
@@ -1179,7 +1175,7 @@ pub const DefaultGenerator = struct {
                             .{ shaped[x][z], -grad_x[i] * p_scale, -grad_z[i] * p_scale },
                             fade[i],
                             eparams,
-                        ).height_delta;
+                        );
                     }
                 }
             },
@@ -1200,7 +1196,7 @@ pub const DefaultGenerator = struct {
                     .{ shaped[i / ChunkSize][i % ChunkSize], -grad_x[i] * p_scale, -grad_z[i] * p_scale },
                     fade[i],
                     eparams,
-                ).height_delta;
+                );
             }
         }
         for (extra, upsample(N, &delta)) |*sum, value| sum.* += value;
@@ -1333,7 +1329,7 @@ pub const DefaultGenerator = struct {
                     for (self.params.trees) |tree_conf| {
                         if (!tree_conf.enabled) continue;
                         const structure_seed = tree_conf.placer.getStructure(.{ @trunc(lvl_x), @trunc(lvl_z) }, @intCast(chunk_pos.level)) orelse continue;
-                        const tree_seed = self.params.seed.? ^ @as(u64, @bitCast(structure_seed));
+                        const tree_seed = self.seed ^ @as(u64, @bitCast(structure_seed));
                         var random = std.Random.DefaultPrng.init(@bitCast(tree_seed));
                         const rand = random.random();
                         const factor = (rand.float(f32) + 0.5) * tree_conf.size_variation;
@@ -1342,7 +1338,7 @@ pub const DefaultGenerator = struct {
                             try placeLowResTree(&world_editor, center_pos, scale * factor, tree_conf.tree.trunk_height, chunk_pos.level);
                             continue;
                         }
-                        _ = try (World.Editor.Tree{ .pos = @intCast(center_pos), .scale = scale * factor, .config = tree_conf.tree, .rand = rand }).place(tree_seed, &world_editor, chunk_pos.level);
+                        _ = try (World.Editor.Tree{ .pos = @intCast(center_pos), .scale = scale * factor, .config = tree_conf.tree }).place(tree_seed, &world_editor, chunk_pos.level);
                     }
                 }
             }
@@ -1391,7 +1387,7 @@ fn columnSpawnHeight(params: *const DefaultGenerator.Params, x: f32, z: f32) f32
 
 pub fn generatorProposeSpawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *TerrainInstance = @ptrCast(@alignCast(instance));
-    return generator_api.proposeSpawnField(self.generator.params.seed, center.*, radius, attempts, nonce, @floatFromInt(self.generator.params.sea_level), &self.generator.params, columnSpawnHeight);
+    return generator_api.proposeSpawnField(self.generator.seed, center.*, radius, attempts, nonce, @floatFromInt(self.generator.params.sea_level), &self.generator.params, columnSpawnHeight);
 }
 
 pub const generator_api_vtable: generator_api.GeneratorApi = .{
@@ -1585,12 +1581,13 @@ fn createInstance(opts: *const generator_api.CreateOptions, config: *const gener
     errdefer arena.deinit();
     var params: DefaultGenerator.Params = .default;
     try generator_api.fromTree(DefaultGenerator.Params, arena.allocator(), config, &params, field_specs);
-    if (params.seed == null) params.setSeeds(opts.io);
+    const seed = params.seed orelse return error.MissingSeed;
+    params.setSeeds(seed);
     const instance = try opts.allocator.create(TerrainInstance);
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
         .arena = arena,
-        .generator = try DefaultGenerator.init(opts.allocator, opts.max_cache_bytes, params),
+        .generator = try DefaultGenerator.init(opts.allocator, opts.max_cache_bytes, params, seed),
         .source = .{
             .data = instance,
             .getTerrainHeight = null,
@@ -1727,7 +1724,7 @@ test "columnSpawnHeight matches grid without erosion" {
     // With lattices off the single-point sampler must agree with the grid path (~1 ULP).
     var params = DefaultGenerator.Params.default;
     params.seed = 42;
-    params.setSeeds(std.testing.io);
+    params.setSeeds(42);
     params.erosion_enabled = false;
     params.surface_noise_amplitude = 0;
     const grid = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 5 });
@@ -1743,8 +1740,8 @@ test "columnSpawnHeight matches grid without erosion" {
 test "proposeSpawn is deterministic and plausible" {
     var params = DefaultGenerator.Params.default;
     params.seed = 42;
-    params.setSeeds(std.testing.io);
-    var generator = try DefaultGenerator.init(std.testing.allocator, 0, params);
+    params.setSeeds(42);
+    var generator = try DefaultGenerator.init(std.testing.allocator, 0, params, 42);
     defer generator.terrain_height_cache.deinit(std.testing.allocator);
     var instance = TerrainInstance{ .generator = generator, .arena = undefined, .source = undefined };
     const center = [3]f64{ 0, 0, 0 };
@@ -1956,7 +1953,7 @@ test "terrain noise balance zero excludes the mountain noise" {
     // noise may change the height, even with erosion and surface detail enabled.
     var params = DefaultGenerator.Params.default;
     params.seed = 7;
-    params.setSeeds(std.testing.io);
+    params.setSeeds(7);
     params.terrain_noise_balance = 0;
     const base = DefaultGenerator.genTerrainHeight(&params, 0, .{ 2, 3 });
 
@@ -2073,7 +2070,7 @@ test "continental seed keeps land within search reach" {
     // Pins the search-reach coupling fix: capped attempts must not cap ring expansion.
     var params = continental_preset;
     params.seed = 14214860294789680370;
-    params.setSeeds(std.testing.io);
+    params.setSeeds(params.seed.?);
     var land: u32 = 0;
     var z: f32 = -8192;
     while (z <= 8192) : (z += 512) {

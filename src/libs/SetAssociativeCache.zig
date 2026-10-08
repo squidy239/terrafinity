@@ -90,7 +90,6 @@ pub fn SetAssociativeCacheType(
         pub const value_count_min: u64 = layout.ways;
 
         name: []const u8,
-        sets: u64,
 
         metrics: *Metrics,
 
@@ -168,7 +167,6 @@ pub fn SetAssociativeCacheType(
 
             var self = SetAssociativeCache{
                 .name = options.name,
-                .sets = sets,
                 .tags = tags,
                 .values = values,
                 .counts = .{ .words = counts },
@@ -182,9 +180,6 @@ pub fn SetAssociativeCacheType(
         }
 
         pub fn deinit(self: *SetAssociativeCache, allocator: mem.Allocator) void {
-            assert(self.sets > 0);
-            self.sets = 0;
-
             allocator.free(self.tags);
             allocator.free(self.values);
             allocator.free(self.counts.words);
@@ -320,24 +315,17 @@ pub fn SetAssociativeCacheType(
             return .{ .way = way, .occupied = occupied };
         }
 
-        /// Upsert a value, evicting an older entry if needed. The evicted value, if an update or
-        /// insert was performed and the index at which the value was inserted is returned.
-        pub fn upsert(self: *SetAssociativeCache, value: *const Value) struct {
-            index: usize,
-            updated: UpdateOrInsert,
-            evicted: ?Value,
-        } {
+        pub const Upserted = struct { evicted: ?Value };
+
+        /// Upsert a value, evicting an older entry if needed. Returns the evicted or replaced value.
+        pub fn upsert(self: *SetAssociativeCache, value: *const Value) Upserted {
             const key = key_from_value(value);
             const set = self.associate(key);
             if (self.search(set, key)) |way| {
                 self.counts.set(set.offset + way, 1);
                 const evicted = set.values[way];
                 set.values[way] = value.*;
-                return .{
-                    .index = set.offset + way,
-                    .updated = .update,
-                    .evicted = evicted,
-                };
+                return .{ .evicted = evicted };
             }
 
             const clock_index = @divExact(set.offset, layout.ways);
@@ -352,11 +340,7 @@ pub fn SetAssociativeCacheType(
             self.clocks.set(clock_index, way +% 1);
             if (evicted == null) _ = self.metrics.value_count.fetchAdd(1, .acq_rel);
 
-            return .{
-                .index = set.offset + way,
-                .updated = .insert,
-                .evicted = evicted,
-            };
+            return .{ .evicted = evicted };
         }
 
         /// Like `upsert`, but returns the slot for `key` instead of copying a value in, so
@@ -450,41 +434,13 @@ pub fn SetAssociativeCacheType(
             offset: u64,
             tags: *[layout.ways]Tag,
             values: *[layout.ways]Value,
-
-            fn inspect(set: Set, sac: SetAssociativeCache) void {
-                const clock_index = @divExact(set.offset, layout.ways);
-                std.log.debug(
-                    \\{{
-                    \\  tag={}
-                    \\  offset={}
-                    \\  clock_hand={}
-                , .{
-                    set.tag,
-                    set.offset,
-                    sac.clocks.get(clock_index),
-                });
-
-                std.log.debug("\n  tags={}", .{set.tags[0]});
-                for (set.tags[1..]) |tag| std.log.debug(", {}", .{tag});
-
-                std.log.debug("\n  values={}", .{set.values[0]});
-                for (set.values[1..]) |value| std.log.debug(", {}", .{value});
-
-                std.log.debug("\n  counts={}", .{sac.counts.get(set.offset)});
-                var i: usize = 1;
-                while (i < layout.ways) : (i += 1) {
-                    std.log.debug(", {}", .{sac.counts.get(set.offset + i)});
-                }
-
-                std.log.debug("\n}}\n", .{});
-            }
         };
 
         inline fn associate(self: *const SetAssociativeCache, key: Key) Set {
             const entropy = hash(key);
 
             const tag: Tag = @truncate(entropy);
-            const index = fastrange(entropy, self.sets);
+            const index = fastrange(entropy, self.tags.len / layout.ways);
             const offset = index * layout.ways;
 
             return .{
@@ -494,26 +450,8 @@ pub fn SetAssociativeCacheType(
                 .values = self.values[offset..][0..layout.ways],
             };
         }
-
-        pub fn inspect() void {
-            std.log.debug("\nKey={} Value={} ways={} tag_bits={} clock_bits={} " ++
-                "clock_hand_bits={} tags_per_line={} clocks_per_line={} " ++
-                "clock_hands_per_line={}\n", .{
-                @bitSizeOf(Key),
-                @sizeOf(Value),
-                layout.ways,
-                layout.tag_bits,
-                layout.clock_bits,
-                clock_hand_bits,
-                tags_per_line,
-                clocks_per_line,
-                clock_hands_per_line,
-            });
-        }
     };
 }
-
-pub const UpdateOrInsert = enum { update, insert };
 
 fn SetAssociativeCacheTest(
     comptime Key: type,
@@ -525,8 +463,6 @@ fn SetAssociativeCacheTest(
     const expect = testing.expect;
     const expectEqual = testing.expectEqual;
 
-    const log = false;
-
     const Sac = SetAssociativeCacheType(
         Key,
         Value,
@@ -537,10 +473,9 @@ fn SetAssociativeCacheTest(
 
     return struct {
         fn run() !void {
-            if (log) Sac.inspect();
-
             var sac = try Sac.init(testing.allocator, Sac.value_count_min, .{ .name = "test" });
             defer sac.deinit(testing.allocator);
+            const sets = sac.tags.len / layout.ways;
 
             for (sac.tags) |tag| try testing.expectEqual(@as(Sac.Tag, 0), tag);
             for (sac.counts.words) |word| try testing.expectEqual(@as(u64, 0), word);
@@ -552,7 +487,7 @@ fn SetAssociativeCacheTest(
                 while (i < layout.ways) : (i += 1) {
                     try expectEqual(i, sac.clocks.get(0));
 
-                    const key = i * sac.sets;
+                    const key = i * sets;
                     _ = sac.upsert(&key);
                     try expect(sac.counts.get(i) == 1);
                     try expectEqual(key, sac.get(key).?.*);
@@ -562,11 +497,9 @@ fn SetAssociativeCacheTest(
                 try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
             }
 
-            if (log) sac.associate(0).inspect(sac);
-
             // Insert another element into the first set, causing key 0 to be evicted.
             {
-                const key = layout.ways * sac.sets;
+                const key = layout.ways * sets;
                 _ = sac.upsert(&key);
                 try expect(sac.counts.get(0) == 1);
                 try expectEqual(key, sac.get(key).?.*);
@@ -583,10 +516,8 @@ fn SetAssociativeCacheTest(
                 try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
             }
 
-            if (log) sac.associate(0).inspect(sac);
-
             {
-                const key = 5 * sac.sets;
+                const key = 5 * sets;
                 assert(sac.get(key).?.* == key);
                 try expect(sac.counts.get(5) == 2);
 
@@ -608,7 +539,7 @@ fn SetAssociativeCacheTest(
                 while (i < layout.ways) : (i += 1) {
                     try expectEqual(i, sac.clocks.get(0));
 
-                    const key = i * sac.sets;
+                    const key = i * sets;
                     _ = sac.upsert(&key);
                     try expect(sac.counts.get(i) == 1);
                     var j: usize = 2;
@@ -623,11 +554,9 @@ fn SetAssociativeCacheTest(
                 try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
             }
 
-            if (log) sac.associate(0).inspect(sac);
-
             // Insert another element into the first set, causing key 0 to be evicted.
             {
-                const key = layout.ways * sac.sets;
+                const key = layout.ways * sets;
                 _ = sac.upsert(&key);
                 try expect(sac.counts.get(0) == 1);
                 try expectEqual(key, sac.get(key).?.*);
@@ -643,8 +572,6 @@ fn SetAssociativeCacheTest(
                 }
                 try expectEqual(@as(u64, layout.ways), sac.metrics.value_count.raw);
             }
-
-            if (log) sac.associate(0).inspect(sac);
         }
     };
 }

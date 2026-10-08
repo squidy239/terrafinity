@@ -323,15 +323,12 @@ pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?B
     return if (@reduce(.And, uniform)) block_array[0][0][0] else null;
 }
 
-pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation, comptime remove_ref: bool) !Encoding.Face {
-    defer if (remove_ref) self.release();
-    try self.addAndLockShared(io);
-    defer self.releaseAndUnlockShared(io);
+/// Releases the caller's reference once the face is read.
+pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation) !Encoding.Face {
+    defer self.release();
+    try self.lockShared(io);
+    defer self.unlockShared(io);
     return self.encoding.extractFace(rotation);
-}
-
-pub fn modify(self: *@This()) void {
-    self.modified.store(true, .seq_cst);
 }
 
 pub fn addRef(self: *@This()) void {
@@ -344,11 +341,10 @@ pub fn release(self: *@This()) void {
 
 pub fn lockExclusive(self: *@This(), io: std.Io) !void {
     try self.encoding_lock.lock(io);
-    self.modify();
 }
 
 pub fn unlockExclusive(self: *@This(), io: std.Io) void {
-    self.modify();
+    self.modified.store(true, .seq_cst);
     self.encoding_lock.unlock(io);
 }
 

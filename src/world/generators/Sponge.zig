@@ -16,55 +16,23 @@ const spawn_scan_depth: i64 = 512;
 
 pub const InfiniteMengerGenerator = struct {
     params: Params,
+    seed: u64,
 
-    pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) InfiniteMengerGenerator {
-        _ = allocator;
-        _ = max_cache_bytes;
+    pub fn init(params: Params, seed: u64) InfiniteMengerGenerator {
         var clamped = params;
         // A zero scale would divide by zero on every voxel; the config UI clamps too.
         if (clamped.fractal_scale < 1) clamped.fractal_scale = 1;
-        return .{ .params = clamped };
-    }
-
-    pub fn getSource(self: *InfiniteMengerGenerator) World.ChunkSource {
-        return .{
-            .data = self,
-            .getTerrainHeight = null,
-            .getBlocks = &genChunkBlocks,
-            .placeStructures = null,
-            .deinit = &deinit,
-            .save = null,
-        };
-    }
-
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-        const self: *InfiniteMengerGenerator = @ptrCast(@alignCast(source.data));
-        self.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
-        return .{ .from_disk = false, .structures = false };
-    }
-
-    pub fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-        _ = self;
-        _ = world;
-        _ = io;
-        _ = allocator;
+        return .{ .params = clamped, .seed = seed };
     }
 
     pub const Params = struct {
         sea_level: i32 = 0,
         fractal_scale: i32 = 4, // Smallest corridor width in blocks.
         max_height: i32 = 512, // The structure stops here and leaves open sky.
+        /// The host fills a null seed before create.
         seed: ?u64 = null,
 
         pub const default = Params{};
-
-        pub fn setSeeds(self: *Params, io: std.Io) void {
-            if (self.seed == null) {
-                var random_seed: u64 = undefined;
-                io.random(std.mem.asBytes(&random_seed));
-                self.seed = random_seed;
-            }
-        }
     };
 
     /// Tests one point against the infinite sponge.
@@ -177,12 +145,11 @@ fn columnTopSolid(params: *const InfiniteMengerGenerator.Params, bx: i64, bz: i6
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *SpongeInstance = @ptrCast(@alignCast(instance));
     const params = &self.generator.params;
-    const seed = params.seed orelse return generator_api.no_spawn;
     var best = generator_api.SpawnBest{};
     // Disc samples honor `radius`; later rings expand to escape hollow columns.
     const capped = @min(attempts, generator_api.spawn_attempt_cap);
     for (0..capped) |i| {
-        const sample = generator_api.spawnSample(seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
+        const sample = generator_api.spawnSample(self.generator.seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
         // Round to the block the host resolves for this column (`@round` there).
         const bx: i64 = @intFromFloat(@round(sample[0]));
         const bz: i64 = @intFromFloat(@round(sample[1]));
@@ -285,11 +252,11 @@ pub fn generator_config_set_seeds(io: *const std.Io, config: *generator_api.Conf
 pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) callconv(.c) ?*anyopaque {
     var params: InfiniteMengerGenerator.Params = .default;
     generator_api.fromTree(InfiniteMengerGenerator.Params, opts.allocator, config, &params, field_specs) catch return null;
-    if (params.seed == null) params.setSeeds(opts.io);
+    const seed = params.seed orelse return null;
     const instance = opts.allocator.create(SpongeInstance) catch return null;
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
-        .generator = InfiniteMengerGenerator.init(opts.allocator, opts.max_cache_bytes, params),
+        .generator = InfiniteMengerGenerator.init(params, seed),
         .source = undefined,
     };
     instance.source = .{

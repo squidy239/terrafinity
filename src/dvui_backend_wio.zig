@@ -16,45 +16,28 @@ arena: std.mem.Allocator = undefined,
 mod: dvui.enums.Mod = .none,
 touch: [10]dvui.Point = @splat(.{ .x = std.math.inf(f32), .y = std.math.inf(f32) }),
 
-renderer: ?vk_renderer = null,
-device: ?vk.DeviceProxy = null,
-cmd_buffer: ?vk.CommandBuffer = null,
-framebuffer_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
+renderer: vk_renderer,
+device: vk.DeviceProxy,
+/// Where the current frame records; null outside `beginFrame` and the caller's reset.
+target: ?Target = null,
 prepass_cmd: ?vk.CommandBuffer = null,
 
-pub fn initVulkan(back: *@This(), dev: vk.DeviceProxy, memory: vk_renderer.VkMemory, gpa: std.mem.Allocator, max_frames: u32, swapchain_format: vk.Format, queue_family_index: u32) !void {
-    back.device = dev;
-    back.renderer = try vk_renderer.init(gpa, .{
-        .dev = dev,
-        .gpu_allocator = .{ .builtin = memory },
-        .render_pass = .{ .dynamic = .{
-            .info = .{
-                .color_attachment_count = 1,
-                .view_mask = 0,
-                .p_color_attachment_formats = (&swapchain_format)[0..1].ptr,
-                .depth_attachment_format = .undefined,
-                .stencil_attachment_format = .undefined,
-            },
-        } },
-        .graphics_queue_family_index = queue_family_index,
-        .max_frames_in_flight = max_frames,
-    });
-}
-
-pub fn setCommandBuffer(back: *@This(), cmd: ?vk.CommandBuffer, extent: vk.Extent2D) void {
-    back.cmd_buffer = cmd;
-    back.framebuffer_extent = extent;
-}
-
-pub fn getRenderer(back: *@This()) *vk_renderer {
-    return &(back.renderer orelse unreachable);
-}
+pub const Target = struct {
+    cmd_buffer: vk.CommandBuffer,
+    extent: vk.Extent2D,
+};
 
 pub const InitOptions = struct {
     io: std.Io,
     window: wio.Window,
     size: wio.Size = .{ .width = 640, .height = 480 },
     framebuffer: wio.Size = .{ .width = 640, .height = 480 },
+    gpa: std.mem.Allocator,
+    dev: vk.DeviceProxy,
+    memory: vk_renderer.VkMemory,
+    max_frames: u32,
+    swapchain_format: vk.Format,
+    queue_family_index: u32,
 };
 
 pub fn init(options: InitOptions) !@This() {
@@ -64,17 +47,30 @@ pub fn init(options: InitOptions) !@This() {
         .window = options.window,
         .size_natural = .{ .w = @floatFromInt(options.size.width), .h = @floatFromInt(options.size.height) },
         .size_physical = .{ .w = @floatFromInt(options.framebuffer.width), .h = @floatFromInt(options.framebuffer.height) },
+        .device = options.dev,
+        .renderer = try vk_renderer.init(options.gpa, .{
+            .dev = options.dev,
+            .gpu_allocator = .{ .builtin = options.memory },
+            .render_pass = .{ .dynamic = .{
+                .info = .{
+                    .color_attachment_count = 1,
+                    .view_mask = 0,
+                    .p_color_attachment_formats = (&options.swapchain_format)[0..1].ptr,
+                    .depth_attachment_format = .undefined,
+                    .stencil_attachment_format = .undefined,
+                },
+            } },
+            .graphics_queue_family_index = options.queue_family_index,
+            .max_frames_in_flight = options.max_frames,
+        }),
     };
 }
 
 pub fn deinit(back: *@This()) void {
-    const r = &(back.renderer orelse return);
-    if (back.device) |dev| dev.deviceWaitIdle() catch |err| {
+    back.device.deviceWaitIdle() catch |err| {
         std.log.err("DVUI Vulkan renderer could not wait for device idle: {}", .{err});
     };
-    r.deinit();
-    back.renderer = null;
-    back.device = null;
+    back.renderer.deinit();
 }
 
 pub fn nanoTime(self: *@This()) i128 {
@@ -88,22 +84,19 @@ pub fn sleep(self: *@This(), ns: u64) void {
 
 pub fn begin(self: *@This(), arena: std.mem.Allocator) !void {
     self.arena = arena;
-    if (self.cmd_buffer != null) {
-        const r = self.getRenderer();
-        try r.beginWithSize(arena, .{ .w = @floatFromInt(self.framebuffer_extent.width), .h = @floatFromInt(self.framebuffer_extent.height) });
+    if (self.target) |target| {
+        try self.renderer.beginWithSize(arena, .{ .w = @floatFromInt(target.extent.width), .h = @floatFromInt(target.extent.height) });
     }
 }
 
-pub fn beginFrame(self: *@This()) void {
-    if (self.cmd_buffer) |cmd_buffer| {
-        const r = self.getRenderer();
-        r.beginFrame(cmd_buffer, self.framebuffer_extent) catch |err| @panic(@errorName(err));
-    }
+/// Records the UI into `target` until the caller resets `target` to null.
+pub fn beginFrame(self: *@This(), target: Target) void {
+    self.target = target;
+    self.renderer.beginFrame(target.cmd_buffer, target.extent) catch |err| @panic(@errorName(err));
 }
 
 pub fn end(self: *@This()) !void {
-    const r = self.getRenderer();
-    const recorded = r.endFrame() catch |err| {
+    const recorded = self.renderer.endFrame() catch |err| {
         std.log.err("DVUI Vulkan renderer failed to end frame: {}", .{err});
         return error.BackendError;
     };
@@ -304,14 +297,12 @@ pub fn textInputRect(self: *@This(), rect: ?dvui.Rect.Natural) void {
 pub fn renderPresent(_: *@This()) void {}
 
 pub fn drawClippedTriangles(self: *@This(), texture: ?dvui.Texture, vtx: []const dvui.Vertex, idx: []const dvui.Vertex.Index, clipr: ?dvui.Rect.Physical) !void {
-    if (self.cmd_buffer == null) return;
-    const r = self.getRenderer();
-    try r.drawClippedTriangles(self.size_physical, texture, vtx, idx, clipr);
+    if (self.target == null) return;
+    try self.renderer.drawClippedTriangles(self.size_physical, texture, vtx, idx, clipr);
 }
 
 pub fn textureCreate(self: *@This(), pixels: [*]const u8, options: dvui.Texture.CreateOptions) !dvui.Texture {
-    const r = self.getRenderer();
-    return r.textureCreate(pixels, options);
+    return self.renderer.textureCreate(pixels, options);
 }
 
 pub fn textureUpdate(_: *@This(), _: dvui.Texture, _: [*]const u8) !void {
@@ -319,13 +310,11 @@ pub fn textureUpdate(_: *@This(), _: dvui.Texture, _: [*]const u8) !void {
 }
 
 pub fn textureDestroy(self: *@This(), texture: dvui.Texture) void {
-    const r = self.getRenderer();
-    r.textureDestroy(texture);
+    self.renderer.textureDestroy(texture);
 }
 
 pub fn textureCreateTarget(self: *@This(), options: dvui.Texture.CreateOptions) !dvui.TextureTarget {
-    const r = self.getRenderer();
-    return r.textureCreateTarget(options);
+    return self.renderer.textureCreateTarget(options);
 }
 
 pub fn textureReadTarget(_: *@This(), _: dvui.TextureTarget, _: [*]u8) !void {
@@ -335,7 +324,7 @@ pub fn textureReadTarget(_: *@This(), _: dvui.TextureTarget, _: [*]u8) !void {
 pub fn textureClearTarget(_: *@This(), _: dvui.Texture.Target) void {}
 
 pub fn textureDestroyTarget(self: *@This(), texture: dvui.Texture.Target) void {
-    self.getRenderer().textureDestroy(self.textureFromTarget(texture));
+    self.renderer.textureDestroy(self.textureFromTarget(texture));
 }
 
 pub fn textureFromTarget(_: *@This(), target: dvui.TextureTarget) dvui.Texture {

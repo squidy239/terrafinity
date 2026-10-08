@@ -41,18 +41,6 @@ pub const ErosionParams = struct {
     /// frequency; flatter terrain's stripes widen and the pattern collapses
     /// to its constant cell value. Zero disables the modulation.
     fade_slope: f32 = 0.001,
-    /// Deprecated: kept so saved configs that set the old altitude fade
-    /// target still parse. Skipped in the config tree.
-    fade_altitude: f32 = 0.5,
-};
-
-pub const ErosionResult = struct {
-    /// Height change in normalized height units.
-    height_delta: f32,
-    slope_dx: f32,
-    slope_dy: f32,
-    /// Total strength summed over the octaves.
-    magnitude: f32,
 };
 
 /// Wave offset of the Phacelle pattern; 0.25 lands the flat-pattern null at
@@ -72,13 +60,13 @@ pub const min_detail: f32 = 1e-6;
 /// deterministic across build modes.
 const gradient_floor: f32 = 1e-4;
 
-/// Applies the erosion filter at position `p`. `height_and_slope` carries the
-/// height in normalized units and the downhill slope. `fade_steepness` is the
+/// Returns the erosion height change at position `p` in normalized units.
+/// `height_and_slope` carries the height in normalized units and the downhill slope. `fade_steepness` is the
 /// locally averaged slope magnitude: the pattern fades out on flat ground
 /// (inverted-quadratic mask), so a summit or stream bed is never carved.
 /// Each octave steers off the slope accumulated by the previous one; that
 /// loop order is load-bearing.
-pub fn erosionFilter(p: [2]f32, height_and_slope: [3]f32, fade_steepness: f32, params: ErosionParams) ErosionResult {
+pub fn erosionFilter(p: [2]f32, height_and_slope: [3]f32, fade_steepness: f32, params: ErosionParams) f32 {
     const steepness = if (params.fade_slope > 0.0)
         std.math.clamp(fade_steepness / params.fade_slope, 0.0, 1.0)
     else
@@ -91,19 +79,13 @@ pub fn erosionFilter(p: [2]f32, height_and_slope: [3]f32, fade_steepness: f32, p
     var state = State{
         .gully = seedSlope(height_and_slope, params),
         .height = height_and_slope[0],
-        .slope = .{ height_and_slope[1], height_and_slope[2] },
         .mask = slopeFadeMask(steepness),
     };
     for (0..params.octaves) |_| {
         state.apply(p, octave, params, inv_detail);
         octave.advance(params);
     }
-    return .{
-        .height_delta = state.height - height_and_slope[0],
-        .slope_dx = state.slope[0] - height_and_slope[1],
-        .slope_dy = state.slope[1] - height_and_slope[2],
-        .magnitude = state.magnitude,
-    };
+    return state.height - height_and_slope[0];
 }
 
 /// Per-octave frequency, strength, and mask rounding width.
@@ -123,10 +105,8 @@ const Octave = struct {
 const State = struct {
     gully: [2]f32,
     height: f32,
-    slope: [2]f32,
     target: f32 = 0.0,
     mask: f32,
-    magnitude: f32 = 0.0,
     fn apply(self: *State, p: [2]f32, octave: Octave, params: ErosionParams, inv_detail: f32) void {
         const wave = phacelle.phacelleNoise(
             .{ p[0] * octave.freq, p[1] * octave.freq },
@@ -148,17 +128,9 @@ const State = struct {
 
         // Where the mask is low the previous octave's height carries over so
         // gullies continue instead of re-starting.
-        const gullies: [3]f32 = .{ wave.cos, wave.sin * side[0], wave.sin * side[1] };
-        const faded: [3]f32 = .{
-            std.math.lerp(self.target, gullies[0] * params.gully_weight, self.mask),
-            std.math.lerp(0.0, gullies[1] * params.gully_weight, self.mask),
-            std.math.lerp(0.0, gullies[2] * params.gully_weight, self.mask),
-        };
-        self.height += faded[0] * octave.strength;
-        self.slope[0] += faded[1] * octave.strength;
-        self.slope[1] += faded[2] * octave.strength;
-        self.magnitude += octave.strength;
-        self.target = faded[0];
+        const faded = std.math.lerp(self.target, wave.cos * params.gully_weight, self.mask);
+        self.height += faded * octave.strength;
+        self.target = faded;
 
         // The mask fades the octave in with the wave slope; creases cut in
         // instantly (zero rounding) while crests fade in smoothly.
@@ -230,7 +202,7 @@ fn sweepRange(params: ErosionParams, count: usize, origin: [2]f32, step: [2]f32,
     for (0..count) |i| {
         const t = @as(f32, @floatFromInt(i));
         const result = erosionFilter(.{ t * step[0] + origin[0], t * step[1] + origin[1] }, hs, steep, params);
-        if (first) |f| range = @max(range, @abs(result.height_delta - f)) else first = result.height_delta;
+        if (first) |f| range = @max(range, @abs(result - f)) else first = result;
     }
     return range;
 }
@@ -248,12 +220,12 @@ test "erosion filter stripes a slope along the gully direction" {
         for (0..count) |iy| {
             const p = [2]f32{ @as(f32, @floatFromInt(ix)) * 0.25, @as(f32, @floatFromInt(iy)) * 0.25 };
             const result = erosionFilter(p, .{ 0.25 * p[0], -0.5, 0.0 }, 0.5, params);
-            if (first) |f| delta_range = @max(delta_range, @abs(result.height_delta - f)) else first = result.height_delta;
+            if (first) |f| delta_range = @max(delta_range, @abs(result - f)) else first = result;
             if (ix + 1 < count and iy + 1 < count) {
                 const east = erosionFilter(.{ p[0] + 0.25, p[1] }, .{ 0.25 * (p[0] + 0.25), -0.5, 0.0 }, 0.5, params);
                 const north = erosionFilter(.{ p[0], p[1] + 0.25 }, .{ 0.25 * p[0], -0.5, 0.0 }, 0.5, params);
-                const d_along = result.height_delta - east.height_delta;
-                const d_across = result.height_delta - north.height_delta;
+                const d_along = result - east;
+                const d_across = result - north;
                 along_var += d_along * d_along;
                 across_var += d_across * d_across;
             }
@@ -274,7 +246,7 @@ test "erosion filter height delta stays within the octave budget" {
             const p = [2]f32{ @as(f32, @floatFromInt(ix)) * 0.5 - 1.5, @as(f32, @floatFromInt(iy)) * 0.5 - 1.5 };
             const slope_mag = @sqrt(0.16 * p[0] * p[0] + 0.09 * p[1] * p[1]);
             const result = erosionFilter(p, .{ 0.0, -0.4 * p[0], -0.3 * p[1] }, slope_mag, params);
-            try std.testing.expect(@abs(result.height_delta) <= max_delta);
+            try std.testing.expect(@abs(result) <= max_delta);
         }
     }
 }
@@ -289,8 +261,7 @@ test "erosion filter runs with zero crease rounding" {
         for (0..count) |iy| {
             const p = [2]f32{ @as(f32, @floatFromInt(ix)) * 0.7 - 1.0, @as(f32, @floatFromInt(iy)) * 0.7 - 1.0 };
             const result = erosionFilter(p, .{ 0.0, -0.5, 0.0 }, 0.5, params);
-            try std.testing.expect(std.math.isFinite(result.height_delta));
-            try std.testing.expect(std.math.isFinite(result.magnitude));
+            try std.testing.expect(std.math.isFinite(result));
         }
     }
 }
@@ -305,7 +276,7 @@ test "flat terrain collapses the pattern to no carving" {
     for (points) |p| {
         for (heights) |height| {
             const result = erosionFilter(p, .{ height, 0.0, 0.0 }, 0.0, params);
-            try std.testing.expectEqual(@as(f32, 0.0), result.height_delta);
+            try std.testing.expectEqual(@as(f32, 0.0), result);
         }
     }
 }
@@ -321,7 +292,7 @@ test "steep slopes keep the full pattern regardless of altitude" {
         for (0..count) |iy| {
             const p = [2]f32{ @as(f32, @floatFromInt(ix)) * 0.25, @as(f32, @floatFromInt(iy)) * 0.25 };
             const result = erosionFilter(p, .{ 0.9, -2.0 * params.fade_slope, 0.0 }, 2.0 * params.fade_slope, params);
-            if (first) |f| delta_range = @max(delta_range, @abs(result.height_delta - f)) else first = result.height_delta;
+            if (first) |f| delta_range = @max(delta_range, @abs(result - f)) else first = result;
         }
     }
     try std.testing.expect(delta_range > 0.05);

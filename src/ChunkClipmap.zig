@@ -20,6 +20,8 @@ lowest_level: i32,
 /// Half-size of every window per axis; a window spans `2 * half_extent + 1` chunks.
 half_extent: @Vector(3, u32),
 levels: []Level,
+/// Backs every level's `cells`.
+cells: []State,
 
 pub const Level = struct {
     center: Position,
@@ -117,23 +119,19 @@ pub const Region = struct {
 pub fn init(gpa: std.mem.Allocator, lowest_level: i32, highest_level: i32, half_extent: @Vector(3, u32), player_block: World.BlockPos) !ChunkClipmap {
     std.debug.assert(lowest_level <= highest_level);
     const levels = try gpa.alloc(Level, @intCast(highest_level - lowest_level + 1));
-    var initialized: usize = 0;
-    errdefer {
-        for (levels[0..initialized]) |level| gpa.free(level.cells);
-        gpa.free(levels);
-    }
+    errdefer gpa.free(levels);
     const cell_count = @reduce(.Mul, @as(@Vector(3, usize), @intCast(dimsFor(half_extent))));
+    const cells = try gpa.alloc(State, levels.len * cell_count);
+    @memset(cells, .{});
     for (levels, 0..) |*level, index| {
         const level_index = lowest_level + @as(i32, @intCast(index));
-        level.* = .{ .center = centerFor(player_block, level_index), .cells = try gpa.alloc(State, cell_count) };
-        @memset(level.cells, .{});
-        initialized += 1;
+        level.* = .{ .center = centerFor(player_block, level_index), .cells = cells[index * cell_count ..][0..cell_count] };
     }
-    return .{ .lowest_level = lowest_level, .half_extent = half_extent, .levels = levels };
+    return .{ .lowest_level = lowest_level, .half_extent = half_extent, .levels = levels, .cells = cells };
 }
 
 pub fn deinit(clipmap: *ChunkClipmap, gpa: std.mem.Allocator) void {
-    for (clipmap.levels) |level| gpa.free(level.cells);
+    gpa.free(clipmap.cells);
     gpa.free(clipmap.levels);
     clipmap.* = undefined;
 }

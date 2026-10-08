@@ -18,7 +18,7 @@ pub const Generator = struct {
 
     /// Path of the config file this generator's tree is stored under,
     /// `<lowercased name>_generator.zon` inside the world's config directory.
-    pub fn configPath(self: *const Generator, allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
+    fn configPath(self: *const Generator, allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
         const lower_name = try allocator.dupe(u8, self.info.name);
         defer allocator.free(lower_name);
         for (lower_name) |*c| c.* = std.ascii.toLower(c.*);
@@ -114,14 +114,13 @@ pub const Registry = struct {
             if (!std.mem.endsWith(u8, entry.name, ".generator")) continue;
             const path = try std.Io.Dir.path.join(allocator, &.{ dir, entry.name });
             defer allocator.free(path);
-            registry.loadGenerator(io, path) catch |err|
+            registry.loadGenerator(path) catch |err|
                 std.log.err("failed to load generator {s}: {s}", .{ path, @errorName(err) });
         }
         return registry;
     }
 
-    fn loadGenerator(self: *Registry, io: std.Io, path: []const u8) !void {
-        _ = io;
+    fn loadGenerator(self: *Registry, path: []const u8) !void {
         var lib = try std.DynLib.open(path);
         errdefer lib.close();
 

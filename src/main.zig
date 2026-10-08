@@ -47,55 +47,39 @@ pub fn main(init: std.process.Init) !void {
     defer window.destroy();
     window.setMode(.maximized);
 
-    pollInitialSize(&events, &window_size);
+    var input: Input = .{};
+    pollInitialSize(&events, &input.window_size);
     var vk_ctx = try VulkanContext.init(gpa, &window);
     defer vk_ctx.deinit(io);
 
-    vk_ctx.setExtentFromWindow(window_size);
+    vk_ctx.setExtentFromWindow(input.window_size);
     vk_ctx.present_mode = config.game_config.render_options.present_mode;
     try vk_ctx.createSwapchainLocked(io, false);
 
-    var backend = try dvui.backend.init(.{ .io = io, .window = window, .size = window_size, .framebuffer = window_size });
+    var backend = try dvui.backend.init(.{
+        .io = io,
+        .window = window,
+        .size = input.window_size,
+        .framebuffer = input.window_size,
+        .gpa = gpa,
+        .dev = vk_ctx.dev,
+        .memory = dvui_vulkan_renderer.VkMemory.init(vk_ctx.mem_props, vk_ctx.props.limits.non_coherent_atom_size) orelse return error.NoSuitableMemory,
+        .max_frames = VulkanContext.max_frames_in_flight,
+        .swapchain_format = vk_ctx.swapchain_format,
+        .queue_family_index = vk_ctx.queue_family_index,
+    });
     defer backend.deinit();
-
-    const vk_memory = dvui_vulkan_renderer.VkMemory.init(
-        vk_ctx.mem_props,
-        vk_ctx.props.limits.non_coherent_atom_size,
-    ) orelse return error.NoSuitableMemory;
-    try backend.initVulkan(
-        vk_ctx.dev,
-        vk_memory,
-        gpa,
-        VulkanContext.max_frames_in_flight,
-        vk_ctx.swapchain_format,
-        vk_ctx.queue_family_index,
-    );
 
     const dvui_backend = dvui.Backend.init(&backend);
     var ui_window = try dvui.Window.init(@src(), gpa, dvui_backend, .{});
     defer ui_window.deinit();
 
-    var keymap = Key.Map.init(gpa);
-    defer keymap.map.deinit();
-
-    var single_press = Key.Singlepress.empty;
-    try keymap.setActionKey(.{ .key = .escape }, .escape_menu);
-    try keymap.setActionKey(.{ .key = .left_gui }, .escape_menu);
-    try keymap.setActionKey(.{ .key = .f11 }, .fullscreen);
-    try keymap.setActionKey(.{ .key = .f2 }, .screenshot);
-    try keymap.setActionKey(.{ .key = .f3 }, .debug_menu);
-    single_press.insert(.escape_menu);
-    single_press.insert(.fullscreen);
-    single_press.insert(.spawn_explosive);
-    single_press.insert(.screenshot);
-    single_press.insert(.debug_menu);
-    single_press.insert(.hotbar_left);
-    single_press.insert(.hotbar_right);
-    single_press.insert(.hotbar_up);
-    single_press.insert(.hotbar_down);
-    inline for (0..10) |slot| single_press.insert(@fromBackingInt(@intCast(@backingInt(Key.Action.hotbar_key_0) + slot)));
-
     inline for (.{
+        .{ .key = .escape, .action = .escape_menu },
+        .{ .key = .left_gui, .action = .escape_menu },
+        .{ .key = .f11, .action = .fullscreen },
+        .{ .key = .f2, .action = .screenshot },
+        .{ .key = .f3, .action = .debug_menu },
         .{ .key = .w, .action = .forward },
         .{ .key = .s, .action = .backward },
         .{ .key = .a, .action = .left },
@@ -122,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .key = .@"9", .action = .hotbar_key_8 },
         .{ .key = .@"0", .action = .hotbar_key_9 },
     }) |bind| {
-        try keymap.setActionKey(.{ .key = bind.key }, bind.action);
+        input.key_map.put(bind.key, bind.action);
     }
 
     var game: Game = undefined;
@@ -139,13 +123,12 @@ pub fn main(init: std.process.Init) !void {
     }
     const in_game = options.test_play != null and test_play_error == null;
     var ui: Ui = .{
-        .window = &window,
         .vk_ctx = vk_ctx,
         .config = &config,
         .config_lock = &config_lock,
         .game = &game,
         .generators = &generators,
-        .menu_state = if (in_game) .{ .ingame = true } else .{ .main = true },
+        .menu_state = .{ .ingame = in_game, .page = if (in_game) .game else .main },
         .world_error = test_play_error,
         .config_path = config_path,
         .worlds_path = worlds_path,
@@ -160,9 +143,6 @@ pub fn main(init: std.process.Init) !void {
 
     const start_time: std.Io.Timestamp = .now(io, .awake);
     var frame_time: std.Io.Timestamp = start_time;
-    var action_set = Key.ActionSet.empty;
-    var single_press_latch = Key.ActionSet.empty;
-    var prev_window_size = window_size;
     var current_window_mode: wio.WindowMode = .maximized;
     var pre_fullscreen_window_mode: wio.WindowMode = .maximized;
     var swapchain_recreate_failures: u32 = 0;
@@ -178,13 +158,16 @@ pub fn main(init: std.process.Init) !void {
         vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, &ui_cmd_buffers);
     }
 
-    var screenshot_after_triggered: bool = false;
-    var screenshot_after_should_exit: bool = false;
-    var screenshot_after_saved: bool = false;
+    // Null once the automatic screenshot is requested.
+    var screenshot_after = options.screenshot_after;
+    var exit_on_screenshot = false;
 
     while (running.load(.unordered)) {
         wio.update();
-        try handleEvents(io, &keymap, single_press, &single_press_latch, &action_set, &running, &backend, &window, &events, &ui_window, &ui, vk_ctx);
+        // Captured before the escape toggle, so gameplay input follows the page the events arrived on.
+        const playing = ui.menu_state.isPlayingGame();
+        try handleEvents(io, &input, &backend, &window, &events, &ui, vk_ctx);
+        const action_set = input.actions;
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         if (action_set.contains(.fullscreen)) {
             if (current_window_mode == .fullscreen) {
@@ -207,11 +190,6 @@ pub fn main(init: std.process.Init) !void {
         }
         frame_time = .now(io, .awake);
 
-        if (!std.meta.eql(prev_window_size, window_size)) {
-            vk_ctx.setExtentFromWindow(window_size);
-            prev_window_size = window_size;
-        }
-
         if (options.test_play) |timeout| {
             if (start_time.untilNow(io, .awake).toSeconds() >= timeout) {
                 std.log.info("Test play timeout reached", .{});
@@ -221,17 +199,13 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // Take an automatic screenshot once the timeout elapses.
-        if (options.screenshot_after) |screenshot_timeout| {
-            if (!screenshot_after_triggered and start_time.untilNow(io, .awake).toSeconds() >= screenshot_timeout) {
+        if (screenshot_after) |screenshot_timeout| {
+            if (start_time.untilNow(io, .awake).toSeconds() >= screenshot_timeout) {
                 std.log.info("Screenshot after timeout reached ({d}s), requesting screenshot", .{screenshot_timeout});
-                // Use the configured resolution for the automatic shot.
-                const res = config.game_config.render_options.screenshot_resolution;
-                vk_ctx.requestScreenshot(res);
-                screenshot_after_triggered = true;
+                vk_ctx.requestScreenshot(config.game_config.render_options.screenshot_resolution);
+                screenshot_after = null;
                 // Exit after the save completes when no play session owns the loop.
-                if (options.test_play == null) {
-                    screenshot_after_should_exit = true;
-                }
+                exit_on_screenshot = options.test_play == null;
             }
         }
 
@@ -264,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
                 .output_image = vk_ctx.swapchain_images[frame_ctx.image_index],
                 .output_view = vk_ctx.swapchain_views[frame_ctx.image_index],
                 .swapchain_image_layout = &vk_ctx.swapchain_image_layouts[frame_ctx.image_index],
-            }, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height });
+            }, .{ vk_ctx.swapchain_extent.width, vk_ctx.swapchain_extent.height }, if (playing) &action_set else null);
         }
 
         try ui.recordCommandBuffer(io, gpa, &backend, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
@@ -303,8 +277,7 @@ pub fn main(init: std.process.Init) !void {
                 vk_ctx.screenshot_pending_save = false;
             } else if (vk_ctx.savePendingScreenshot(io, gpa)) |saved_path| {
                 std.log.info("Screenshot saved: {s}", .{saved_path});
-                if (screenshot_after_should_exit and !screenshot_after_saved) {
-                    screenshot_after_saved = true;
+                if (exit_on_screenshot) {
                     std.log.info("Auto screenshot completed, exiting", .{});
                     running.store(false, .unordered);
                     break;
@@ -336,7 +309,7 @@ pub fn main(init: std.process.Init) !void {
                         => false,
                         else => true,
                     };
-                    if (game_closed) ui.menu_state = .{ .main = true };
+                    if (game_closed) ui.menu_state.leaveGame();
                 };
             } else |err| {
                 std.log.err("could not wait for the GPU before terrain recreation: {any}", .{err});
@@ -386,10 +359,6 @@ pub const Config = struct {
 
     pub const structui_options: dvui.struct_ui.StructOptions(@This()) = .initWithDefaults(.{}, null);
 };
-
-var window_size: wio.Size = .{ .height = 480, .width = 640 };
-var window_logical_size: wio.Size = .{ .height = 480, .width = 640 };
-var window_scale: f32 = 1.0;
 
 const embedded_generators: [5]struct { file_name: []const u8, bytes: []const u8 } = .{
     .{ .file_name = "terrain.generator", .bytes = @embedFile("terrain_generator_bin") },
@@ -466,59 +435,55 @@ fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, g
     vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
 }
 
-fn handleEvents(
-    io: std.Io,
-    key_map: *Key.Map,
-    single_press: Key.Singlepress,
-    latch: *Key.ActionSet,
-    action_set: *Key.ActionSet,
-    running: *std.atomic.Value(bool),
-    backend: *dvui.backend,
-    win: *wio.Window,
-    events: *wio.EventQueue,
-    ui_window: *dvui.Window,
-    ui: *Ui,
-    vk_ctx: *VulkanContext,
-) !void {
-    if (ui.menu_state.isPlayingGame()) {
+/// Loop-thread input state carried between frames.
+const Input = struct {
+    key_map: Key.Map = .{},
+    actions: Key.ActionSet = .empty,
+    /// Single-press actions pressed this frame, applied next frame.
+    latch: Key.ActionSet = .empty,
+    logical_size: wio.Size = .{ .height = 480, .width = 640 },
+    window_size: wio.Size = .{ .height = 480, .width = 640 },
+
+    /// Applies a physical size, recreating the swapchain only when it changed.
+    fn resize(self: *Input, vk_ctx: *VulkanContext, size: wio.Size) void {
+        if (std.meta.eql(self.window_size, size)) return;
+        self.window_size = size;
+        vk_ctx.setExtentFromWindow(size);
+    }
+};
+
+fn handleEvents(io: std.Io, input: *Input, backend: *dvui.backend, win: *wio.Window, events: *wio.EventQueue, ui: *Ui, vk_ctx: *VulkanContext) !void {
+    const playing = ui.menu_state.isPlayingGame();
+    if (playing) {
         win.enableRelativeMouse(.{ .unaccelerated = true });
     } else {
         win.disableRelativeMouse();
     }
 
     // Latch single-press actions one frame so a same-batch release cannot cancel them.
-    action_set.* = action_set.differenceWith(single_press).unionWith(latch.*);
-    latch.* = .empty;
+    input.actions = input.actions.differenceWith(Key.single_press).unionWith(input.latch);
+    input.latch = .empty;
 
     while (events.pop()) |event| {
-        _ = try backend.addEvent(ui_window, event);
+        _ = try backend.addEvent(ui.ui_window, event);
         switch (event) {
-            .button_press => |key| if (key_map.getAction(.{ .key = key })) |action| {
-                if (single_press.contains(action)) latch.insert(action) else action_set.insert(action);
+            .button_press => |key| if (input.key_map.get(key)) |action| {
+                if (Key.single_press.contains(action)) input.latch.insert(action) else input.actions.insert(action);
             },
-            .button_release => |key| if (key_map.getAction(.{ .key = key })) |action| {
-                if (!single_press.contains(action)) action_set.remove(action);
+            .button_release => |key| if (input.key_map.get(key)) |action| {
+                if (!Key.single_press.contains(action)) input.actions.remove(action);
             },
-            .close => running.store(false, .unordered),
-            .scroll_vertical => |scroll| if (ui.menu_state.isPlayingGame()) {
-                try ui.game.handleScroll(io, scroll);
-            },
-            .mouse_relative => |mouse| if (ui.menu_state.isPlayingGame() and (mouse.x != 0 or mouse.y != 0)) {
-                ui.game.handleMouseMotion(io, mouse);
-            },
-            .size_logical => |size| window_logical_size = size,
-            .size_physical => |size| window_size = size,
+            .close => ui.running.store(false, .unordered),
+            .scroll_vertical => |scroll| if (playing) try ui.game.handleScroll(io, scroll),
+            .mouse_relative => |mouse| if (playing and (mouse.x != 0 or mouse.y != 0)) ui.game.handleMouseMotion(io, mouse),
+            .size_logical => |size| input.logical_size = size,
+            .size_physical => |size| input.resize(vk_ctx, size),
             .scale => |scale| {
-                window_scale = scale;
-                window_size = window_logical_size.multiply(scale);
+                input.resize(vk_ctx, input.logical_size.multiply(scale));
                 vk_ctx.requestSwapchainRecreate();
             },
             else => {},
         }
-    }
-
-    if (ui.menu_state.isPlayingGame()) {
-        try ui.game.handleButtonActions(io, action_set);
     }
 }
 

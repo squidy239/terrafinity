@@ -37,29 +37,14 @@ pub const Action = enum {
 };
 
 pub const ActionSet = std.enums.EnumSet(Action);
-pub const Singlepress = std.enums.EnumSet(Action);
 
-const Keys = wio.Button;
+/// Actions that fire once per press instead of while held.
+pub const single_press: ActionSet = .initMany(&.{
+    .escape_menu,  .fullscreen,   .spawn_explosive, .screenshot,   .debug_menu,
+    .hotbar_left,  .hotbar_right, .hotbar_up,       .hotbar_down,  .hotbar_key_0,
+    .hotbar_key_1, .hotbar_key_2, .hotbar_key_3,    .hotbar_key_4, .hotbar_key_5,
+    .hotbar_key_6, .hotbar_key_7, .hotbar_key_8,    .hotbar_key_9,
+});
 
-pub const Key = struct {
-    key: Keys,
-};
-
-// Written once during init and read only on the loop thread. Add synchronization before sharing across threads.
-pub const Map = struct {
-    map: std.AutoHashMap(Key, Action),
-
-    pub fn init(allocator: std.mem.Allocator) Map {
-        return .{
-            .map = .init(allocator),
-        };
-    }
-
-    pub fn setActionKey(self: *Map, key: Key, action: Action) !void {
-        try self.map.put(key, action);
-    }
-
-    pub fn getAction(self: *Map, key: Key) ?Action {
-        return self.map.get(key);
-    }
-};
+/// The action each button triggers. Read only on the loop thread; rebinding is a `put`.
+pub const Map = std.enums.EnumMap(wio.Button, Action);

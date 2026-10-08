@@ -16,6 +16,7 @@ pub const Generator = struct {
     const thc_fragments = 8;
 
     params: Params,
+    seed: u64,
     terrain_height_cache: Cache(ChunkHeightsKey, ChunkHeightsValue, ChunkHeightsValue.keyFromValue, ChunkHeightsKey.hash, .{}, thc_fragments),
 
     const ChunkHeightsValue = struct {
@@ -40,7 +41,7 @@ pub const Generator = struct {
     };
 
     pub const Params = struct {
-        /// Null reseeds once on create, so pre-seed saves shift terrain one final time.
+        /// The host fills a null seed before create; every noise seed derives from it.
         seed: ?u64 = null,
         terrain_noise: Noise.Noise(f32),
         terrain_noise2: Noise.Noise(f32),
@@ -52,16 +53,10 @@ pub const Generator = struct {
         caves: bool,
         trees: bool,
 
-        pub fn setSeeds(self: *Params, io: std.Io) void {
-            const seed = self.seed orelse blk: {
-                var random_seed: u64 = undefined;
-                io.random(std.mem.asBytes(&random_seed));
-                self.seed = random_seed;
-                break :blk random_seed;
-            };
-            self.terrain_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed +% 1));
-            self.terrain_noise2.seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed +% 2));
-            self.cave_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(seed +% 3));
+        fn setSeeds(self: *Params, seed: u64) void {
+            self.terrain_noise.seed ^= @bitCast(std.hash.Murmur2_32.hashUint64(seed +% 1));
+            self.terrain_noise2.seed ^= @bitCast(std.hash.Murmur2_32.hashUint64(seed +% 2));
+            self.cave_noise.seed ^= @bitCast(std.hash.Murmur2_32.hashUint64(seed +% 3));
         }
 
         pub const default: Params = .{
@@ -95,7 +90,9 @@ pub const Generator = struct {
         };
     };
 
-    pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) !Generator {
+    pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params, seed: u64) !Generator {
+        var seeded = params;
+        seeded.setSeeds(seed);
         const cache_size = @max(
             std.math.floorPowerOfTwo(u64, max_cache_bytes / @sizeOf(ChunkHeightsValue)),
             256 * thc_fragments,
@@ -105,7 +102,8 @@ pub const Generator = struct {
         });
         return .{
             .terrain_height_cache = try .init(allocator, cache_size, .{ .name = "terrain_height_cache" }),
-            .params = params,
+            .params = seeded,
+            .seed = seed,
         };
     }
 
@@ -140,7 +138,7 @@ pub const Generator = struct {
 
         const terrain_heights = self.getTerrainHeight(io, .{ Pos[0], Pos[2] }, chunk_pos.level) catch return error.Unrecoverable;
 
-        var rand_impl = std.Random.DefaultPrng.init(self.params.seed.? +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
+        var rand_impl = std.Random.DefaultPrng.init(self.seed +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
 
         const scaled_dirt_depth = @as(i32, @intFromFloat(5.0 / @max(1.0, level_scale)));
         const tree_chance: f32 = 0.01 * self.params.scale;
@@ -432,11 +430,11 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
 fn create_instance(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) !*VoxelgameInstance {
     var params: Generator.Params = .default;
     try generator_api.fromTree(Generator.Params, opts.allocator, config, &params, field_specs);
-    if (params.seed == null) params.setSeeds(opts.io);
+    const seed = params.seed orelse return error.MissingSeed;
     const instance = try opts.allocator.create(VoxelgameInstance);
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
-        .generator = try Generator.init(opts.allocator, opts.max_cache_bytes, params),
+        .generator = try Generator.init(opts.allocator, opts.max_cache_bytes, params, seed),
         .source = undefined,
     };
     instance.source = .{
@@ -465,7 +463,7 @@ fn columnSpawnHeight(self: *const Generator, x: f32, z: f32) f32 {
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *VoxelgameInstance = @ptrCast(@alignCast(instance));
     // No sea level: water fills below y = 0, handled by the shared margin.
-    return generator_api.proposeSpawnField(self.generator.params.seed, center.*, radius, attempts, nonce, 0, &self.generator, columnSpawnHeight);
+    return generator_api.proposeSpawnField(self.generator.seed, center.*, radius, attempts, nonce, 0, &self.generator, columnSpawnHeight);
 }
 
 pub const generator_api_vtable: generator_api.GeneratorApi = .{
@@ -486,10 +484,7 @@ comptime {
 }
 
 test "proposeSpawn is deterministic and plausible" {
-    var params = Generator.Params.default;
-    params.seed = 42;
-    params.setSeeds(std.testing.io);
-    var generator = try Generator.init(std.testing.allocator, 0, params);
+    var generator = try Generator.init(std.testing.allocator, 0, .default, 42);
     defer generator.terrain_height_cache.deinit(std.testing.allocator);
     var instance = VoxelgameInstance{ .generator = generator, .source = undefined };
     const center = [3]f64{ 0, 0, 0 };

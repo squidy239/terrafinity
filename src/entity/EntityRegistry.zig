@@ -83,7 +83,6 @@ const SettleAction = union(enum) {
     free,
     park,
     link: u64,
-    keep,
 };
 
 pub const DeleteResult = enum { marked, missing };
@@ -335,7 +334,8 @@ pub fn drain(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *W
         for (batch[0..batch_len], 0..) |due, i| {
             self.runDue(ctx, due.slot, due.uuid) catch |err| {
                 // The pass ends here; re-arm the remainder so no claim is left in flight.
-                for (batch[i + 1 .. batch_len]) |rest| self.settleClaim(ctx, rest.slot, rest.uuid, .keep);
+                // A detached timer was due, so the watermark keeps it due for the next pass.
+                for (batch[i + 1 .. batch_len]) |rest| self.settleClaim(ctx, rest.slot, rest.uuid, .{ .link = ctx.watermark });
                 return err;
             };
         }
@@ -466,7 +466,6 @@ fn settleClaim(self: *@This(), ctx: DrainCtx, slot: u32, uuid: Handle, action: S
             .free => return self.freeSlotLocked(slot),
             .park => return,
             .link => |link| link,
-            .keep => node.deadline_ns,
         },
     };
     self.linkLocked(slot, deadline, ctx.seq, ctx.watermark);

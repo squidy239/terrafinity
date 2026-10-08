@@ -5,6 +5,7 @@ const zm = @import("zm");
 
 const Sphere = @import("../world/structures/Sphere.zig").Sphere;
 const World = @import("../world/World.zig");
+const Key = @import("../Key.zig");
 const Entity = @import("Entity.zig");
 const Item = @import("Item.zig");
 const Physics = @import("Physics.zig");
@@ -100,8 +101,25 @@ pub const Player = struct {
 
     /// Moves the selection, clamping to the inventory grid.
     pub fn selectSlot(self: *@This(), row: u32, col: u32) void {
-        self.selected_row = @min(row, self.main_inventory.height - 1);
+        self.selected_row = @min(row, self.main_inventory.height() - 1);
         self.selected_col = @min(col, self.main_inventory.width - 1);
+    }
+
+    /// Moves the selection by this frame's hotbar keys, wrapping at the grid edges.
+    pub fn navigateHotbar(self: *@This(), actions: *const Key.ActionSet) void {
+        const first_hotbar = @backingInt(Key.Action.hotbar_key_0);
+        const hotbar_key_count = 10;
+        inline for (0..hotbar_key_count) |slot| {
+            if (actions.contains(@fromBackingInt(@intCast(first_hotbar + slot)))) self.selectSlot(self.selected_row, @intCast(slot));
+        }
+        const row = self.selected_row;
+        const col = self.selected_col;
+        const width = self.main_inventory.width;
+        const height = self.main_inventory.height();
+        if (actions.contains(.hotbar_left)) self.selectSlot(row, if (col == 0) width - 1 else col - 1);
+        if (actions.contains(.hotbar_right)) self.selectSlot(row, (col + 1) % width);
+        if (actions.contains(.hotbar_up) or actions.contains(.hotbar_scroll_up)) self.selectSlot(if (row == 0) height - 1 else row - 1, col);
+        if (actions.contains(.hotbar_down) or actions.contains(.hotbar_scroll_down)) self.selectSlot((row + 1) % height, col);
     }
 
     /// Sets the velocity straight from the wish, so fly input is frame-independent.
@@ -258,14 +276,15 @@ pub const Explosive = struct {
     pos: @Vector(3, f64),
     /// Unit travel direction fixed at spawn; `update` integrates it into `pos` without renormalizing.
     dir: @Vector(3, f32),
-    timestamp: i96,
+    /// Last integration time on the `EntityRegistry.nowNs` clock.
+    timestamp_ns: u64,
 
-    pub fn init(pos: @Vector(3, f64), dir: @Vector(3, f32), timestamp: i96) @This() {
+    pub fn init(pos: @Vector(3, f64), dir: @Vector(3, f32), timestamp_ns: u64) @This() {
         const unit = if (std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 }))
             dir
         else
             zm.Vec3f.norm(.{ .data = dir }).data;
-        return .{ .pos = pos, .dir = unit, .timestamp = timestamp };
+        return .{ .pos = pos, .dir = unit, .timestamp_ns = timestamp_ns };
     }
 
     pub fn update(ptr: *Entity.Implementation, ctx: Entity.UpdateContext) error{ Canceled, Unrecoverable, OutOfMemory }!void {
@@ -279,9 +298,9 @@ pub const Explosive = struct {
         try editor.placeSamplerShape(.air, Sphere(f32).init(@floatCast(self.pos), blast_radius), World.standard_level);
 
         // The drain supplies the watermark; sampling the wall here would drift under late firing.
-        const now_i96: i96 = @intCast(ctx.now_ns);
-        const dt = @min(@as(f32, @floatFromInt(now_i96 - self.timestamp)) / std.time.ns_per_s, max_step_s);
-        self.timestamp = now_i96;
+        // A watermark sampled before the spawn saturates to a zero step.
+        const dt = @min(@as(f32, @floatFromInt(ctx.now_ns -| self.timestamp_ns)) / std.time.ns_per_s, max_step_s);
+        self.timestamp_ns = ctx.now_ns;
 
         const move = self.dir * @as(@Vector(3, f32), @splat(travel_speed * dt));
         self.pos += @as(@Vector(3, f64), @floatCast(move));

@@ -17,9 +17,7 @@ pub const SaveMode = enum {
     only_modified,
 };
 
-is_init: bool,
 database: rocksdb.database.DB,
-options: rocksdb.DBOptions,
 chunkdata_column: rocksdb.ColumnFamily,
 chunk_grid_column: rocksdb.ColumnFamily,
 save_mode: *SaveMode,
@@ -39,14 +37,8 @@ pub fn getSource(self: *@This()) World.ChunkSource {
 /// Open the chunk database, creating it on first use.
 pub fn init(path: []const u8, allocator: std.mem.Allocator, save_mode: *SaveMode, options_lock: *std.Io.RwLock) !@This() {
     var storage: @This() = undefined;
-    storage.is_init = true;
     storage.save_mode = save_mode;
     storage.options_lock = options_lock;
-    storage.options = .{
-        .create_if_missing = true,
-        .create_missing_column_families = true,
-        .compression = .zstd,
-    };
     var err_str: ?rocksdb.Data = null;
     defer if (err_str) |s| {
         std.log.err("{s}", .{s.data});
@@ -63,7 +55,11 @@ pub fn init(path: []const u8, allocator: std.mem.Allocator, save_mode: *SaveMode
         } },
         .{ .name = "default" }, // RocksDB requires a default column.
     };
-    storage.database, const columns = try rocksdb.DB.open(allocator, path, storage.options, &column_families, false, &err_str);
+    storage.database, const columns = try rocksdb.DB.open(allocator, path, .{
+        .create_if_missing = true,
+        .create_missing_column_families = true,
+        .compression = .zstd,
+    }, &column_families, false, &err_str);
     storage.chunkdata_column = columns[0];
     storage.chunk_grid_column = columns[1];
     allocator.free(columns);
@@ -226,8 +222,6 @@ fn deinitSource(source: World.ChunkSource, io: std.Io, allocator: std.mem.Alloca
 }
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-    std.debug.assert(self.is_init);
-    self.is_init = false;
     var es1: ?rocksdb.Data = null;
     defer if (es1) |s| s.deinit();
     self.database.flush(self.chunk_grid_column.handle, &es1) catch |err| std.log.warn("Flush failed: {any}\n", .{err});

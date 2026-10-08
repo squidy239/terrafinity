@@ -171,7 +171,7 @@ pub fn considerSpawnColumn(center: *const [3]f64, sample: [2]f64, height_above_w
 
 /// Shared pick-test-retry loop for heightfield generators. Pure; the host re-validates the winner.
 pub fn proposeSpawnField(
-    seed: ?u64,
+    seed: u64,
     center: [3]f64,
     radius: f64,
     attempts: u32,
@@ -180,12 +180,11 @@ pub fn proposeSpawnField(
     context: anytype,
     comptime columnHeight: anytype,
 ) Spawnpoint {
-    const live_seed = seed orelse return no_spawn;
     var best = SpawnBest{};
     const capped = @min(attempts, spawn_attempt_cap);
     for (0..capped) |i| {
         // Analytic test only; the host re-validates the winner.
-        const sample = spawnSample(live_seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
+        const sample = spawnSample(seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
         const sx: f32 = @floatCast(sample[0]);
         const sz: f32 = @floatCast(sample[1]);
         const h = columnHeight(context, sx, sz);
@@ -715,7 +714,7 @@ pub fn configSetSeeds(io: *const std.Io, config: *ConfigTree) void {
     }
 }
 
-/// Abstention every `propose_spawn` returns when its seed is unset. The host fails loudly.
+/// Abstention a `propose_spawn` returns when it finds no column. The host fails loudly.
 pub const no_spawn: Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false };
 
 pub fn getSource(comptime Instance: type, instance: *anyopaque) *const World.ChunkSource {

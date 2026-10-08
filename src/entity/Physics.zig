@@ -98,7 +98,7 @@ pub const Mover = struct {
 
     /// Integrates in size-aware substeps and resolves one axis at a time, so only
     /// the blocked axis loses velocity and short rises become automatic steps.
-    fn moveAndCollide(self: *@This(), io: std.Io, allocator: std.mem.Allocator, physics: anytype, delta_t: f64, reader: *World.Reader) !void {
+    fn moveAndCollide(self: *@This(), io: std.Io, allocator: std.mem.Allocator, physics: *Body, delta_t: f64, reader: *World.Reader) !void {
         self.advanceClimb(physics, delta_t);
 
         const pos_offset = physics.velocity * @as(@Vector(3, f64), @splat(delta_t));
@@ -147,7 +147,7 @@ pub const Mover = struct {
     /// Raises the body toward a pending step target at a bounded rate. Vertical
     /// velocity is cleared while climbing so gravity cannot fight the rise, which
     /// keeps a step smooth instead of an instant snap.
-    fn advanceClimb(self: *@This(), physics: anytype, delta_t: f64) void {
+    fn advanceClimb(self: *@This(), physics: *Body, delta_t: f64) void {
         const target = self.climb_target_y orelse return;
         physics.velocity[1] = 0;
         const raised = @min(target, physics.pos[1] + self.step_climb_speed * delta_t);
@@ -431,22 +431,18 @@ test "Mover lands on a flat floor and reports support" {
 }
 
 test "Mover climb advances at a bounded rate" {
-    var mover = testMover(1, 2);
-    var physics: struct { pos: @Vector(3, f64), velocity: @Vector(3, f64) } = .{
-        .pos = .{ 0, 0, 0 },
-        .velocity = .{ 0, -9, 0 },
-    };
-    mover.climb_target_y = 0.5;
+    var body = testBody(std.testing.io, 1, 2, @splat(0), .{ 0, -9, 0 });
+    body.mover.climb_target_y = 0.5;
 
-    mover.advanceClimb(&physics, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.2), physics.pos[1], 1e-9);
-    try std.testing.expectEqual(@as(f64, 0), physics.velocity[1]);
-    try std.testing.expect(mover.climb_target_y != null);
+    body.mover.advanceClimb(&body, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.2), body.pos[1], 1e-9);
+    try std.testing.expectEqual(@as(f64, 0), body.velocity[1]);
+    try std.testing.expect(body.mover.climb_target_y != null);
 
     // Reaching the target settles exactly on it and clears the climb.
-    mover.advanceClimb(&physics, 1.0);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.5), physics.pos[1], 1e-9);
-    try std.testing.expectEqual(@as(?f64, null), mover.climb_target_y);
+    body.mover.advanceClimb(&body, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), body.pos[1], 1e-9);
+    try std.testing.expectEqual(@as(?f64, null), body.mover.climb_target_y);
 }
 
 test "Mover steps up a one-block rise" {

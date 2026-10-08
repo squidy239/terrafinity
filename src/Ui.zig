@@ -3,7 +3,6 @@ const std = @import("std");
 const dvui = @import("dvui");
 const tracy = @import("tracy");
 const vk = @import("vulkan");
-const wio = @import("wio");
 const zignal = @import("zignal");
 
 const Config = @import("main.zig").Config;
@@ -28,9 +27,8 @@ const Ui = @This();
 const NewGameState = struct {
     world_config: World.WorldConfig = .{},
     spawn_config: EntityRegistry.SpawnConfig = .{},
-    generator_name: []const u8 = "Terrain",
-    generator_name_allocated: bool = false,
-    generator: ?*generator_loader.Generator = null,
+    /// Index into the generator registry, chosen when the page first opens.
+    generator_index: ?usize = null,
     config: ?*generator_api.ConfigTree = null,
     preset_index: usize = 0,
 };
@@ -78,7 +76,6 @@ pub const main_theme: dvui.Theme = blk: {
     };
 };
 
-window: *wio.Window,
 vk_ctx: *VulkanContext,
 config: *Config,
 config_lock: *std.Io.RwLock,
@@ -107,11 +104,10 @@ config_dirty: bool = false,
 
 menu_state: struct {
     ingame: bool = false,
+    /// The full-screen page drawn over the game view; `.game` shows none.
+    page: enum { game, main, settings, newgame, esc } = .main,
+    /// Preferences live beside the page so navigation never resets them.
     debug_info: bool = true,
-    settings: bool = false,
-    main: bool = false,
-    esc: bool = false,
-    newgame: bool = false,
     crosshair: bool = true,
 
     pending_game_deinit: bool = false,
@@ -121,13 +117,22 @@ menu_state: struct {
     /// Reports whether gameplay input is active. Every menu is drawn full-screen over
     /// the game view, so an open one takes the input the player would otherwise get.
     pub fn isPlayingGame(self: @This()) bool {
-        const menu_open = self.settings or self.main or self.esc or self.newgame;
-        return self.ingame and !menu_open;
+        return self.ingame and self.page == .game;
     }
 
     pub fn handleEsc(self: *@This()) void {
-        if (self.ingame) self.esc = !self.esc;
-        self.settings = false;
+        if (self.ingame) self.page = if (self.page == .esc) .game else .esc;
+    }
+
+    pub fn enterGame(self: *@This()) void {
+        self.ingame = true;
+        self.page = .game;
+    }
+
+    pub fn leaveGame(self: *@This()) void {
+        self.ingame = false;
+        self.page = .main;
+        self.terrain_developer_settings = false;
     }
 },
 
@@ -198,7 +203,6 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     }
     if (self.hotbar_missing_texture) |t| self.ui_window.backend.textureDestroy(t);
     if (self.new_game.config) |config| generator_api.free(allocator, config);
-    if (self.new_game.generator_name_allocated) allocator.free(self.new_game.generator_name);
     if (self.delete_world_name) |name| allocator.free(name);
     self.config_section_states.deinit();
     for (self.world_list.items) |entry| allocator.free(entry.name);
@@ -228,7 +232,6 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
 
     try self.ui_window.begin(std.Io.Timestamp.now(io, .awake).toNanoseconds());
     dvui.themeSet(main_theme);
-    var menu_changed: bool = false;
     {
         const ov = dvui.overlay(@src(), .{ .expand = .both });
         defer ov.deinit();
@@ -251,20 +254,17 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
         };
         if (self.menu_state.crosshair and self.menu_state.ingame) crossHair();
         if (self.menu_state.ingame) self.hotbar();
-        if (self.menu_state.esc) menu_changed = self.escMenu() catch false;
-        if (self.menu_state.main and !menu_changed) menu_changed = self.mainPage(io, gpa) catch |err| blk: {
-            showWorldError(frame_time, err);
-            break :blk false;
-        };
-        if (self.menu_state.settings and !menu_changed) menu_changed = self.settingsMenu(io, gpa) catch false;
-        if (self.menu_state.newgame and !menu_changed) menu_changed = self.newGameMenu(io, gpa) catch |err| blk: {
-            showWorldError(frame_time, err);
-            break :blk false;
-        };
+        switch (self.menu_state.page) {
+            .game => {},
+            .esc => self.escMenu(),
+            .main => self.mainPage(io, gpa) catch |err| showWorldError(frame_time, err),
+            .settings => self.settingsMenu(io, gpa) catch |err| std.log.err("settingsMenu failed: {}", .{err}),
+            .newgame => self.newGameMenu(io, gpa) catch |err| showWorldError(frame_time, err),
+        }
         if (self.menu_state.ingame and self.menu_state.terrain_developer_settings) self.drawTerrainDeveloperSettings(io, gpa);
     }
     _ = try self.ui_window.end(.{});
-    if (self.config_dirty and !self.menu_state.settings) {
+    if (self.config_dirty and self.menu_state.page != .settings) {
         self.config_dirty = false;
         try self.config.save(io, self.config_path, self.config_lock);
     }
@@ -307,9 +307,8 @@ pub fn recordCommandBuffer(
         .p_color_attachments = (&color_attachment)[0..1],
     });
 
-    backend.setCommandBuffer(cmd, extent);
-    defer backend.setCommandBuffer(null, .{ .width = 0, .height = 0 });
-    backend.beginFrame();
+    backend.beginFrame(.{ .cmd_buffer = cmd, .extent = extent });
+    defer backend.target = null;
     try self.drawFrame(io, gpa, frame_time);
     self.vk_ctx.dev.cmdEndRendering(cmd);
 
@@ -364,33 +363,27 @@ fn pageContent(id_extra: usize) *dvui.BoxWidget {
     });
 }
 
-pub fn escMenu(self: *@This()) !bool {
+pub fn escMenu(self: *@This()) void {
     std.debug.assert(self.menu_state.ingame);
     const button_options: dvui.Options = .{ .min_size_content = .width(640 * 0.75), .gravity_x = 0.5 };
     const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .color = .{ .r = 0, .g = 200, .b = 200, .a = 150 } }, .expand = .both });
     defer menu.deinit();
     if (dvui.button(@src(), "Back To Game", .{}, button_options)) {
-        self.menu_state.esc = false;
-        return true;
+        self.menu_state.page = .game;
+        return;
     }
 
     if (dvui.button(@src(), "Settings", .{}, button_options)) {
-        self.menu_state.settings = true;
-        self.menu_state.esc = false;
-        return true;
+        self.menu_state.page = .settings;
+        return;
     }
 
     if (dvui.button(@src(), "Quit", .{}, button_options)) {
-        self.menu_state.main = true;
-        self.menu_state.esc = false;
-        self.menu_state.ingame = false;
+        self.menu_state.leaveGame();
         self.menu_state.pending_game_deinit = true;
         // External changes may add or remove worlds, so refresh the list on entry.
         self.world_list_dirty = true;
-        return true;
     }
-
-    return false;
 }
 
 pub fn debugInfo(self: *@This()) !void {
@@ -420,6 +413,7 @@ pub fn debugInfo(self: *@This()) !void {
     const player_pos = self.game.player.body.pos;
     const pos: @Vector(3, i64) = @intFromFloat(@round(player_pos));
     const spawn: @Vector(3, i64) = @intFromFloat(@round(self.game.spawn.pos));
+    const stats = self.game.vulkan_renderer.frame_stats;
     const str = try std.mem.print(
         &fmt_buffer,
         \\FPS: {d}
@@ -438,14 +432,14 @@ pub fn debugInfo(self: *@This()) !void {
         \\chunk hit ratio: {d:.2}
     ,
         .{
-            @trunc(self.game.debug_menu.fps.load(.unordered)),
+            @trunc(self.game.debug_menu.fps),
             self.game.debug_menu.meshes.load(.unordered),
-            self.game.debug_menu.opaque_drawn.load(.unordered),
-            self.game.debug_menu.transparent_drawn.load(.unordered),
-            self.game.debug_menu.occluded.load(.unordered),
-            self.game.debug_menu.frustum_culled.load(.unordered),
-            self.game.debug_menu.opaque_faces.load(.unordered),
-            self.game.debug_menu.transparent_faces.load(.unordered),
+            stats.opaque_drawn,
+            stats.transparent_drawn,
+            stats.hiz_occluded,
+            stats.frustum_culled,
+            stats.opaque_faces,
+            stats.transparent_faces,
             pos[0],
             pos[1],
             pos[2],
@@ -454,18 +448,18 @@ pub fn debugInfo(self: *@This()) !void {
             spawn[2],
             chunk_count,
             grid_count,
-            self.game.debug_menu.entities.load(.unordered),
+            self.game.entity_registry.count(),
             chunk_hit_ratio,
         },
     );
     text.addText(str, .{ .background = false });
 }
 
-pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
+pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    const menu_changed: bool = if (!self.menu_state.ingame) self.sidebar() else false;
+    if (!self.menu_state.ingame) self.sidebar();
     const settings = dvui.scrollArea(@src(), .{ .vertical_bar = .auto }, .{
         .expand = .both,
         .background = true,
@@ -535,7 +529,6 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
     }
 
     self.config_dirty = self.config_dirty or config_changed;
-    return menu_changed;
 }
 
 const settings_root_id: u64 = 0x73657474696e6773;
@@ -741,15 +734,12 @@ fn drawTerrainDeveloperSettings(self: *@This(), io: std.Io, allocator: std.mem.A
         });
     }
 
-    if (self.game.generator) |*generator| {
-        dvui.labelNoFmt(@src(), generator.generator.info.name, .{}, .{ .font = .{ .size = 20 }, .gravity_x = 0.5 });
-        if (generator.generator.info.description.len > 0) {
-            dvui.labelNoFmt(@src(), generator.generator.info.description, .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 8 } });
-        }
-        drawConfigTree(self, allocator, generator.config);
-    } else {
-        dvui.labelNoFmt(@src(), "No generator is loaded.", .{}, .{ .gravity_x = 0.5 });
+    const generator = &self.game.generator;
+    dvui.labelNoFmt(@src(), generator.generator.info.name, .{}, .{ .font = .{ .size = 20 }, .gravity_x = 0.5 });
+    if (generator.generator.info.description.len > 0) {
+        dvui.labelNoFmt(@src(), generator.generator.info.description, .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 8 } });
     }
+    drawConfigTree(self, allocator, generator.config);
 
     if (self.game.spawn.found) {
         dvui.labelNoFmt(@src(), "World spawn is set. Clearing it re-picks on the next world load.", .{}, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 4 } });
@@ -934,25 +924,23 @@ fn hotbarSlot(self: *@This(), index: u32, item: ?Item.Item, selected: bool) void
     }
 }
 
-fn selectNewGameGenerator(self: *@This(), allocator: std.mem.Allocator, generator: *generator_loader.Generator) !void {
-    if (self.new_game.generator == generator) return;
+fn newGameGenerator(self: *@This()) ?*generator_loader.Generator {
+    const index = self.new_game.generator_index orelse return null;
+    return &self.generators.generators.items[index];
+}
 
+fn selectNewGameGenerator(self: *@This(), allocator: std.mem.Allocator, index: usize) !void {
+    if (self.new_game.generator_index == index) return;
+    const generator = &self.generators.generators.items[index];
     const config = generator.defaultConfig(allocator) orelse return error.OutOfMemory;
-    errdefer generator_api.free(allocator, config);
-    const name = try allocator.dupe(u8, generator.info.name);
-    errdefer allocator.free(name);
-
     if (self.new_game.config) |old_config| generator_api.free(allocator, old_config);
-    if (self.new_game.generator_name_allocated) allocator.free(self.new_game.generator_name);
     self.new_game.preset_index = generator.defaultPresetIndex();
     self.new_game.config = config;
-    self.new_game.generator = generator;
-    self.new_game.generator_name = name;
-    self.new_game.generator_name_allocated = true;
+    self.new_game.generator_index = index;
 }
 
 fn selectNewGamePreset(self: *@This(), allocator: std.mem.Allocator, index: usize) !void {
-    const generator = self.new_game.generator orelse return;
+    const generator = self.newGameGenerator() orelse return;
     const config = generator.presetConfig(allocator, index) orelse return error.OutOfMemory;
     errdefer generator_api.free(allocator, config);
     if (self.new_game.config) |old_config| generator_api.free(allocator, old_config);
@@ -962,11 +950,11 @@ fn selectNewGamePreset(self: *@This(), allocator: std.mem.Allocator, index: usiz
 
 const max_generator_dropdown_entries: usize = 16;
 
-pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
+pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    const menu_changed: bool = if (!self.menu_state.ingame) self.sidebar() else false;
+    if (!self.menu_state.ingame) self.sidebar();
 
     const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = .{ .r = 48, .g = 77, .b = 84, .a = 225 } } });
     defer options.deinit();
@@ -981,7 +969,7 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     {
         const world_name_widget = dvui.textEntry(@src(), .{ .placeholder = "World Name" }, .{ .gravity_x = 0.5 });
         defer world_name_widget.deinit();
-        if (create) return try self.createWorld(io, allocator, world_name_widget.textGet());
+        if (create) return self.createWorld(io, allocator, world_name_widget.textGet());
     }
 
     drawSpawnConfig(&self.new_game.spawn_config);
@@ -992,18 +980,18 @@ pub fn newGameMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bo
     const scroll = dvui.scrollArea(@src(), .{ .vertical = .auto }, .{ .expand = .both });
     defer scroll.deinit();
     if (self.new_game.config) |config| drawConfigTree(self, allocator, config);
-
-    return menu_changed;
 }
 
 fn ensureNewGameGenerator(self: *@This(), allocator: std.mem.Allocator) !void {
-    if (self.new_game.generator != null) return;
-    const initial = self.generators.findByName(self.new_game.generator_name) orelse
-        (if (self.generators.generators.items.len > 0) &self.generators.generators.items[0] else null);
-    if (initial) |generator| try self.selectNewGameGenerator(allocator, generator);
+    const generators = self.generators.generators.items;
+    if (self.new_game.generator_index != null or generators.len == 0) return;
+    const initial = for (generators, 0..) |generator, i| {
+        if (std.mem.eql(u8, generator.info.name, Game.WorldOptions.default.generator_name)) break i;
+    } else 0;
+    try self.selectNewGameGenerator(allocator, initial);
 }
 
-fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_name: []const u8) !bool {
+fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_name: []const u8) !void {
     if (world_name.len == 0) return error.WorldNameMissing;
     if (!std.unicode.utf8ValidateSlice(world_name)) return error.InvalidName;
     if (std.mem.findScalar(u8, world_name, '/') != null) return error.InvalidName;
@@ -1017,7 +1005,7 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     const game_path = try std.Io.Dir.path.join(allocator, &.{ self.worlds_path, world_name });
     defer allocator.free(game_path);
     const world_options: Game.WorldOptions = .{
-        .generator_name = self.new_game.generator_name,
+        .generator_name = if (self.newGameGenerator()) |generator| generator.info.name else Game.WorldOptions.default.generator_name,
         .world_config = self.new_game.world_config,
         .spawn = self.new_game.spawn_config,
     };
@@ -1026,9 +1014,7 @@ fn createWorld(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world_n
     // Mark the list stale before the fallible open so a failed open still refreshes.
     self.world_list_dirty = true;
     try self.openGame(io, allocator, game_path);
-    self.menu_state.ingame = true;
-    self.menu_state.newgame = false;
-    return true;
+    self.menu_state.enterGame();
 }
 
 fn worldExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
@@ -1040,7 +1026,7 @@ fn worldExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
 }
 
 fn saveGeneratorConfig(self: *@This(), allocator: std.mem.Allocator, io: std.Io, game_path: []const u8) !void {
-    const generator = self.new_game.generator orelse return;
+    const generator = self.newGameGenerator() orelse return;
     const config = self.new_game.config orelse return;
     generator.api.config_set_seeds(&io, config);
     const config_dir = try std.Io.Dir.path.join(allocator, &.{ game_path, "config" });
@@ -1077,36 +1063,29 @@ fn generatorDropdown(self: *@This(), allocator: std.mem.Allocator) !void {
     const count = @min(self.generators.generators.items.len, max_generator_dropdown_entries);
     var names_buffer: [max_generator_dropdown_entries][]const u8 = undefined;
     for (names_buffer[0..count], self.generators.generators.items[0..count]) |*name, *generator| name.* = generator.info.name;
-    const previous = self.selectedGeneratorIndex(count);
+    const selected = self.new_game.generator_index orelse 0;
+    const previous = if (selected < count) selected else 0;
     var choice: usize = previous;
     dvui.labelNoFmt(@src(), "Generator", .{}, .{ .font = .{ .size = 24 } });
     _ = dvui.dropdown(@src(), names_buffer[0..count], .{ .choice = &choice }, .{}, .{});
-    if (choice != previous) try self.selectNewGameGenerator(allocator, &self.generators.generators.items[choice]);
+    if (choice != previous) try self.selectNewGameGenerator(allocator, choice);
 }
 
 fn presetDropdown(self: *@This(), allocator: std.mem.Allocator) !void {
-    const generator = self.new_game.generator orelse return;
+    const generator = self.newGameGenerator() orelse return;
     const count = generator.presetCount();
     if (count == 0) return;
     var names_buffer: [max_generator_dropdown_entries][]const u8 = undefined;
     const n = @min(count, max_generator_dropdown_entries);
     for (names_buffer[0..n], 0..) |*dest, i| dest.* = generator.presetName(i);
-    if (self.new_game.preset_index >= n) self.new_game.preset_index = 0;
-    const previous = self.new_game.preset_index;
+    const previous = if (self.new_game.preset_index < n) self.new_game.preset_index else 0;
+    var choice: usize = previous;
     dvui.labelNoFmt(@src(), "Preset", .{}, .{ .font = .{ .size = 24 } });
-    _ = dvui.dropdown(@src(), names_buffer[0..n], .{ .choice = &self.new_game.preset_index }, .{}, .{});
-    if (self.new_game.preset_index != previous) try self.selectNewGamePreset(allocator, self.new_game.preset_index);
+    _ = dvui.dropdown(@src(), names_buffer[0..n], .{ .choice = &choice }, .{}, .{});
+    if (choice != previous) try self.selectNewGamePreset(allocator, choice);
 }
 
-fn selectedGeneratorIndex(self: *@This(), count: usize) usize {
-    const selected = self.new_game.generator orelse return 0;
-    for (self.generators.generators.items[0..count], 0..) |*generator, i| {
-        if (generator == selected) return i;
-    }
-    return 0;
-}
-
-pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
+pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const menuarea = dvui.overlay(@src(), .{ .expand = .both });
     defer menuarea.deinit();
     _ = dvui.image(@src(), .{ .source = .{ .texture = self.menu_background }, .shrink = .vertical }, .{ .expand = .both });
@@ -1114,7 +1093,7 @@ pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool 
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    var changed: bool = self.sidebar();
+    self.sidebar();
 
     const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = .{ .color = .{ .r = 24, .g = 24, .b = 24, .a = 255 } }, .expand = .both });
     defer menu.deinit();
@@ -1124,30 +1103,25 @@ pub fn mainPage(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool 
     terrafinity.addText("terrafinity", .{ .font = .{ .size = 64, .family = pixel_font } });
     terrafinity.deinit();
     top.deinit();
-    changed |= try self.continueMenu(io, allocator);
-    return changed;
+    try self.continueMenu(io, allocator);
 }
 
-pub fn sidebar(self: *@This()) bool {
+pub fn sidebar(self: *@This()) void {
     const bar = dvui.box(@src(), .{ .dir = .vertical }, .{ .background = true, .color_fill = .{ .color = .{ .r = 48, .g = 77, .b = 48, .a = 225 } }, .expand = .vertical, .min_size_content = .width(128) });
     defer bar.deinit();
     const button_options: dvui.Options = .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } };
 
     if (dvui.button(@src(), "Home", .{}, button_options)) {
-        self.menu_state = .{ .main = true };
+        self.menu_state.page = .main;
         // External changes may add or remove worlds, so refresh the list on entry.
         self.world_list_dirty = true;
-        return true;
+        return;
     }
     if (dvui.button(@src(), "Settings", .{}, button_options)) {
-        self.menu_state = .{ .settings = true };
-        return true;
+        self.menu_state.page = .settings;
+        return;
     }
-    if (dvui.button(@src(), "Quit", .{}, button_options.override(.{ .color_fill = .olive }))) {
-        self.running.store(false, .unordered);
-        return true;
-    }
-    return false;
+    if (dvui.button(@src(), "Quit", .{}, button_options.override(.{ .color_fill = .olive }))) self.running.store(false, .unordered);
 }
 
 const FolderData = struct {
@@ -1155,7 +1129,7 @@ const FolderData = struct {
     name: []const u8,
 };
 
-pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
+pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     const continue_games = dvui.scrollArea(@src(), .{
         .horizontal_bar = .show,
         .vertical = .none,
@@ -1175,8 +1149,8 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         const new_game = menuCard(@src(), .{}, .{ .expand = .vertical });
         defer new_game.deinit();
         if (dvui.button(@src(), "+", .{}, .{ .expand = .both, .color_fill = .blue, .font = .{ .size = 96, .weight = .bold, .family = comptime dvui.Font.array("Vera Sans") } })) {
-            self.menu_state = .{ .newgame = true };
-            return true;
+            self.menu_state.page = .newgame;
+            return;
         }
     }
 
@@ -1211,9 +1185,8 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             const jpath = try std.Io.Dir.path.join(allocator, &.{ self.worlds_path, item.name });
             defer allocator.free(jpath);
             try self.openGame(io, allocator, jpath);
-            self.menu_state.ingame = true;
-            self.menu_state.main = false;
-            return true;
+            self.menu_state.enterGame();
+            return;
         }
 
         if (dvui.button(@src(), "Delete", .{}, .{ .gravity_x = 0.0, .expand = .none, .margin = .{ .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .red, .corners = .all(2) })) {
@@ -1261,7 +1234,7 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
                 return err;
             };
             self.world_list_dirty = true;
-            return true;
+            return;
         }
         // Dismissed via Esc or clicking outside the modal.
         if (!open and self.delete_world_name != null) {
@@ -1269,8 +1242,6 @@ pub fn continueMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
             self.delete_world_name = null;
         }
     }
-
-    return false;
 }
 
 fn lessThanFn(_: void, a: FolderData, b: FolderData) bool {

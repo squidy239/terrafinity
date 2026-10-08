@@ -88,7 +88,6 @@ inline fn getNeighborVec(comptime rotation: FaceRotation, neighbor_face: *const 
 
 fn meshUniformChunkFace(main_block: Block, neighbor_face: *const Chunk.Encoding.Face, comptime rotation: FaceRotation, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) void {
     if (neighbor_face.* == .uniform and meshOne(main_block, neighbor_face.uniform) == .none) return;
-    if (!main_block.isVisible()) return;
     const one_uniform_vec: @Vector(ChunkSize, Block.Tag) = @splat(@backingInt(main_block));
     const ones_visible: @Int(.unsigned, ChunkSize) = std.math.maxInt(@Int(.unsigned, ChunkSize));
     const ones_transparent: @Int(.unsigned, ChunkSize) = @bitCast(Block.isTransparentVector(ChunkSize, one_uniform_vec));
@@ -228,16 +227,17 @@ fn meshBlockGrid(allocator: std.mem.Allocator, noalias grid: *const [ChunkSize][
                 },
             };
             inline for (neighbor_vecs, std.enums.values(FaceRotation)) |neighbor_vec, rotation| {
-                var transparent, var @"opaque" = meshMany(ChunkSize, center_row, ones_visible, ones_transparent, neighbor_vec);
-                if (@"opaque" != 0) try addGridFaces(ChunkSize, allocator, &@"opaque", rotation, false, &grid[x][y], @intCast(x), @intCast(y), opaque_faces, transparent_faces);
-                if (transparent != 0) try addGridFaces(ChunkSize, allocator, &transparent, rotation, true, &grid[x][y], @intCast(x), @intCast(y), opaque_faces, transparent_faces);
+                const transparent, const @"opaque" = meshMany(ChunkSize, center_row, ones_visible, ones_transparent, neighbor_vec);
+                if (@"opaque" != 0) try addGridFaces(ChunkSize, allocator, @"opaque", rotation, false, &grid[x][y], @intCast(x), @intCast(y), opaque_faces, transparent_faces);
+                if (transparent != 0) try addGridFaces(ChunkSize, allocator, transparent, rotation, true, &grid[x][y], @intCast(x), @intCast(y), opaque_faces, transparent_faces);
             }
         }
     }
 }
 
-fn addGridFaces(comptime len: usize, allocator: std.mem.Allocator, noalias mask: *@Int(.unsigned, len), comptime rotation: FaceRotation, comptime transparent: bool, noalias center_row: *const [len]Block.Tag, x: Face.CoordInChunk, y: Face.CoordInChunk, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
-    std.debug.assert(mask.* != 0);
+fn addGridFaces(comptime len: usize, allocator: std.mem.Allocator, mask_start: @Int(.unsigned, len), comptime rotation: FaceRotation, comptime transparent: bool, noalias center_row: *const [len]Block.Tag, x: Face.CoordInChunk, y: Face.CoordInChunk, noalias opaque_faces: *std.ArrayList(Face), noalias transparent_faces: *std.ArrayList(Face)) !void {
+    std.debug.assert(mask_start != 0);
+    var mask = mask_start;
     const faces_list = switch (comptime transparent) {
         true => transparent_faces,
         false => opaque_faces,
@@ -250,8 +250,8 @@ fn addGridFaces(comptime len: usize, allocator: std.mem.Allocator, noalias mask:
     const water_tag = @backingInt(Block.water);
     var last: Face = undefined;
     var pending = false;
-    while (mask.* != 0) : (mask.* &= (mask.* - 1)) {
-        const z: Face.CoordInChunk = @intCast(@ctz(mask.*));
+    while (mask != 0) : (mask &= (mask - 1)) {
+        const z: Face.CoordInChunk = @intCast(@ctz(mask));
         const block = center_row[z];
         if (pending and greedy_z and last.block_type == block and block != water_tag and z == last.z + last.z_length + 1) {
             @branchHint(.unpredictable);
@@ -273,7 +273,7 @@ fn addGridFaces(comptime len: usize, allocator: std.mem.Allocator, noalias mask:
     try faces_list.append(allocator, last);
 }
 
-pub const MeshResult = enum(Tag) {
+const MeshResult = enum(Tag) {
     pub const Tag = u8;
     none,
     transparent,

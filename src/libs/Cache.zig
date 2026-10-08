@@ -43,14 +43,6 @@ pub fn Cache(
             }
         }
 
-        pub fn reset(self: *Self, io: std.Io) void {
-            for (&self.shards, &self.shard_locks) |*shard, *lock| {
-                lock.lockUncancelable(io);
-                defer lock.unlock(io);
-                shard.*.reset();
-            }
-        }
-
         pub fn get(self: *Self, io: std.Io, key: Key) ?Value {
             const shard, const lock = self.getShardAndLock(key);
             lock.lockUncancelable(io);
@@ -96,20 +88,11 @@ pub fn Cache(
             return total;
         }
 
-        pub fn upsert(self: *Self, io: std.Io, value: *const Value) struct {
-            index: usize,
-            updated: SetAssociativeCache.UpdateOrInsert,
-            evicted: ?Value,
-        } {
+        pub fn upsert(self: *Self, io: std.Io, value: *const Value) Shard.Upserted {
             const shard, const lock = self.getShardAndLock(key_from_value(value));
             lock.lockUncancelable(io);
             defer lock.unlock(io);
-            const result = shard.upsert(value);
-            return .{
-                .index = result.index,
-                .updated = result.updated,
-                .evicted = result.evicted,
-            };
+            return shard.upsert(value);
         }
     };
 }

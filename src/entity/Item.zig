@@ -11,14 +11,17 @@ const utils = @import("../libs/utils.zig");
 /// An item grid. Its owner drives it from one thread, so it needs no lock.
 pub const Inventory = struct {
     width: u32,
-    height: u32,
-    /// Row-major, `width * height` slots.
+    /// Row-major, `width * height()` slots.
     items: []?Item,
 
-    pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) !Inventory {
-        const items = try allocator.alloc(?Item, @as(usize, width) * height);
+    pub fn init(allocator: std.mem.Allocator, width: u32, rows: u32) !Inventory {
+        const items = try allocator.alloc(?Item, @as(usize, width) * rows);
         @memset(items, null);
-        return .{ .width = width, .height = height, .items = items };
+        return .{ .width = width, .items = items };
+    }
+
+    pub fn height(self: *const Inventory) u32 {
+        return @intCast(self.items.len / self.width);
     }
 
     pub fn deinit(self: *Inventory, allocator: std.mem.Allocator) void {
@@ -38,7 +41,7 @@ pub const Inventory = struct {
     }
 
     fn index(self: *const Inventory, row: u32, col: u32) usize {
-        std.debug.assert(row < self.height and col < self.width);
+        std.debug.assert(row < self.height() and col < self.width);
         return @as(usize, row) * self.width + col;
     }
 };

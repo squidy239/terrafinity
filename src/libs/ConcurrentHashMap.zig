@@ -4,45 +4,29 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
     return struct {
         const Map = @This();
         pub const Bkt = Bucket(K, V, Context);
-        ctx: Context,
         buckets: [bucket_amount]Bkt,
 
         const Self = @This();
 
         pub fn get(self: *Self, io: std.Io, key: K) ?V {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return self.buckets[bucket_index].get(io, key);
+            return self.getBucket(key).get(io, key);
         }
 
         pub fn getBucket(self: *Self, key: K) *Bkt {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return &self.buckets[bucket_index];
+            const hash_code = (Context{}).hash(key);
+            return &self.buckets[@mod(hash_code, bucket_amount)];
         }
 
         pub fn fetchRemove(self: *Self, io: std.Io, key: K) ?V {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return self.buckets[bucket_index].fetchRemove(io, key);
+            return self.getBucket(key).fetchRemove(io, key);
         }
 
         pub fn put(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !void {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            try self.buckets[bucket_index].put(io, allocator, key, value);
+            try self.getBucket(key).put(io, allocator, key, value);
         }
 
         pub fn fetchPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return try self.buckets[bucket_index].fetchPut(io, allocator, key, value);
-        }
-
-        pub fn remove(self: *Self, io: std.Io, key: K) bool {
-            const hash_code = self.ctx.hash(key);
-            const bucket_index = @mod(hash_code, bucket_amount);
-            return self.buckets[bucket_index].remove(io, key);
+            return self.getBucket(key).fetchPut(io, allocator, key, value);
         }
 
         pub fn count(self: *Self, io: std.Io) usize {
@@ -60,10 +44,7 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             for (&bkts) |*bkt| {
                 bkt.* = Bucket(K, V, Context).init();
             }
-            break :blk @This(){
-                .ctx = Context{},
-                .buckets = bkts,
-            };
+            break :blk @This(){ .buckets = bkts };
         };
 
         pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
@@ -154,12 +135,6 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type) type {
             try self.hash_map.put(allocator, key, value);
         }
 
-        pub fn remove(self: *Self, io: std.Io, key: K) bool {
-            self.lock.lockUncancelable(io);
-            defer self.lock.unlock(io);
-            return self.hash_map.remove(key);
-        }
-
         pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
             self.lock.lockUncancelable(io);
             defer self.lock.unlock(io);
@@ -181,7 +156,7 @@ test "ConcurrentHashMap basic" {
     try std.testing.expectEqual(@as(?i32, 20), map.get(io, 2));
     try std.testing.expectEqual(@as(?i32, null), map.get(io, 3));
 
-    try std.testing.expect(map.remove(io, 1));
+    try std.testing.expectEqual(@as(?i32, 10), map.fetchRemove(io, 1));
     try std.testing.expectEqual(@as(?i32, null), map.get(io, 1));
 }
 
@@ -194,7 +169,7 @@ test "ConcurrentHashMap allocation failure" {
             try map.put(_io, allocator, 1, 10);
             try map.put(_io, allocator, 2, 20);
             _ = map.get(_io, 1);
-            _ = map.remove(_io, 2);
+            _ = map.fetchRemove(_io, 2);
         }
     }.run;
 

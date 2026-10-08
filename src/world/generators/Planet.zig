@@ -36,6 +36,7 @@ pub const Generator = struct {
     pub const Noise = @import("fastnoise");
 
     params: Params,
+    seed: u64,
     /// Planet radius upper bound, clamped to box_size / 2 so the sphere always
     /// fits inside its grid cell.
     max_radius: i32,
@@ -49,6 +50,7 @@ pub const Generator = struct {
     spawn_cell: @Vector(3, i32),
 
     pub const Params = struct {
+        /// The host fills a null seed before create.
         seed: ?u64 = null,
         /// Percentage of grid cells that hold a planet.
         density: u32 = 40,
@@ -69,24 +71,16 @@ pub const Generator = struct {
         },
 
         pub const default: Params = .{};
-
-        pub fn setSeeds(self: *Params, io: std.Io) void {
-            if (self.seed == null) {
-                var random_seed: u64 = undefined;
-                io.random(std.mem.asBytes(&random_seed));
-                self.seed = random_seed;
-            }
-            self.surface_noise.seed = @bitCast(std.hash.Murmur2_32.hashUint64(self.seed.? +% 3));
-        }
     };
 
-    pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) Generator {
-        _ = allocator;
-        _ = max_cache_bytes;
+    pub fn init(params: Params, seed: u64) Generator {
+        var seeded = params;
+        seeded.surface_noise.seed ^= @bitCast(std.hash.Murmur2_32.hashUint64(seed +% 3));
         const box: u32 = nextPowerOfTwo(u32, @intCast(std.math.clamp(params.box_size, 1024, 16384)));
         const max_radius: i32 = @intCast(@min(@as(u32, @intCast(params.max_radius)), box / 2));
         return .{
-            .params = params,
+            .params = seeded,
+            .seed = seed,
             .max_radius = max_radius,
             .placer = .{
                 .box_size = @intCast(box),
@@ -96,32 +90,6 @@ pub const Generator = struct {
             .safe_cell = @intCast(@divTrunc(@as(i64, std.math.maxInt(i32)) - 1, box)),
             .spawn_cell = @splat(@intCast(@divTrunc(@as(i64, grid_shift), @as(i64, box)))),
         };
-    }
-
-    pub fn getSource(self: *Generator) World.ChunkSource {
-        return .{
-            .data = self,
-            .getTerrainHeight = null,
-            .getBlocks = &genChunkBlocks,
-            .placeStructures = null,
-            .deinit = &deinit,
-            .save = null,
-        };
-    }
-
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-        _ = allocator;
-        _ = world;
-        const self: *Generator = @ptrCast(@alignCast(source.data));
-        self.genChunk(io, blocks, chunk_pos, grid_buffer);
-        return .{ .from_disk = false, .structures = false };
-    }
-
-    pub fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-        _ = self;
-        _ = io;
-        _ = allocator;
-        _ = world;
     }
 
     pub fn genChunk(self: *Generator, io: std.Io, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
@@ -271,7 +239,7 @@ pub const Generator = struct {
     /// so every block inside a planet finds it through its own cell.
     fn planetAt(self: *const Generator, cell: @Vector(3, i32)) ?Planet {
         const is_spawn_cell = @reduce(.And, cell == self.spawn_cell);
-        const h = std.hash.Wyhash.hash(self.params.seed.? +% 0x9e3779b97f4a7c15, std.mem.asBytes(&cell));
+        const h = std.hash.Wyhash.hash(self.seed +% 0x9e3779b97f4a7c15, std.mem.asBytes(&cell));
         if (!is_spawn_cell and h % 100 >= self.params.density) return null;
 
         const box = self.placer.box_size;
@@ -332,7 +300,7 @@ pub const Generator = struct {
     fn spaceBlock(self: *const Generator, center: @Vector(3, f32)) Block {
         if (!self.params.stars) return .air;
         const pos: @Vector(3, i64) = @intFromFloat(center);
-        const h = std.hash.Wyhash.hash(self.params.seed.? +% 0x517cc1b727220a95, std.mem.asBytes(&pos));
+        const h = std.hash.Wyhash.hash(self.seed +% 0x517cc1b727220a95, std.mem.asBytes(&pos));
         return if (h % 4096 == 0) .snow else .air;
     }
 };
@@ -454,7 +422,7 @@ fn considerPlanetColumn(gen: *const Generator, planet: Planet, center: *const [3
 
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *PlanetInstance = @ptrCast(@alignCast(instance));
-    const seed = self.generator.params.seed orelse return generator_api.no_spawn;
+    const seed = self.generator.seed;
     const point: @Vector(3, f32) = .{ @floatCast(center[0]), @floatCast(center[1]), @floatCast(center[2]) };
     const planet = nearestPlanet(&self.generator, point) orelse return generator_api.no_spawn;
     // Blind discs rarely hit small spheres, so anchor the search on the surface point nearest the request.
@@ -583,11 +551,11 @@ pub fn generator_config_set_seeds(io: *const std.Io, config: *generator_api.Conf
 pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) callconv(.c) ?*anyopaque {
     var params: Generator.Params = .default;
     generator_api.fromTree(Generator.Params, opts.allocator, config, &params, field_specs) catch return null;
-    if (params.seed == null) params.setSeeds(opts.io);
+    const seed = params.seed orelse return null;
     const instance = opts.allocator.create(PlanetInstance) catch return null;
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
-        .generator = Generator.init(opts.allocator, opts.max_cache_bytes, params),
+        .generator = Generator.init(params, seed),
         .source = undefined,
     };
     instance.source = .{
@@ -606,10 +574,7 @@ pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.Chun
 }
 
 test "planet spheres stay inside their cell" {
-    var params: Generator.Params = .default;
-    params.seed = 42;
-    params.setSeeds(std.testing.io);
-    const gen = Generator.init(std.testing.allocator, 0, params);
+    const gen = Generator.init(.default, 42);
     var rng = std.Random.DefaultPrng.init(7);
     const rand = rng.random();
     for (0..2000) |_| {
@@ -633,10 +598,7 @@ test "planet spheres stay inside their cell" {
 }
 
 test "spawn planet sits below the origin" {
-    var params: Generator.Params = .default;
-    params.seed = 42;
-    params.setSeeds(std.testing.io);
-    const gen = Generator.init(std.testing.allocator, 0, params);
+    const gen = Generator.init(.default, 42);
     const planet = gen.planetAt(gen.spawn_cell).?;
     const diff = -planet.center;
     const d2 = @reduce(.Add, diff * diff);
@@ -648,23 +610,16 @@ test "spawn planet sits below the origin" {
 test "genChunk fills the spawn planet with stone" {
     var blocks: Chunk.Encoding = .{ .uniform = .air };
     var grid_buffer: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
-    var params: Generator.Params = .default;
-    params.seed = 42;
-    params.setSeeds(std.testing.io);
-    var gen = Generator.init(std.testing.allocator, 0, params);
+    var gen = Generator.init(.default, 42);
     gen.genChunk(std.testing.io, &blocks, .{ .level = 0, .position = .{ 500, 500, 500 } }, &grid_buffer);
     blocks.toGrid(&grid_buffer);
     try std.testing.expectEqual(Block.stone, grid_buffer[0][0][0]);
 }
 
 test "proposeSpawn lands on the spawn planet" {
-    var params: Generator.Params = .default;
-    params.seed = 42;
     // Dry planet: every surface column passes, so the result is fully
     // determined by the anchor + first ring.
-    params.water = false;
-    params.setSeeds(std.testing.io);
-    const gen = Generator.init(std.testing.allocator, 0, params);
+    const gen = Generator.init(.{ .water = false }, 42);
     var instance = PlanetInstance{ .generator = gen, .source = undefined };
     const center = [3]f64{ 0, 0, 0 };
     const a = generator_propose_spawn(&instance, &center, 0, 32, 1);

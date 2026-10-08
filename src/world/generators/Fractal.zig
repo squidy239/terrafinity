@@ -11,55 +11,17 @@ const generator_api = @import("generator_api.zig");
 
 pub const FractalTerrainGenerator = struct {
     params: Params,
-
-    pub fn init(allocator: std.mem.Allocator, max_cache_bytes: usize, params: Params) FractalTerrainGenerator {
-        _ = allocator;
-        _ = max_cache_bytes;
-        return .{
-            .params = params,
-        };
-    }
-
-    pub fn getSource(self: *FractalTerrainGenerator) World.ChunkSource {
-        return .{
-            .data = self,
-            .getTerrainHeight = null,
-            .getBlocks = &genChunkBlocks,
-            .placeStructures = null,
-            .deinit = &deinit,
-            .save = null,
-        };
-    }
-
-    fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-        const self: *FractalTerrainGenerator = @ptrCast(@alignCast(source.data));
-        try self.genChunk(io, allocator, chunk_pos, blocks, world, grid_buffer);
-        return .{ .from_disk = false, .structures = false };
-    }
-
-    pub fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-        _ = self;
-        _ = world;
-        _ = io;
-        _ = allocator;
-    }
+    seed: u64,
 
     pub const Params = struct {
         terrainmin: i32 = -128,
         terrainmax: i32 = 128,
         SeaLevel: i32 = 0,
+        /// The host fills a null seed before create.
         seed: ?u64 = null,
         terrain_scale: f32 = 4.0, // One fractal cell spans 4x4x4 voxels.
 
         pub const default: Params = .{};
-
-        pub fn setSeeds(self: *Params, io: std.Io) void {
-            if (self.seed == null) {
-                var random_seed: u64 = undefined;
-                io.random(std.mem.asBytes(&random_seed));
-                self.seed = random_seed;
-            }
-        }
     };
 
     pub fn genChunk(self: *FractalTerrainGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
@@ -237,11 +199,11 @@ pub fn generator_config_set_seeds(io: *const std.Io, config: *generator_api.Conf
 pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) callconv(.c) ?*anyopaque {
     var params: FractalTerrainGenerator.Params = .default;
     generator_api.fromTree(FractalTerrainGenerator.Params, opts.allocator, config, &params, field_specs) catch return null;
-    if (params.seed == null) params.setSeeds(opts.io);
+    const seed = params.seed orelse return null;
     const instance = opts.allocator.create(FractalInstance) catch return null;
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
-        .generator = FractalTerrainGenerator.init(opts.allocator, opts.max_cache_bytes, params),
+        .generator = .{ .params = params, .seed = seed },
         .source = undefined,
     };
     instance.source = .{
@@ -263,11 +225,10 @@ pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.Chun
 /// the band ceiling; the host scans down from there to resolve exact feet.
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *FractalInstance = @ptrCast(@alignCast(instance));
-    const seed = self.generator.params.seed orelse return generator_api.no_spawn;
     const y_hint: f64 = @floatFromInt(self.generator.params.terrainmax);
     const capped = @min(attempts, generator_api.spawn_attempt_cap);
     for (0..capped) |i| {
-        const sample = generator_api.spawnSample(seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
+        const sample = generator_api.spawnSample(self.generator.seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
         const x: i64 = @intFromFloat(@round(sample[0]));
         const z: i64 = @intFromFloat(@round(sample[1]));
         if (self.generator.columnTopSolid(x, z) != null) {

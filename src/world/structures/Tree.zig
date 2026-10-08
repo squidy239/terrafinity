@@ -12,7 +12,6 @@ pub const Tree = struct {
     pos: @Vector(3, i64),
     config: Config,
     scale: f32 = 1.0,
-    rand: std.Random,
 
     pub const StepConfig = struct {
         length_percent: f32 = 0.7,
@@ -53,7 +52,6 @@ pub const Tree = struct {
         recursion_depth: usize,
     };
 
-    threadlocal var index: usize = 0;
     /// Stamps the tree at its position. Returns the branch count.
     pub fn place(self: *const @This(), seed: u64, editor: *WorldEditor, level: i32) !u64 {
         @setFloatMode(.optimized);
@@ -63,10 +61,12 @@ pub const Tree = struct {
 
         var prng = std.Random.Sfc64.init(seed);
         const rand = prng.random();
+        // A cursor derived from the seed keeps the table draws per-tree deterministic.
+        var cursor: usize = @intCast(seed % rand_table.len);
 
         var stack = std.ArrayList(StepGenData).initBuffer(&step_buffer);
         var branches: u64 = 0;
-        const trunk_vec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(f32, -0.05, 0.05);
+        const trunk_vec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(&cursor, -0.05, 0.05);
 
         try stack.appendBounded(.{
             .pos = @floatFromInt(self.pos),
@@ -83,10 +83,10 @@ pub const Tree = struct {
             defer pstep.end();
             std.debug.assert(self.config.steps.len > self.config.max_recursion_depth);
             const step = self.config.steps[data.recursion_depth];
-            const first_branches = self.rand.intRangeAtMost(usize, step.branch_count_min, step.branch_count_max);
+            const first_branches = rand.intRangeAtMost(usize, step.branch_count_min, step.branch_count_max);
 
             for (0..first_branches) |i| {
-                const length = data.last_length * step.length_percent + getRand(&index) * step.length_percent_randomness;
+                const length = data.last_length * step.length_percent + getRand(&cursor) * step.length_percent_randomness;
                 if (length < self.config.min_length * self.scale or data.recursion_depth >= self.config.max_recursion_depth) {
                     const l = tracy.Zone.begin(.{ .src = @src(), .name = "leaves" });
                     defer l.end();
@@ -96,7 +96,7 @@ pub const Tree = struct {
                         while (x < half_leaf) : (x += 1) {
                             var z = -half_leaf;
                             while (z < half_leaf) : (z += 1) {
-                                const block: Block = if (getRand(&index) < self.config.leaf_density) step.end_block else .null; // Null keeps the current block.
+                                const block: Block = if (getRand(&cursor) < self.config.leaf_density) step.end_block else .null; // Null keeps the current block.
                                 try editor.placeBlock(block, @round(data.pos + @Vector(3, f32){ x, y, z }), level);
                             }
                         }
@@ -105,8 +105,8 @@ pub const Tree = struct {
                     const b = tracy.Zone.begin(.{ .src = @src(), .name = "branch" });
                     defer b.end();
                     branches += 1;
-                    const branch_vec = branchDirection(i, data.direction, step.branch_range, first_branches) + rand3Vec(f32, -step.branch_randomness, step.branch_randomness);
-                    const radius = data.last_radius * step.radius_percent + getRand(&index) * step.radius_percent_randomness;
+                    const branch_vec = branchDirection(i, data.direction, step.branch_range, first_branches) + rand3Vec(&cursor, -step.branch_randomness, step.branch_randomness);
+                    const radius = data.last_radius * step.radius_percent + getRand(&cursor) * step.radius_percent_randomness;
                     const branch = Cone(f64).init(data.pos, branch_vec, @floatCast(length), @floatCast(@max(self.config.min_radius, data.last_radius * step.base_radius_percent)), @floatCast(@max(self.config.min_radius, radius)));
                     try editor.placeSamplerShape(step.block_type, branch, level);
                     const new_pos = data.pos + (utils.vecNormalize(branch_vec) * @as(@Vector(3, f64), @splat(length - radius)));
@@ -123,9 +123,9 @@ pub const Tree = struct {
         return branches;
     }
 
-    fn rand3Vec(comptime t: type, range_base: t, range_top: t) @Vector(3, t) {
-        const vec = @Vector(3, t){ getRand(&index), getRand(&index), getRand(&index) };
-        return normalizeInRange(@Vector(3, t), vec, @splat(0), @splat(1), @splat(range_base), @splat(range_top));
+    fn rand3Vec(cursor: *usize, range_base: f32, range_top: f32) @Vector(3, f32) {
+        const vec: @Vector(3, f32) = .{ getRand(cursor), getRand(cursor), getRand(cursor) };
+        return normalizeInRange(@Vector(3, f32), vec, @splat(0), @splat(1), @splat(range_base), @splat(range_top));
     }
     /// Maps `num` from the old bounds to the new bounds.
     pub fn normalizeInRange(comptime t: type, num: t, old_lower_bound: t, old_upper_bound: t, new_lower_bound: t, new_upper_bound: t) t {
@@ -166,10 +166,9 @@ pub const Tree = struct {
     }
 };
 
-fn getRand(i: *usize) f32 {
-    const v = rand_table[i.*];
-    i.* +%= 1;
-    i.* = i.* % rand_table.len;
+fn getRand(cursor: *usize) f32 {
+    const v = rand_table[cursor.*];
+    cursor.* = (cursor.* + 1) % rand_table.len;
     return v;
 }
 
@@ -180,9 +179,6 @@ fn makeTable(len: usize) [len]f32 {
     var random = std.Random.DefaultPrng.init(0);
     const rand = random.random();
     var table: [len]f32 = undefined;
-    var i: usize = 0;
-    while (i < table.len) : (i += 1) {
-        table[i] = rand.float(f32);
-    }
+    for (&table) |*value| value.* = rand.float(f32);
     return table;
 }
