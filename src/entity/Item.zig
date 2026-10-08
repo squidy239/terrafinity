@@ -8,39 +8,38 @@ const World = @import("../world/World.zig");
 const Entity = @import("Entity.zig");
 const utils = @import("../libs/utils.zig");
 
+/// An item grid. Its owner drives it from one thread, so it needs no lock.
 pub const Inventory = struct {
-    lock: std.Io.RwLock = .init,
     width: u32,
     height: u32,
+    /// Row-major, `width * height` slots.
     items: []?Item,
 
-    pub fn initBuffer(width: u32, height: u32, buffer: []?Item) Inventory {
-        std.debug.assert(buffer.len == width * height);
-        @memset(buffer, null);
-        return .{
-            .width = width,
-            .height = height,
-            .items = buffer,
-        };
+    pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) !Inventory {
+        const items = try allocator.alloc(?Item, @as(usize, width) * height);
+        @memset(items, null);
+        return .{ .width = width, .height = height, .items = items };
     }
 
-    pub fn get(self: *Inventory, io: std.Io, row: u32, col: u32) ?Item {
-        self.lock.lockSharedUncancelable(io);
-        defer self.lock.unlockShared(io);
+    pub fn deinit(self: *Inventory, allocator: std.mem.Allocator) void {
+        allocator.free(self.items);
+    }
+
+    pub fn get(self: *const Inventory, row: u32, col: u32) ?Item {
         return self.items[self.index(row, col)];
     }
 
-    pub fn set(self: *Inventory, io: std.Io, row: u32, col: u32, item: Item) ?Item {
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
-        const slot = &self.items[self.index(row, col)];
-        defer slot.* = item;
-        return slot.*;
+    pub fn rowSlots(self: *const Inventory, row: u32) []const ?Item {
+        return self.items[self.index(row, 0)..][0..self.width];
+    }
+
+    pub fn set(self: *Inventory, row: u32, col: u32, item: ?Item) void {
+        self.items[self.index(row, col)] = item;
     }
 
     fn index(self: *const Inventory, row: u32, col: u32) usize {
         std.debug.assert(row < self.height and col < self.width);
-        return row * self.width + col;
+        return @as(usize, row) * self.width + col;
     }
 };
 
@@ -55,20 +54,20 @@ pub const Item = struct {
     /// for a plain stack. A weak handle: the owning container must hold the ref.
     data: ?Entity.Handle = null,
 
-    /// Edits `ctx.editor` for this frame's inputs. Block items do nothing.
-    pub fn use(self: Item, ctx: UseContext, actions: Key.ActionSet) !void {
+    /// Edits `editor` for this frame's inputs. Block items do nothing. The caller flushes `editor`.
+    pub fn use(self: Item, editor: *World.Editor, ctx: UseContext) !void {
         switch (self.item_type) {
             .PlaceRod => {
                 const rod: Cone(f32) = .init(@floatCast(ctx.player_pos), ctx.looking, rod_length, rod_radius, rod_radius);
-                if (actions.contains(.use_item_primary)) try ctx.editor.placeSamplerShape(.air, rod, World.standard_level);
-                if (actions.contains(.use_item_secondary)) try ctx.editor.placeSamplerShape(.stone, rod, World.standard_level);
+                if (ctx.actions.contains(.use_item_primary)) try editor.placeSamplerShape(.air, rod, World.standard_level);
+                if (ctx.actions.contains(.use_item_secondary)) try editor.placeSamplerShape(.stone, rod, World.standard_level);
             },
             .PlaceSphere => {
                 // Primary/secondary are the mouse "use" inputs; tertiary keeps the
                 // old F key working through the item instead of a hardcoded sphere.
-                if (actions.contains(.use_item_primary) or actions.contains(.use_item_secondary) or actions.contains(.use_item_tertiary)) {
+                if (ctx.actions.contains(.use_item_primary) or ctx.actions.contains(.use_item_secondary) or ctx.actions.contains(.use_item_tertiary)) {
                     const sphere: Sphere(f32) = .init(@floatCast(ctx.player_pos), @floatFromInt(ctx.sphere_size));
-                    try ctx.editor.placeSamplerShape(ctx.sphere_block, sphere, World.standard_level);
+                    try editor.placeSamplerShape(ctx.sphere_block, sphere, World.standard_level);
                 }
             },
             else => {},
@@ -76,9 +75,10 @@ pub const Item = struct {
     }
 };
 
-/// Inputs and world state for one `Item.use`. The caller owns `editor` and flushes it.
+/// A copy of the inputs and player state for one `Item.use`, taken on the frame
+/// thread so the use can run on another task.
 pub const UseContext = struct {
-    editor: *World.Editor,
+    actions: Key.ActionSet,
     player_pos: @Vector(3, f64),
     looking: @Vector(3, f32),
     sphere_size: u32,

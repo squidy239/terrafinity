@@ -31,13 +31,11 @@ pub const State = packed struct(u16) {
     covered_children: u8 = 0,
     /// The renderer holds this chunk's mesh, or the chunk has no faces.
     active: bool = false,
-    /// A load task for this chunk is in flight.
-    queued: bool = false,
     /// The chunk is in the streamer's lingering list.
     lingering: bool = false,
     /// An edit meshed this chunk while it was not active, so the renderer may hold a mesh the flags above do not account for.
     edited: bool = false,
-    _padding: u4 = 0,
+    _padding: u5 = 0,
 
     pub fn allCoveredChildren(state: State) bool {
         return state.covered_children == std.math.maxInt(u8);

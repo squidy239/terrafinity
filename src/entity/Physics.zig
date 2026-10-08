@@ -5,34 +5,46 @@ const zm = @import("zm");
 const World = @import("../world/World.zig");
 const Chunk = @import("../world/Chunk.zig");
 
-pub fn Interface(physics_elements: anytype) type {
-    return struct {
-        elements: physics_elements,
-        last_update: std.Io.Timestamp,
-        last_update_lock: std.Io.RwLock = .init,
-        pos: @Vector(3, f64),
-        velocity: @Vector(3, f64),
-        mutex: std.Io.Mutex = .init,
+/// A moving box. Its owner drives it from one thread, so it needs no locks.
+pub const Body = struct {
+    pos: @Vector(3, f64),
+    velocity: @Vector(3, f64) = @splat(0),
+    /// Downward acceleration in blocks per second squared.
+    gravity: f64 = 20.0,
+    mover: Mover,
+    last_update: std.Io.Timestamp,
 
-        pub fn lapUpdateTimer(self: *@This(), io: std.Io) std.Io.Duration {
-            self.last_update_lock.lockUncancelable(io);
-            defer self.last_update_lock.unlock(io);
-            const old = self.last_update;
-            self.last_update = .now(io, .awake);
-            return old.durationTo(self.last_update);
-        }
-
-        pub fn update(self: *@This(), world: *World, io: std.Io, allocator: std.mem.Allocator) !void {
-            const elapsed = @as(f64, @floatFromInt(self.lapUpdateTimer(io).nanoseconds)) / std.time.ns_per_s;
-            const delta_t = @min(elapsed, 0.1);
-
-            inline for (@typeInfo(@TypeOf(self.elements)).@"struct".field_names) |name| {
-                const field_data = &@field(&self.elements, name);
-                try field_data.update(io, self, delta_t, world, allocator);
-            }
-        }
+    /// Which forces act on the body this step.
+    pub const Rules = struct {
+        gravity: bool,
+        collisions: bool,
+        /// Clears the velocity after the move, so motion lasts one step.
+        zero_velocity: bool,
     };
-}
+
+    pub fn lapUpdateTimer(self: *Body, io: std.Io) std.Io.Duration {
+        const old = self.last_update;
+        self.last_update = .now(io, .awake);
+        return old.durationTo(self.last_update);
+    }
+
+    pub fn update(self: *Body, io: std.Io, allocator: std.mem.Allocator, world: *World, rules: Rules) !void {
+        const elapsed = @as(f64, @floatFromInt(self.lapUpdateTimer(io).nanoseconds)) / std.time.ns_per_s;
+        const delta_t = @min(elapsed, 0.1);
+
+        if (rules.gravity) self.velocity[1] -= self.gravity * delta_t;
+        defer if (rules.zero_velocity) {
+            self.velocity = @splat(0);
+        };
+        if (rules.collisions) {
+            var reader = World.Reader{ .world = world };
+            defer reader.clear(io);
+            try self.mover.moveAndCollide(io, allocator, self, delta_t, &reader);
+        } else {
+            self.pos += self.velocity * @as(@Vector(3, f64), @splat(delta_t));
+        }
+    }
+};
 
 pub const Mover = struct {
     /// Downward probe that decides whether the body rests on something.
@@ -66,17 +78,12 @@ pub const Mover = struct {
         }
     };
 
-    collisions: std.atomic.Value(bool),
-    zero_velocity: std.atomic.Value(bool),
     bounding_box: zm.AABB(3, f64),
-    enabled: std.atomic.Value(bool),
     /// Rise the body climbs automatically when a horizontal move is blocked.
     step_height: f64 = 1.0,
     /// Rate the body climbs a step, so the rise reads as motion, not a teleport.
     step_climb_speed: f64 = 20.0,
     /// Absolute Y the body is climbing toward while stepping up; null when idle.
-    /// Only the frame lane touches this, which drives the mover and reads it in the
-    /// same frame, so it needs no lock.
     climb_target_y: ?f64 = null,
 
     /// Body box centered on the position, sized in blocks. Width spans X and Z, height spans Y.
@@ -87,24 +94,6 @@ pub const Mover = struct {
             .{ .data = .{ -half_width, -half_height, -half_width } },
             .{ .data = .{ half_width, half_height, half_width } },
         );
-    }
-
-    pub fn update(self: *@This(), io: std.Io, physics: anytype, delta_t: f64, world: *World, allocator: std.mem.Allocator) !void {
-        if (!self.enabled.load(.monotonic)) return;
-
-        physics.mutex.lockUncancelable(io);
-        defer physics.mutex.unlock(io);
-        defer if (self.zero_velocity.load(.monotonic)) {
-            physics.velocity = .{ 0, 0, 0 };
-        };
-
-        if (self.collisions.load(.monotonic)) {
-            var reader = World.Reader{ .world = world };
-            defer reader.clear(io);
-            try self.moveAndCollide(io, allocator, physics, delta_t, &reader);
-        } else {
-            physics.pos += physics.velocity * @as(@Vector(3, f64), @splat(delta_t));
-        }
     }
 
     /// Integrates in size-aware substeps and resolves one axis at a time, so only
@@ -300,28 +289,16 @@ pub const Mover = struct {
     }
 };
 
-pub const Gravity = struct {
-    enabled: std.atomic.Value(bool) = .init(true),
-    up: @Vector(3, f64) = .{ 0, 1, 0 },
-    strength: std.atomic.Value(f64) = .init(20.0),
-
-    pub fn update(self: *@This(), io: std.Io, physics: anytype, delta_t: f64, _: *World, _: std.mem.Allocator) !void {
-        if (!self.enabled.load(.monotonic)) return;
-        const offset = @as(@Vector(3, f64), @splat(self.strength.load(.monotonic) * delta_t)) * self.up;
-        physics.mutex.lockUncancelable(io);
-        defer physics.mutex.unlock(io);
-        physics.velocity -= offset;
-    }
-};
-
-fn testMover(collisions: bool, width: f64, height: f64) Mover {
-    return .{
-        .collisions = .init(collisions),
-        .zero_velocity = .init(false),
-        .bounding_box = Mover.boxFor(width, height),
-        .enabled = .init(true),
-    };
+fn testMover(width: f64, height: f64) Mover {
+    return .{ .bounding_box = Mover.boxFor(width, height) };
 }
+
+fn testBody(io: std.Io, width: f64, height: f64, pos: @Vector(3, f64), velocity: @Vector(3, f64)) Body {
+    return .{ .pos = pos, .velocity = velocity, .mover = testMover(width, height), .last_update = .now(io, .awake) };
+}
+
+const free_flight: Body.Rules = .{ .gravity = false, .collisions = false, .zero_velocity = false };
+const walking: Body.Rules = .{ .gravity = false, .collisions = true, .zero_velocity = false };
 
 /// `below` fills chunks under y = 0, and a `band` of `band_height` layers sits on
 /// it over world x in [0, 16); everything else is air.
@@ -366,15 +343,15 @@ test "Mover box is centered on the position" {
 }
 
 test "Mover substep follows the smallest extent" {
-    const small = testMover(true, 0.2, 0.2);
+    const small = testMover(0.2, 0.2);
     try std.testing.expectApproxEqAbs(@as(f64, 0.1), small.maxSubstep(), 1e-9);
 
-    const big = testMover(true, 4, 16);
+    const big = testMover(4, 16);
     try std.testing.expectApproxEqAbs(Mover.max_substep_size, big.maxSubstep(), 1e-9);
 }
 
 test "Mover push direction and overlap" {
-    const mover = testMover(true, 1, 4);
+    const mover = testMover(1, 4);
 
     // Body centered on the origin with a block directly below: push out upward.
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), mover.pushForBlockOnAxis(.{ 0, -1, 0 }, .{ 0, 0, 0 }, 1), 1e-9);
@@ -386,48 +363,33 @@ test "Mover push direction and overlap" {
 
 test "Gravity" {
     const testing = std.testing;
-    const physics_interface = Interface(struct { gravity: Gravity });
-    var physics_object = physics_interface{
-        .elements = .{ .gravity = .{} },
-        .last_update = .now(testing.io, .awake),
-        .pos = .{ 0, 0, 0 },
-        .velocity = .{ 0, 0, 0 },
-    };
-    _ = physics_object.lapUpdateTimer(testing.io);
+    var body = testBody(testing.io, 1, 1, @splat(0), @splat(0));
     try testing.io.sleep(.fromMilliseconds(10), .awake);
-    try physics_object.update(undefined, testing.io, std.testing.allocator);
-    physics_object.mutex.lockUncancelable(testing.io);
-    defer physics_object.mutex.unlock(testing.io);
-    try testing.expect(physics_object.velocity[1] < 0);
+    try body.update(testing.io, testing.allocator, undefined, .{ .gravity = true, .collisions = false, .zero_velocity = false });
+    try testing.expect(body.velocity[1] < 0);
 }
 
-test "Mover update dispatch" {
+test "Body update without collisions" {
     const testing = std.testing;
-    const physics_interface = Interface(struct { mover: Mover });
-    var physics_object = physics_interface{
-        .elements = .{ .mover = testMover(false, 1, 1) },
-        .last_update = .now(testing.io, .awake),
-        .pos = .{ 0, 0, 0 },
-        .velocity = .{ 4, 0, 0 },
-    };
+    var body = testBody(testing.io, 1, 1, @splat(0), .{ 4, 0, 0 });
 
     // Backdate 50ms so pos advances by velocity * ~0.05. Collisions stay off, so the `undefined` world is never dereferenced.
-    physics_object.last_update.nanoseconds -|= std.time.ns_per_s / 20;
-    const before: std.Io.Timestamp = physics_object.last_update;
-    try physics_object.update(undefined, testing.io, testing.allocator);
-    try testing.expect(physics_object.last_update.nanoseconds > before.nanoseconds);
+    body.last_update.nanoseconds -|= std.time.ns_per_s / 20;
+    const before: std.Io.Timestamp = body.last_update;
+    try body.update(testing.io, testing.allocator, undefined, free_flight);
+    try testing.expect(body.last_update.nanoseconds > before.nanoseconds);
 
     // Timer lapped forward; bounds reject a zero timer while tolerating scheduling delay toward the clamp.
-    try testing.expect(physics_object.pos[0] > 0.1);
-    try testing.expect(physics_object.pos[0] < 0.5);
-    try testing.expect(physics_object.pos[1] == 0);
-    try testing.expect(physics_object.pos[2] == 0);
+    try testing.expect(body.pos[0] > 0.1);
+    try testing.expect(body.pos[0] < 0.5);
+    try testing.expect(body.pos[1] == 0);
+    try testing.expect(body.pos[2] == 0);
 
     // Clamp: backdate 1s so the step uses velocity * 0.1. Collisions stay off, so the world stays undereferenced.
-    const clamped_base = physics_object.pos[0];
-    physics_object.last_update.nanoseconds -|= std.time.ns_per_s;
-    try physics_object.update(undefined, testing.io, testing.allocator);
-    const clamped_step = physics_object.pos[0] - clamped_base;
+    const clamped_base = body.pos[0];
+    body.last_update.nanoseconds -|= std.time.ns_per_s;
+    try body.update(testing.io, testing.allocator, undefined, free_flight);
+    const clamped_step = body.pos[0] - clamped_base;
     try testing.expect(clamped_step > 0.3);
     try testing.expect(clamped_step < 0.5);
 }
@@ -452,32 +414,24 @@ test "Mover lands on a flat floor and reports support" {
     };
     setTestSource(&world, FlatSource.getBlocks);
 
-    const physics_interface = Interface(struct { mover: Mover });
-    var physics_object = physics_interface{
-        .elements = .{ .mover = testMover(true, 1, 2) },
-        .last_update = .now(io, .awake),
-        .pos = .{ 0.5, 0.6, 0.5 },
-        .velocity = .{ 0, -5, 0 },
-    };
+    var body = testBody(io, 1, 2, .{ 0.5, 0.6, 0.5 }, .{ 0, -5, 0 });
 
     var reader = World.Reader{ .world = &world };
     defer reader.clear(io);
 
-    physics_object.last_update.nanoseconds -|= std.time.ns_per_s / 20;
-    try physics_object.update(&world, io, allocator);
+    body.last_update.nanoseconds -|= std.time.ns_per_s / 20;
+    try body.update(io, allocator, &world, walking);
 
     // Feet stop on the block top at y = -0.5, so the center rests at y = 0.5.
-    try testing.expectApproxEqAbs(@as(f64, 0.5), physics_object.pos[1], 0.03);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), body.pos[1], 0.03);
 
-    physics_object.mutex.lockUncancelable(io);
-    defer physics_object.mutex.unlock(io);
-    try testing.expect(try physics_object.elements.mover.isSupported(io, allocator, physics_object.pos, &reader));
-    try testing.expect(!try physics_object.elements.mover.collides(io, allocator, physics_object.pos, &reader));
-    try testing.expect(!try physics_object.elements.mover.isSupported(io, allocator, .{ 0.5, 3, 0.5 }, &reader));
+    try testing.expect(try body.mover.isSupported(io, allocator, body.pos, &reader));
+    try testing.expect(!try body.mover.collides(io, allocator, body.pos, &reader));
+    try testing.expect(!try body.mover.isSupported(io, allocator, .{ 0.5, 3, 0.5 }, &reader));
 }
 
 test "Mover climb advances at a bounded rate" {
-    var mover = testMover(true, 1, 2);
+    var mover = testMover(1, 2);
     var physics: struct { pos: @Vector(3, f64), velocity: @Vector(3, f64) } = .{
         .pos = .{ 0, 0, 0 },
         .velocity = .{ 0, -9, 0 },
@@ -509,23 +463,17 @@ test "Mover steps up a one-block rise" {
     // Floor below the y = 0 chunk boundary, and a one-block plateau over world x in [0, 16).
     setTestSource(&world, BandSource(.stone, .stone, 1).getBlocks);
 
-    const physics_interface = Interface(struct { mover: Mover });
-    var physics_object = physics_interface{
-        .elements = .{ .mover = testMover(true, 1, 2) },
-        .last_update = .now(io, .awake),
-        .pos = .{ -2, 0.5, 0.5 },
-        .velocity = .{ 4, 0, 0 },
-    };
+    var body = testBody(io, 1, 2, .{ -2, 0.5, 0.5 }, .{ 4, 0, 0 });
 
     var frames: u32 = 0;
-    while (physics_object.pos[0] < 1.0 and frames < 400) : (frames += 1) {
-        physics_object.last_update.nanoseconds -|= std.time.ns_per_s / 60;
-        try physics_object.update(&world, io, allocator);
+    while (body.pos[0] < 1.0 and frames < 400) : (frames += 1) {
+        body.last_update.nanoseconds -|= std.time.ns_per_s / 60;
+        try body.update(io, allocator, &world, walking);
     }
 
     // Walked into the rise, climbed it, and kept going along the top at y = 1.5.
-    try testing.expect(physics_object.pos[0] >= 1.0);
-    try testing.expectApproxEqAbs(@as(f64, 1.5), physics_object.pos[1], 0.05);
+    try testing.expect(body.pos[0] >= 1.0);
+    try testing.expectApproxEqAbs(@as(f64, 1.5), body.pos[1], 0.05);
 }
 
 test "Mover medium measures fluid and leaf overlap" {
@@ -542,7 +490,7 @@ test "Mover medium measures fluid and leaf overlap" {
     // Water below the chunk boundary, a leaf band in the y = 0 chunk's lowest layers.
     setTestSource(&world, BandSource(.water, .leaves, 4).getBlocks);
 
-    const mover = testMover(true, 1, 2);
+    const mover = testMover(1, 2);
     var reader = World.Reader{ .world = &world };
     defer reader.clear(io);
 

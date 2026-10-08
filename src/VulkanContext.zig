@@ -85,11 +85,10 @@ present_queue_family_index: u32,
 
 command_pool: vk.CommandPool,
 upload_command_pool: vk.CommandPool = .null_handle,
-cmd_buffers: []vk.CommandBuffer = &.{},
+cmd_buffers: [max_frames_in_flight]vk.CommandBuffer = undefined,
 
-image_acquired_semaphores: []vk.Semaphore = &.{},
+image_acquired_semaphores: [max_frames_in_flight]vk.Semaphore = @splat(.null_handle),
 render_complete_semaphores: []vk.Semaphore = &.{},
-current_frame_idx: std.atomic.Value(u32) = .init(0),
 
 swapchain: vk.SwapchainKHR = .null_handle,
 swapchain_format: vk.Format = .b8g8r8a8_srgb,
@@ -489,16 +488,17 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.graphics_timeline_semaphore = try self.dev.createSemaphore(&timeline_sem_info, &self.vkalloc);
     errdefer self.dev.destroySemaphore(self.graphics_timeline_semaphore, &self.vkalloc);
 
-    self.image_acquired_semaphores = try allocator.alloc(vk.Semaphore, max_frames_in_flight);
-    @memset(self.image_acquired_semaphores, .null_handle);
-    errdefer self.destroySemaphores(self.image_acquired_semaphores);
+    errdefer self.destroySemaphores(&self.image_acquired_semaphores);
 
     self.render_complete_semaphores = try allocator.alloc(vk.Semaphore, max_frames_in_flight);
     @memset(self.render_complete_semaphores, .null_handle);
-    errdefer self.destroySemaphores(self.render_complete_semaphores);
+    errdefer {
+        self.destroySemaphores(self.render_complete_semaphores);
+        allocator.free(self.render_complete_semaphores);
+    }
 
     const semaphore_create_info: vk.SemaphoreCreateInfo = .{};
-    for (self.image_acquired_semaphores, self.render_complete_semaphores) |*acq, *complete| {
+    for (&self.image_acquired_semaphores, self.render_complete_semaphores) |*acq, *complete| {
         acq.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
         complete.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
     }
@@ -508,13 +508,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .level = .primary,
         .command_buffer_count = max_frames_in_flight,
     };
-
-    self.cmd_buffers = try allocator.alloc(vk.CommandBuffer, max_frames_in_flight);
-    errdefer {
-        allocator.free(self.cmd_buffers);
-        self.cmd_buffers = &.{};
-    }
-    try self.dev.allocateCommandBuffers(&cmd_alloc_info, self.cmd_buffers.ptr);
+    try self.dev.allocateCommandBuffers(&cmd_alloc_info, &self.cmd_buffers);
 
     return self;
 }
@@ -536,14 +530,10 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
         self.swapchain = .null_handle;
     }
 
-    self.dev.freeCommandBuffers(self.command_pool, self.cmd_buffers);
-    self.allocator.free(self.cmd_buffers);
-    self.cmd_buffers = &.{};
-
-    self.destroySemaphores(self.image_acquired_semaphores);
-    self.image_acquired_semaphores = &.{};
+    self.dev.freeCommandBuffers(self.command_pool, &self.cmd_buffers);
+    self.destroySemaphores(&self.image_acquired_semaphores);
     self.destroySemaphores(self.render_complete_semaphores);
-    self.render_complete_semaphores = &.{};
+    self.allocator.free(self.render_complete_semaphores);
 
     self.gpu_profiler.deinit();
 
@@ -568,10 +558,9 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.allocator.destroy(self);
 }
 
-/// Destroys every created semaphore in `semaphores` and frees the slice.
-fn destroySemaphores(self: *VulkanContext, semaphores: []vk.Semaphore) void {
+/// Destroys every created semaphore in `semaphores`.
+fn destroySemaphores(self: *VulkanContext, semaphores: []const vk.Semaphore) void {
     for (semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
-    self.allocator.free(semaphores);
 }
 
 fn destroySwapchainResources(self: *VulkanContext) void {
@@ -736,7 +725,10 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
     // still referencing valid, owned resources for deinit to clean up.
     const new_render_complete = try self.allocator.alloc(vk.Semaphore, new_images.len);
     @memset(new_render_complete, .null_handle);
-    errdefer self.destroySemaphores(new_render_complete);
+    errdefer {
+        self.destroySemaphores(new_render_complete);
+        self.allocator.free(new_render_complete);
+    }
     const semaphore_create_info: vk.SemaphoreCreateInfo = .{};
     for (new_render_complete) |*complete| {
         complete.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
@@ -750,6 +742,7 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         self.dev.destroySwapchainKHR(old_swapchain, &self.vkalloc);
     }
     self.destroySemaphores(self.render_complete_semaphores);
+    self.allocator.free(self.render_complete_semaphores);
     self.render_complete_semaphores = new_render_complete;
     self.swapchain = new_swapchain;
     self.swapchain_images = new_images;
@@ -813,10 +806,6 @@ pub fn deviceWaitIdleLocked(self: *VulkanContext, io: std.Io) !void {
     _ = try self.dev.deviceWaitIdle();
 }
 
-pub fn currentFrame(self: *VulkanContext) u32 {
-    return self.current_frame_idx.load(.monotonic);
-}
-
 pub fn requestSwapchainRecreate(self: *VulkanContext) void {
     self.suboptimal_recreate_requested.store(false, .release);
     self.swapchain_needs_recreate.store(true, .release);
@@ -837,8 +826,8 @@ pub const FrameContext = struct {
 };
 
 pub fn beginFrame(self: *VulkanContext) !FrameContext {
-    const current_frame = self.currentFrame();
     const frame_number = self.frame_number.load(.acquire);
+    const current_frame: u32 = @intCast(frame_number % max_frames_in_flight);
     if (frame_number >= max_frames_in_flight) {
         const wait_value: u64 = frame_number - max_frames_in_flight + 1;
         const wait_info: vk.SemaphoreWaitInfo = .{
@@ -964,8 +953,6 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
         .p_swapchains = (&self.swapchain)[0..1],
         .p_image_indices = (&ctx.image_index)[0..1],
     };
-    const next_frame = (ctx.frame_index + 1) % max_frames_in_flight;
-    defer self.current_frame_idx.store(next_frame, .monotonic);
     const present_result = blk: {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "present_lock_queue" });
         self.queue_mutex.lockUncancelable(io);

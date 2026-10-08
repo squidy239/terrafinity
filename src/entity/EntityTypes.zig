@@ -9,21 +9,18 @@ const Entity = @import("Entity.zig");
 const Item = @import("Item.zig");
 const Physics = @import("Physics.zig");
 
+/// The pinned player. Only the frame thread touches it, so it needs no locks; other
+/// tasks get copies of what they need.
 pub const Player = struct {
-    player_name: Name,
-    game_mode: std.atomic.Value(GameMode),
-    fly_speed: std.atomic.Value(f32) = .init(1024),
-    walk_speed: std.atomic.Value(f32) = .init(8),
-    /// Speed multiple while the sprint key is held; at least 1.
-    sprint_multiplier: std.atomic.Value(f32) = .init(1.6),
-    jump_strength: std.atomic.Value(f32) = .init(8),
-    fly_speed_linear: std.atomic.Value(f32) = .init(10),
-    inventory_buffer: [10 * 16]?Item.Item = @splat(null),
+    game_mode: GameMode,
+    /// Base-2 log of the fly speed, so scrolling scales it evenly.
+    fly_speed_linear: f32 = 10,
     main_inventory: Item.Inventory,
+    /// The inventory slot the player holds.
+    selected_row: u32 = 0,
+    selected_col: u32 = 0,
     view_direction: @Vector(3, f32),
-    view_direction_mutex: std.Io.Mutex = .init,
 
-    // Jump-feel state, driven only on the frame lane.
     jump_held: bool = false,
     jump_rising: bool = false,
     /// Remaining window to still jump after leaving the ground.
@@ -31,26 +28,7 @@ pub const Player = struct {
     /// Remaining window for a jump pressed just before landing.
     jump_buffer_ns: u64 = 0,
 
-    physics: Physics.Interface(struct {
-        gravity: Physics.Gravity,
-        mover: Physics.Mover,
-    }),
-
-    pub const Name = struct {
-        data: [64]u8,
-        len: u8,
-
-        pub fn fromString(str: anytype) @This() {
-            std.debug.assert(str.len < 64);
-            var name: @This() = .{ .data = undefined, .len = @intCast(str.len) };
-            @memcpy(name.data[0..str.len], str);
-            return name;
-        }
-
-        pub fn toString(self: @This()) []const u8 {
-            return self.data[0..self.len];
-        }
-    };
+    body: Physics.Body,
 
     pub const GameMode = enum(u8) {
         Survival = 0,
@@ -58,25 +36,18 @@ pub const Player = struct {
         Spectator = 3,
     };
 
-    pub const unload = Entity.DestroyUnload(@This()).unload;
-
-    pub fn getPos(ptr: *Entity.Implementation, io: std.Io) @Vector(3, f64) {
+    pub fn unload(ptr: *Entity.Implementation, _: std.Io, _: *World, _: Entity.Handle, allocator: std.mem.Allocator) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.physics.mutex.lockUncancelable(io);
-        defer self.physics.mutex.unlock(io);
-        return self.physics.pos;
+        self.main_inventory.deinit(allocator);
+        allocator.destroy(self);
     }
 
-    pub fn switchGameMode(self: *@This(), game_mode: GameMode) void {
-        self.game_mode.store(game_mode, .monotonic);
-        self.physics.elements.mover.enabled.store(true, .monotonic);
-
-        const is_spectator = game_mode == .Spectator;
-        const is_survival = game_mode == .Survival;
-
-        self.physics.elements.mover.zero_velocity.store(is_spectator, .monotonic);
-        self.physics.elements.mover.collisions.store(!is_spectator, .monotonic);
-        self.physics.elements.gravity.enabled.store(is_survival, .monotonic);
+    fn rules(game_mode: GameMode) Physics.Body.Rules {
+        return .{
+            .gravity = game_mode == .Survival,
+            .collisions = game_mode != .Spectator,
+            .zero_velocity = game_mode == .Spectator,
+        };
     }
 
     // Locomotion feel, in blocks and seconds. Horizontal speed comes from the player.
@@ -109,6 +80,7 @@ pub const Player = struct {
         sprint: bool,
         jump: bool,
         elapsed_ns: u64,
+        tuning: Tuning,
     };
 
     /// User-tunable body and movement settings, before clamping.
@@ -122,21 +94,23 @@ pub const Player = struct {
         sprint_multiplier: f32,
     };
 
-    pub fn viewDirection(self: *@This(), io: std.Io) @Vector(3, f32) {
-        self.view_direction_mutex.lockUncancelable(io);
-        defer self.view_direction_mutex.unlock(io);
-        return self.view_direction;
+    pub fn selectedItem(self: *const @This()) ?Item.Item {
+        return self.main_inventory.get(self.selected_row, self.selected_col);
+    }
+
+    /// Moves the selection, clamping to the inventory grid.
+    pub fn selectSlot(self: *@This(), row: u32, col: u32) void {
+        self.selected_row = @min(row, self.main_inventory.height - 1);
+        self.selected_col = @min(col, self.main_inventory.width - 1);
     }
 
     /// Sets the velocity straight from the wish, so fly input is frame-independent.
-    pub fn fly(self: *@This(), io: std.Io, wish: @Vector(3, f64)) void {
-        const speed: f64 = self.fly_speed.load(.unordered);
-        self.physics.mutex.lockUncancelable(io);
-        defer self.physics.mutex.unlock(io);
-        self.physics.velocity = wish * @as(@Vector(3, f64), @splat(speed));
+    pub fn fly(self: *@This(), wish: @Vector(3, f64)) void {
+        const speed: f64 = @min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, self.fly_speed_linear));
+        self.body.velocity = wish * @as(@Vector(3, f64), @splat(speed));
     }
 
-    /// Steers the velocity for one frame on the frame lane. World reads run before the physics lock.
+    /// Steers the velocity for one frame.
     pub fn walk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World, input: WalkInput) !void {
         const z: tracy.Zone = .begin(.{ .src = @src(), .name = "walkMove" });
         defer z.end();
@@ -145,21 +119,17 @@ pub const Player = struct {
         var block_reader: World.Reader = .{ .world = world };
         defer block_reader.clear(io);
 
-        const mover = &self.physics.elements.mover;
-        const player_pos = getPos(@ptrCast(self), io);
-        const on_ground = try mover.isSupported(io, allocator, player_pos, &block_reader);
+        const mover = &self.body.mover;
+        const on_ground = try mover.isSupported(io, allocator, self.body.pos, &block_reader);
         const climbing = mover.climb_target_y != null;
-        const medium = try mover.mediumAt(io, allocator, player_pos, &block_reader);
+        const medium = try mover.mediumAt(io, allocator, self.body.pos, &block_reader);
         const fluid = medium.fluid_fraction;
 
-        const base_speed: f64 = self.walk_speed.load(.unordered);
-        const sprint: f64 = if (input.sprint) self.sprint_multiplier.load(.unordered) else 1.0;
-        const jump_speed: f64 = self.jump_strength.load(.unordered);
-        const gravity: f64 = self.physics.elements.gravity.strength.load(.monotonic);
+        const base_speed: f64 = @max(input.tuning.walk_speed, 0);
+        const sprint: f64 = if (input.sprint) @max(input.tuning.sprint_multiplier, 1.0) else 1.0;
+        const jump_speed = @sqrt(2 * self.body.gravity * @max(input.tuning.jump_height, 0.0));
 
-        self.physics.mutex.lockUncancelable(io);
-        defer self.physics.mutex.unlock(io);
-        var velocity = self.physics.velocity;
+        var velocity = self.body.velocity;
         const moving = input.wish[0] != 0 or input.wish[1] != 0;
 
         // A step in progress counts as ground, so the body can launch off it.
@@ -182,10 +152,10 @@ pub const Player = struct {
         velocity[0] = horizontal[0];
         velocity[2] = horizontal[1];
 
-        if (fluid > 0) applyFluid(&velocity, medium, gravity, input.jump, dt_s);
+        if (fluid > 0) applyFluid(&velocity, medium, self.body.gravity, input.jump, dt_s);
 
         velocity[1] = @max(velocity[1], -walk_terminal_speed);
-        self.physics.velocity = velocity;
+        self.body.velocity = velocity;
     }
 
     /// Jump feel: coyote time, an input buffer, and release-to-shorten. A step in
@@ -241,20 +211,13 @@ pub const Player = struct {
         return current + delta / @as(@Vector(2, f64), @splat(length)) * @as(@Vector(2, f64), @splat(max_delta));
     }
 
-    /// Clamps and applies tuning to the live body. Runs on the frame lane, where the body integrates.
-    pub fn applyTuning(self: *@This(), io: std.Io, tuning: Tuning) void {
+    /// Clamps and applies tuning to the live body.
+    pub fn applyTuning(self: *@This(), tuning: Tuning) void {
         const z: tracy.Zone = .begin(.{ .src = @src(), .name = "applyTuning" });
         defer z.end();
-        const mover = &self.physics.elements.mover;
+        const mover = &self.body.mover;
         mover.step_height = std.math.clamp(@as(f64, tuning.step_height), 0, max_step_height);
         mover.step_climb_speed = @max(@as(f64, tuning.step_climb_speed), 1.0);
-
-        self.walk_speed.store(@max(tuning.walk_speed, 0), .monotonic);
-        self.sprint_multiplier.store(@max(tuning.sprint_multiplier, 1.0), .monotonic);
-
-        const gravity: f64 = self.physics.elements.gravity.strength.load(.monotonic);
-        const jump_height: f64 = @max(tuning.jump_height, 0.0);
-        self.jump_strength.store(@floatCast(@sqrt(2 * gravity * jump_height)), .monotonic);
 
         const height: f64 = tuning.height;
         const new_box = Physics.Mover.boxFor(tuning.width, height);
@@ -262,12 +225,10 @@ pub const Player = struct {
             !std.meta.eql(mover.bounding_box.max.data, new_box.max.data);
         if (!box_changed) return;
 
-        self.physics.mutex.lockUncancelable(io);
-        defer self.physics.mutex.unlock(io);
         // Keep the feet planted when the height changes.
         const old_height = mover.bounding_box.size().data[1];
         mover.bounding_box = new_box;
-        self.physics.pos[1] += (height - old_height) / 2;
+        self.body.pos[1] += (height - old_height) / 2;
     }
 
     pub fn update(ptr: *Entity.Implementation, ctx: Entity.UpdateContext) error{ Canceled, Unrecoverable }!void {
@@ -275,14 +236,14 @@ pub const Player = struct {
         defer zone.end();
 
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.physics.update(ctx.world, ctx.io, ctx.allocator) catch |err| switch (err) {
+        self.body.update(ctx.io, ctx.allocator, ctx.world, rules(self.game_mode)) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return error.Unrecoverable,
         };
     }
 
     pub fn getInterface(_: *const @This()) Entity.Interface {
-        return .{ .getPos = getPos, .unload = unload, .update = update };
+        return .{ .unload = unload, .update = update };
     }
 };
 

@@ -20,9 +20,7 @@ pub const SpawnConfig = struct {
 };
 
 inline fn uuidHash(uuid: Handle) u64 {
-    var hasher = std.hash.Wyhash.init(0);
-    std.hash.autoHash(&hasher, uuid);
-    return hasher.final();
+    return std.hash.Wyhash.hash(0, std.mem.asBytes(&uuid));
 }
 
 const EntityMapType = Cache(
@@ -45,23 +43,27 @@ const drain_splices_max: u32 = 64;
 /// Revisit delay for deleted-but-referenced entities.
 const retry_ns: u64 = 5 * std.time.ns_per_ms;
 const none: u32 = std.math.maxInt(u32);
-const Bucket = enum { wheel, overflow, parked };
+/// The list a slot is linked into. A free slot sits on the free list through `next`.
+const Link = union(enum) { free, parked, overflow, wheel: u10 };
+
+/// A drain's hold on a detached slot.
+const Claim = union(enum) {
+    idle,
+    in_flight,
+    /// In flight, with a re-arm recorded during the update; it wins on settle.
+    rearm: u64,
+};
 
 const TimerNode = struct {
-    used: bool = false,
+    link: Link = .free,
+    claim: Claim = .idle,
     uuid: Handle = 0,
     deadline_ns: u64 = 0,
     next: u32 = none,
     prev: u32 = none,
-    bucket: Bucket = .parked,
-    /// Wheel bucket index; meaningful only while bucket == .wheel.
-    bucket_index: u10 = 0,
     /// Drain generation that armed this timer; only older generations pop, so a
     /// re-arm inside a drain waits for the next pass.
     armed_gen: u64 = 0,
-    in_flight: bool = false,
-    pending_armed: bool = false,
-    pending_deadline_ns: u64 = 0,
 };
 
 const DrainCtx = struct {
@@ -96,7 +98,6 @@ map: EntityMapType,
 /// after, so spawn cannot deadlock against the drain.
 scheduler_mutex: std.Io.Mutex = .init,
 timers: std.ArrayList(TimerNode) = .empty,
-timer_used: u64 = 0,
 free_head: u32 = none,
 buckets: [wheel_buckets]u32 = @splat(none),
 overflow_head: u32 = none,
@@ -164,7 +165,7 @@ pub fn spawn(
         // claim can only miss the lookup and no-op on settle, and slot reuse fails
         // the claim's uuid check.
         const node = &self.timers.items[victim.timer_slot];
-        if (node.used and node.uuid == victim.uuid) self.freeSlotLocked(victim.timer_slot);
+        if (node.link != .free and node.uuid == victim.uuid) self.freeSlotLocked(victim.timer_slot);
         unloadEntity(io, allocator, world, victim);
     }
     return result.entity;
@@ -241,16 +242,14 @@ pub fn markDeleted(self: *@This(), io: std.Io, uuid: Handle) DeleteResult {
     const entity = shard.get(uuid) orelse return .missing;
     entity.markDeleted();
     const node = &self.timers.items[entity.timer_slot];
-    std.debug.assert(node.used and node.uuid == uuid);
+    std.debug.assert(node.link != .free and node.uuid == uuid);
     const retry_deadline = now +| retry_ns;
-    if (node.in_flight) {
-        node.pending_armed = true;
-        node.pending_deadline_ns = retry_deadline;
-        return .marked;
-    }
-    // Only postpone an already-later deadline; soon-due timers keep their deadline.
-    if (node.bucket == .parked or node.deadline_ns > retry_deadline)
+    if (node.claim != .idle) {
+        node.claim = .{ .rearm = retry_deadline };
+    } else if (node.link == .parked or node.deadline_ns > retry_deadline) {
+        // Only postpone an already-later deadline; soon-due timers keep their deadline.
         self.linkLocked(entity.timer_slot, retry_deadline, self.drain_seq -| 1, now);
+    }
     return .marked;
 }
 
@@ -274,15 +273,14 @@ pub fn rescheduleAt(self: *@This(), io: std.Io, uuid: Handle, base_ns: u64, dela
     const entity = shard.get(uuid) orelse return false;
     const slot = entity.timer_slot;
     const node = &self.timers.items[slot];
-    std.debug.assert(node.used and node.uuid == uuid);
+    std.debug.assert(node.link != .free and node.uuid == uuid);
 
     const deadline = base_ns +| delay_ms *| std.time.ns_per_ms;
-    if (node.in_flight) {
-        node.pending_armed = true;
-        node.pending_deadline_ns = deadline;
-        return true;
+    if (node.claim != .idle) {
+        node.claim = .{ .rearm = deadline };
+    } else {
+        self.linkLocked(slot, deadline, self.drain_seq -| 1, base_ns);
     }
-    self.linkLocked(slot, deadline, self.drain_seq -| 1, base_ns);
     return true;
 }
 
@@ -393,11 +391,11 @@ fn detachDueLocked(self: *@This(), watermark: u64, seq: u64, batch: *[drain_batc
             const node = &self.timers.items[curr];
             const slot = curr;
             curr = node.next;
-            if (node.in_flight or node.armed_gen >= seq or node.deadline_ns > watermark) continue;
+            if (node.claim != .idle or node.armed_gen >= seq or node.deadline_ns > watermark) continue;
             batch[batch_len] = .{ .slot = slot, .uuid = node.uuid };
             batch_len += 1;
             self.unlinkLocked(slot);
-            node.in_flight = true;
+            node.claim = .in_flight;
         }
     }
     return batch_len;
@@ -447,15 +445,7 @@ fn runUpdate(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: Ha
         entity.release();
         self.settleClaim(ctx, slot, uuid, .park);
     }
-    const update_fn = entity.vtable.update orelse return;
-    try update_fn(entity.ptr, .{
-        .io = ctx.io,
-        .world = ctx.world,
-        .allocator = ctx.allocator,
-        .now_ns = ctx.watermark,
-        .uuid = uuid,
-        .registry = self,
-    });
+    try self.updateNow(ctx.io, ctx.allocator, ctx.world, entity, ctx.watermark);
 }
 
 /// Ends one detached claim; a mid-flight wake wins over the fallback. Re-arms
@@ -467,20 +457,19 @@ fn settleClaim(self: *@This(), ctx: DrainCtx, slot: u32, uuid: Handle, action: S
     self.scheduler_mutex.lockUncancelable(ctx.io);
     defer self.scheduler_mutex.unlock(ctx.io);
     const node = &self.timers.items[slot];
-    if (!node.used or node.uuid != uuid or !node.in_flight) return;
-    node.in_flight = false;
-    if (node.pending_armed) {
-        node.pending_armed = false;
-        const pending = node.pending_deadline_ns;
-        self.linkLocked(slot, pending, ctx.seq, ctx.watermark);
-        return;
-    }
-    switch (action) {
-        .free => self.freeSlotLocked(slot),
-        .park => {},
-        .link => |deadline| self.linkLocked(slot, deadline, ctx.seq, ctx.watermark),
-        .keep => self.linkLocked(slot, node.deadline_ns, ctx.seq, ctx.watermark),
-    }
+    if (node.link == .free or node.uuid != uuid or node.claim == .idle) return;
+    const claim = node.claim;
+    node.claim = .idle;
+    const deadline = switch (claim) {
+        .rearm => |rearm| rearm,
+        else => switch (action) {
+            .free => return self.freeSlotLocked(slot),
+            .park => return,
+            .link => |link| link,
+            .keep => node.deadline_ns,
+        },
+    };
+    self.linkLocked(slot, deadline, ctx.seq, ctx.watermark);
 }
 
 /// Reserves a slot, growing the slab when the free list is empty. The slab
@@ -495,27 +484,25 @@ fn allocSlotLocked(self: *@This(), allocator: std.mem.Allocator) !u32 {
         try self.timers.append(allocator, .{});
         break :blk @intCast(self.timers.items.len - 1);
     };
-    self.timers.items[slot] = .{ .used = true };
-    self.timer_used += 1;
+    self.timers.items[slot] = .{ .link = .parked };
     return slot;
 }
 
 fn freeSlotLocked(self: *@This(), slot: u32) void {
     const node = &self.timers.items[slot];
-    std.debug.assert(node.used);
+    std.debug.assert(node.link != .free);
     self.unlinkLocked(slot);
-    node.used = false;
+    node.link = .free;
     node.next = self.free_head;
     self.free_head = slot;
-    self.timer_used -= 1;
 }
 
 fn unlinkLocked(self: *@This(), slot: u32) void {
     const node = &self.timers.items[slot];
-    const head: *u32 = switch (node.bucket) {
+    const head: *u32 = switch (node.link) {
         .overflow => &self.overflow_head,
-        .parked => return,
-        .wheel => &self.buckets[node.bucket_index],
+        .free, .parked => return,
+        .wheel => |bucket| &self.buckets[bucket],
     };
     if (node.prev != none) {
         self.timers.items[node.prev].next = node.next;
@@ -527,19 +514,18 @@ fn unlinkLocked(self: *@This(), slot: u32) void {
     }
     node.next = none;
     node.prev = none;
-    node.bucket = .parked;
+    node.link = .parked;
 }
 
 fn linkLocked(self: *@This(), slot: u32, deadline_ns: u64, armed_gen: u64, now_ns: u64) void {
     self.unlinkLocked(slot);
     const node = &self.timers.items[slot];
-    std.debug.assert(node.used);
+    std.debug.assert(node.link != .free);
     node.deadline_ns = deadline_ns;
     node.armed_gen = armed_gen;
-    node.in_flight = false;
-    node.pending_armed = false;
+    node.claim = .idle;
     if (deadline_ns -| now_ns > horizon_ns) {
-        node.bucket = .overflow;
+        node.link = .overflow;
         self.overflow_next_ns = @min(self.overflow_next_ns, deadline_ns);
         self.pushFrontLocked(&self.overflow_head, slot);
     } else {
@@ -549,9 +535,9 @@ fn linkLocked(self: *@This(), slot: u32, deadline_ns: u64, armed_gen: u64, now_n
 
 fn pushWheelLocked(self: *@This(), slot: u32) void {
     const node = &self.timers.items[slot];
-    node.bucket_index = @intCast((node.deadline_ns / tick_ns) % wheel_buckets);
-    node.bucket = .wheel;
-    self.pushFrontLocked(&self.buckets[node.bucket_index], slot);
+    const bucket: u10 = @intCast((node.deadline_ns / tick_ns) % wheel_buckets);
+    node.link = .{ .wheel = bucket };
+    self.pushFrontLocked(&self.buckets[bucket], slot);
 }
 
 fn pushFrontLocked(self: *@This(), head: *u32, slot: u32) void {
@@ -572,8 +558,8 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
     // Every resident entity holds a timer slot, so the slab is the census.
     // No drain runs here, so no slot is ever in flight.
     for (self.timers.items, 0..) |node, i| {
-        if (!node.used) continue;
-        std.debug.assert(!node.in_flight);
+        if (node.link == .free) continue;
+        std.debug.assert(node.claim == .idle);
         const entity = self.getAndAddRef(io, node.uuid).?;
         if (entity.ref_count.load(.seq_cst) != 2)
             std.debug.panic("entity {d} still referenced during shutdown", .{node.uuid});
@@ -582,7 +568,6 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
         unloadEntity(io, allocator, world, removed);
     }
     std.debug.assert(self.map.count() == 0);
-    std.debug.assert(self.timer_used == 0);
 
     self.map.deinit(allocator);
     self.timers.deinit(allocator);
@@ -590,6 +575,13 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
 }
 
 const testing = std.testing;
+
+/// Slots in use; every resident entity owns exactly one.
+fn usedSlots(self: *const @This()) u64 {
+    var used: u64 = 0;
+    for (self.timers.items) |node| used += @intFromBool(node.link != .free);
+    return used;
+}
 
 const test_world: *World = undefined;
 
@@ -684,7 +676,7 @@ test "evicted timers never fire" {
     try testing.expectEqual(@as(u32, 4), test_unloaded.load(.seq_cst));
     try drainAt(&registry, nowNs(testing.io));
     try testing.expectEqual(@as(u32, EntityMapType.value_count_min), updates.load(.seq_cst));
-    try testing.expectEqual(registry.count(), registry.timer_used);
+    try testing.expectEqual(registry.count(), registry.usedSlots());
 }
 
 test "deletion reaps without waiting for a prior deadline" {
@@ -858,7 +850,7 @@ fn fuzzRegistry(_: void, smith: *std.testing.Smith) !void {
                     std.debug.panic("drain failed in fuzz: {any}", .{err});
             },
         }
-        if (registry.timer_used != registry.count()) @panic("scheduler out of sync with cache");
+        if (registry.usedSlots() != registry.count()) @panic("scheduler out of sync with cache");
     }
 
     if (registry.count() > EntityMapType.value_count_min) @panic("cache exceeds capacity");

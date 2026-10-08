@@ -30,18 +30,14 @@ lingering: std.ArrayList(World.ChunkPos) = .empty,
 /// Meshes of chunks evicted from their window before anything covered them.
 /// They have no cell; `unloadDetached` drops them once an ancestor shows the area.
 detached: std.AutoHashMapUnmanaged(World.ChunkPos, void) = .empty,
-/// Positions with a load task in flight. Unlike the `queued` flag this survives
-/// eviction, so a chunk that leaves and re-enters its window never gets a second
-/// load while the first runs, and every load completion is the only one for its position.
+/// Positions with a load task in flight. It survives eviction, so a chunk that leaves
+/// and re-enters its window never gets a second load while the first runs, and every
+/// load completion is the only one for its position.
 loads_in_flight: std.AutoHashMapUnmanaged(World.ChunkPos, void) = .empty,
-/// Keep-set chunks whose load task finished without meshing.
-retries: std.ArrayList(World.ChunkPos) = .empty,
 /// Load candidates of the running pass.
 loads: std.ArrayList(World.ChunkPos) = .empty,
 /// Completions taken by the running pass.
 taken: std.ArrayList(Completion) = .empty,
-/// How many of `taken` have been applied.
-taken_applied: usize = 0,
 active_count: u64 = 0,
 last_unload: std.Io.Timestamp = .zero,
 
@@ -119,7 +115,8 @@ pub const Completions = struct {
     /// Tasks whose completion is not pushed yet. `list` always has room for all of
     /// them, so a task can report from a `defer`, even while it is being canceled.
     in_flight: usize = 0,
-    /// Read lock-free by the frame thread to decide whether a pass has work.
+    /// Set while `list` holds completions no pass has taken. The frame thread reads it
+    /// lock-free to decide whether a pass has work.
     pending: std.atomic.Value(bool) = .init(false),
 
     /// Makes room for `count` more tasks. Call before dispatching them.
@@ -168,7 +165,6 @@ pub fn deinit(streamer: *ChunkStreamer, gpa: std.mem.Allocator) void {
     streamer.lingering.deinit(gpa);
     streamer.detached.deinit(gpa);
     streamer.loads_in_flight.deinit(gpa);
-    streamer.retries.deinit(gpa);
     streamer.loads.deinit(gpa);
     streamer.taken.deinit(gpa);
     streamer.* = undefined;
@@ -186,12 +182,7 @@ pub fn pass(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, view: 
         try streamer.recenter(io, gpa, view.player_block, host);
     }
 
-    // A pass that failed partway left completions behind; dropping them would strand their loads in flight.
-    try streamer.applyTaken(io, gpa, host);
-    try streamer.completions.take(io, gpa, &streamer.taken);
-    streamer.taken_applied = 0;
-    try streamer.applyTaken(io, gpa, host);
-
+    try streamer.applyCompletions(io, gpa, host);
     try streamer.dispatchLoads(io, gpa, host);
 
     if (streamer.last_unload.durationTo(now).toMilliseconds() >= unload_interval_ms) {
@@ -236,10 +227,10 @@ fn rebuild(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, view: V
         for (old.clipmap.levels, 0..) |*lvl, index| {
             const level_index = old.clipmap.levelIndex(index);
             for (lvl.cells, 0..) |state, slot| {
-                if (!state.active and !state.queued and !state.edited) continue;
+                if (!state.active and !state.edited) continue;
                 const pos: World.ChunkPos = .{ .level = level_index, .position = old.clipmap.positionAt(lvl.center, slot) };
                 if (next.clipmap.get(pos)) |next_state| {
-                    next_state.* = .{ .active = state.active, .queued = state.queued, .edited = state.edited };
+                    next_state.* = .{ .active = state.active, .edited = state.edited };
                     continue;
                 }
                 try streamer.detach(io, gpa, pos, state, host);
@@ -250,7 +241,6 @@ fn rebuild(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, view: V
     streamer.current = next;
     streamer.pending_settings = null;
     streamer.lingering.clearRetainingCapacity();
-    streamer.retries.clearRetainingCapacity();
 
     const current = &streamer.current.?;
     for (current.clipmap.levels, 0..) |*lvl, index| {
@@ -351,18 +341,15 @@ fn addLingeringAssumeCapacity(streamer: *ChunkStreamer, pos: World.ChunkPos, sta
     state.lingering = true;
 }
 
-fn applyTaken(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, host: anytype) !void {
-    const remaining = streamer.taken.items.len - streamer.taken_applied;
-    try streamer.lingering.ensureUnusedCapacity(gpa, remaining);
-    try streamer.retries.ensureUnusedCapacity(gpa, remaining);
-    while (streamer.taken_applied < streamer.taken.items.len) {
-        const completion = streamer.taken.items[streamer.taken_applied];
-        streamer.taken_applied += 1;
-        try streamer.apply(io, completion, host);
-    }
+/// Applies every finished task. The caller runs passes cancel-protected and treats any error as fatal, so a partly applied batch is never resumed.
+fn applyCompletions(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, host: anytype) !void {
+    try streamer.completions.take(io, gpa, &streamer.taken);
+    try streamer.lingering.ensureUnusedCapacity(gpa, streamer.taken.items.len);
+    try streamer.loads.ensureUnusedCapacity(gpa, streamer.taken.items.len);
+    for (streamer.taken.items) |completion| try streamer.apply(io, completion, host);
 }
 
-/// Applies one task result. Capacity for one lingering and one retry entry is reserved by the caller.
+/// Applies one task result. Capacity for one lingering and one load entry is reserved by the caller.
 fn apply(streamer: *ChunkStreamer, io: std.Io, completion: Completion, host: anytype) !void {
     const current = &streamer.current.?;
     const pos = completion.pos;
@@ -375,7 +362,6 @@ fn apply(streamer: *ChunkStreamer, io: std.Io, completion: Completion, host: any
     const keep = current.keeps(pos);
     switch (completion.kind) {
         .load => {
-            state.queued = false;
             if (completion.meshed) {
                 // The fresh mesh replaces a detached one, which must not be revived after a later unload.
                 _ = streamer.detached.remove(pos);
@@ -386,7 +372,7 @@ fn apply(streamer: *ChunkStreamer, io: std.Io, completion: Completion, host: any
             if (state.active) return;
             if (state.edited) try streamer.removeMesh(io, pos, host);
             state.edited = false;
-            if (keep) streamer.retries.appendAssumeCapacity(pos);
+            if (keep) streamer.loads.appendAssumeCapacity(pos);
         },
         // An edit meshed a chunk that is not active yet. That mesh lacks structures,
         // so the chunk gets a full load, or it is outside the keep set and goes away.
@@ -395,7 +381,7 @@ fn apply(streamer: *ChunkStreamer, io: std.Io, completion: Completion, host: any
             const loading = streamer.loads_in_flight.contains(pos);
             if (!keep and !loading) return streamer.removeMesh(io, pos, host);
             state.edited = true;
-            if (!loading) streamer.retries.appendAssumeCapacity(pos);
+            if (!loading) streamer.loads.appendAssumeCapacity(pos);
         },
     }
 }
@@ -426,17 +412,15 @@ fn setCoverage(streamer: *ChunkStreamer, pos: World.ChunkPos, covered: bool) voi
     }
 }
 
-/// Dispatches a load for every keep-set candidate that is neither active nor queued, nearest rings first.
+/// Dispatches a load for every keep-set candidate that is neither active nor loading, nearest rings first.
 fn dispatchLoads(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, host: anytype) !void {
     const current = &streamer.current.?;
-    try streamer.loads.appendSlice(gpa, streamer.retries.items);
-    streamer.retries.clearRetainingCapacity();
     defer streamer.loads.clearRetainingCapacity();
 
     var wanted: usize = 0;
     for (streamer.loads.items) |pos| {
         const state = current.clipmap.get(pos) orelse continue;
-        if (state.active or state.queued or !current.keeps(pos)) continue;
+        if (state.active or !current.keeps(pos) or streamer.loads_in_flight.contains(pos)) continue;
         streamer.loads.items[wanted] = pos;
         wanted += 1;
     }
@@ -448,11 +432,7 @@ fn dispatchLoads(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, h
     try streamer.completions.reserve(io, gpa, candidates.len);
     var dispatched: usize = 0;
     for (candidates) |pos| {
-        const state = current.clipmap.get(pos).?;
-        // Retries can repeat a position, and sorting puts repeats next to each other.
-        if (state.queued) continue;
-        state.queued = true;
-        // A load from before the chunk was evicted is still running, and its result serves this cell.
+        // Candidates can repeat.
         if (streamer.loads_in_flight.getOrPutAssumeCapacity(pos).found_existing) continue;
         host.dispatch(io, .{ .pos = pos, .kind = .{ .load = current.settings } });
         dispatched += 1;
@@ -460,16 +440,12 @@ fn dispatchLoads(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, h
     streamer.completions.release(io, candidates.len - dispatched);
 }
 
-/// Orders by ring around the player, then level, then position, so equal positions end up adjacent.
+/// Orders by ring around the player, then level.
 fn loadsFirst(clipmap: *const ChunkClipmap, a: World.ChunkPos, b: World.ChunkPos) bool {
     const a_ring = ring(clipmap, a);
     const b_ring = ring(clipmap, b);
     if (a_ring != b_ring) return a_ring < b_ring;
-    if (a.level != b.level) return a.level < b.level;
-    inline for (0..3) |axis| {
-        if (a.position[axis] != b.position[axis]) return a.position[axis] < b.position[axis];
-    }
-    return false;
+    return a.level < b.level;
 }
 
 fn ring(clipmap: *const ChunkClipmap, pos: World.ChunkPos) u32 {
@@ -667,7 +643,6 @@ fn fuzzStreamer(_: void, smith: *std.testing.Smith) !void {
         const level_index = current.clipmap.levelIndex(index);
         for (lvl.cells, 0..) |state, slot| {
             const pos: World.ChunkPos = .{ .level = level_index, .position = current.clipmap.positionAt(lvl.center, slot) };
-            if (state.queued) @panic("settled chunk still queued");
             if (state.active != host.meshes.contains(pos)) @panic("active flag disagrees with the renderer");
             if (current.keeps(pos) and !state.active) @panic("keep-set chunk not loaded");
             if (state.active and !current.keeps(pos) and streamer.canUnload(pos, state)) @panic("unloadable chunk still lingering");

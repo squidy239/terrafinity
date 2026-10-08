@@ -12,7 +12,6 @@ const EntityTypes = @import("entity/EntityTypes.zig");
 const Item = @import("entity/Item.zig");
 const Physics = @import("entity/Physics.zig");
 const Key = @import("Key.zig");
-const ChunkClipmap = @import("ChunkClipmap.zig");
 const ChunkStreamer = @import("ChunkStreamer.zig");
 const utils = @import("libs/utils.zig");
 pub const Renderer = @import("Renderer.zig");
@@ -44,13 +43,12 @@ streamer: ChunkStreamer = .{},
 
 entity_registry: EntityRegistry,
 
-selected_inventory_row: std.atomic.Value(u32) = .init(0),
-selected_inventory_col: std.atomic.Value(u32) = .init(0),
+/// The player's block, published by the frame thread for stream passes and load
+/// tasks, the only readers off that thread.
+player_block: World.BlockPos = @splat(0),
+player_block_mutex: std.Io.Mutex = .init,
 
-/// A pass runs when tasks finished, when the player crossed a chunk at the lowest
-/// level, or every `loader_frequency_ms` so settings changes and unloads progress.
 last_stream: std.Io.Timestamp = .zero,
-last_stream_center: ChunkClipmap.Position = @splat(std.math.maxInt(i32)),
 stream_is_running: std.atomic.Value(bool) = .init(false),
 stream_future: ?std.Io.Future(@typeInfo(@TypeOf(streamPass)).@"fn".return_type.?) = null,
 
@@ -100,7 +98,6 @@ pub const Options = struct {
 
     lod_overlap: i32 = 1,
 
-    loader_frequency_ms: u64 = 250,
     mesh_unload_frequency_ms: u64 = 500,
     save_frequency_ms: u64 = 5000,
 
@@ -128,6 +125,9 @@ pub const Options = struct {
     /// Speed while the sprint key is held, as a multiple of `move_speed`. Clamped
     /// to at least 1 so the key can never slow the player down.
     sprint_multiplier: f32 = 1.6,
+    /// Player inventory grid in slots, read when the player spawns. The first row is the hotbar.
+    inventory_width: u32 = 10,
+    inventory_height: u32 = 16,
 
     render_options: Renderer.RenderOptions = .{},
 
@@ -329,12 +329,7 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
     const height: f64 = @floatCast(game.options.player_height);
     const half_height = height / 2;
     const required_air = spawnRequiredAir(game.options.player_height);
-    const mover = Physics.Mover{
-        .collisions = .init(true),
-        .zero_velocity = .init(true),
-        .bounding_box = Physics.Mover.boxFor(@floatCast(game.options.player_width), height),
-        .enabled = .init(true),
-    };
+    const mover = Physics.Mover{ .bounding_box = Physics.Mover.boxFor(@floatCast(game.options.player_width), height) };
     var reader = World.Reader{ .world = &game.world };
     defer reader.clear(io);
     const bx: i64 = @intFromFloat(@round(x));
@@ -457,8 +452,8 @@ pub fn recreateWorld(
 ) !void {
     const game_options = self.options;
     const options_lock = self.options_lock;
-    const player_pos = self.getPlayerPos(io);
-    const view_direction = self.player.viewDirection(io);
+    const player_pos = self.player.body.pos;
+    const view_direction = self.player.view_direction;
     const world_path = allocator.dupe(u8, self.world_path) catch return error.RecreatePathAllocationFailed;
     defer allocator.free(world_path);
 
@@ -481,12 +476,9 @@ pub fn recreateWorld(
     self.deinit(io);
     try self.init(io, allocator, game_options, options_lock, world_path, vk_ctx, generators);
 
-    self.player.physics.mutex.lockUncancelable(io);
-    self.player.physics.pos = player_pos;
-    self.player.physics.mutex.unlock(io);
-    self.player.view_direction_mutex.lockUncancelable(io);
+    self.player.body.pos = player_pos;
     self.player.view_direction = view_direction;
-    self.player.view_direction_mutex.unlock(io);
+    self.publishPlayerBlock(io);
     self.renderer.updateCameraDirection(view_direction);
 }
 
@@ -516,25 +508,25 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
 
     const asyncs: tracy.Zone = .begin(.{ .src = @src(), .name = "asyncs" });
 
-    try restartFutures(self, io, allocator);
+    try restartFutures(self, io);
+    try self.startStreamPass(io, allocator);
     try startEntityDrain(self, io, allocator);
     // Apply any tuning edits before the body integrates this frame.
-    self.syncPlayerTuning(io);
+    self.player.applyTuning(self.playerTuning(io));
     // A menu gates gameplay input off, so no movement step replaced the velocity
     // this frame; zero the stale drift (Survival keeps Y so gravity still pulls).
     if (!self.input_handled) {
-        const physics = &self.player.physics;
-        physics.mutex.lockUncancelable(io);
-        physics.velocity = if (self.player.game_mode.load(.unordered) == .Survival) @Vector(3, f64){ 0, physics.velocity[1], 0 } else @as(@Vector(3, f64), @splat(0));
-        physics.mutex.unlock(io);
+        const body = &self.player.body;
+        body.velocity = if (self.player.game_mode == .Survival) @Vector(3, f64){ 0, body.velocity[1], 0 } else @as(@Vector(3, f64), @splat(0));
     }
     self.input_handled = false;
     // The player is updated synchronously every frame so the camera never waits
     // on the background drain.
     try self.updatePlayer(io, allocator, EntityRegistry.nowNs(io));
+    self.publishPlayerBlock(io);
     asyncs.end();
     self.debug_menu.entities.store(self.entity_registry.count(), .unordered);
-    const player_pos = self.player.getInterface().getPos.?(@ptrCast(self.player), io);
+    const player_pos = self.player.body.pos;
 
     try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos);
 
@@ -548,39 +540,41 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     try self.handleErrors();
 }
 
-fn restartFutures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+fn restartFutures(self: *@This(), io: std.Io) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "restartFutures" });
     defer z.end();
-    // Hold the shared lock once for all frequencies; the awaits and spawns below run lock-free.
     self.options_lock.lockSharedUncancelable(io);
-    const loader_frequency_ms = self.options.loader_frequency_ms;
-    const mesh_unload_frequency_ms = self.options.mesh_unload_frequency_ms;
     const save_frequency_ms = self.options.save_frequency_ms;
-    const lowest_level = self.options.lowest_level;
     self.options_lock.unlockShared(io);
-
-    try self.startStreamPass(io, allocator, lowest_level, loader_frequency_ms, mesh_unload_frequency_ms);
     try restartFuture(io, &self.save_is_running, &self.last_save, &self.save_future, save_frequency_ms, saveFuture, .{ self, io });
 }
 
-/// Starts a streaming pass when one has work, so the frame never polls the whole area.
-fn startStreamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator, lowest_level: i32, loader_frequency_ms: u64, unload_interval_ms: u64) !void {
+/// How often a pass runs without finished tasks, which bounds how late streaming notices the player moving.
+const stream_poll_ms = 16;
+
+/// Starts a pass when none runs and tasks finished or the poll interval passed.
+/// A pass is short-lived, so it never holds a worker the chunk loads need.
+fn startStreamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     if (self.stream_is_running.load(.seq_cst)) return;
+    if (!self.running.load(.unordered)) return;
     const now: std.Io.Timestamp = .now(io, .awake);
-    // Every level's window derives from the lowest level's, so one comparison catches any crossing.
-    const center = ChunkClipmap.centerFor(self.playerBlock(io), lowest_level);
-    const moved = !@reduce(.And, center == self.last_stream_center);
-    const due = self.last_stream.durationTo(now).toMilliseconds() > loader_frequency_ms;
-    if (!moved and !due and !self.streamer.completions.pending.load(.acquire)) return;
+    const due = self.last_stream.durationTo(now).toMilliseconds() >= stream_poll_ms;
+    if (!due and !self.streamer.completions.pending.load(.acquire)) return;
     self.last_stream = now;
-    self.last_stream_center = center;
-    try spawnTask(io, &self.stream_is_running, &self.stream_future, streamPass, .{ self, io, allocator, unload_interval_ms });
+    try spawnTask(io, &self.stream_is_running, &self.stream_future, streamPass, .{ self, io, allocator });
 }
 
-fn streamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator, unload_interval_ms: u64) !void {
+/// The only caller of `streamer.pass`; `stream_is_running` keeps passes from overlapping.
+fn streamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator) Io.Cancelable!void {
     defer self.stream_is_running.store(false, .seq_cst);
     const host: StreamHost = .{ .game = self, .allocator = allocator };
-    try self.streamer.pass(io, self.allocator, self.snapshotView(io), .now(io, .awake), unload_interval_ms, host);
+    self.options_lock.lockSharedUncancelable(io);
+    const unload_interval_ms = self.options.mesh_unload_frequency_ms;
+    self.options_lock.unlockShared(io);
+    // A canceled pass would drop the completions it took, stranding their loads.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    self.streamer.pass(io, self.allocator, self.snapshotView(io), .now(io, .awake), unload_interval_ms, host) catch |err| return self.deferError(err);
     self.debug_menu.meshes.store(self.streamer.meshCount(), .unordered);
 }
 
@@ -661,16 +655,17 @@ fn handleErrors(self: *@This()) !void {
 pub fn groupAsync(self: *Game, io: std.Io, function: anytype, args: anytype) void {
     const wrapper = struct {
         pub fn handler(game: *Game, fn_args: @TypeOf(args)) Io.Cancelable!void {
-            @call(.always_inline, function, fn_args) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                else => |e| {
-                    const existing_error = game.deferred_error.cmpxchgStrong(@intFromError(error.NoError), @intFromError(e), .seq_cst, .seq_cst);
-                    if (existing_error) |er| std.log.err("{s}", .{@errorName(@errorFromInt(er))});
-                },
-            };
+            @call(.always_inline, function, fn_args) catch |err| return game.deferError(err);
         }
     };
     self.group.async(io, wrapper.handler, .{ self, args });
+}
+
+/// Hands a background task's error to the next frame; cancellation passes through.
+fn deferError(self: *Game, err: anyerror) Io.Cancelable!void {
+    if (err == error.Canceled) return error.Canceled;
+    const existing_error = self.deferred_error.cmpxchgStrong(@intFromError(error.NoError), @intFromError(err), .seq_cst, .seq_cst);
+    if (existing_error) |er| std.log.err("{s}", .{@errorName(@errorFromInt(er))});
 }
 
 pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.Position) void {
@@ -682,14 +677,11 @@ pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.Position)
 
     const small_f32 = 0.00001;
 
-    self.player.view_direction_mutex.lockUncancelable(io);
-    defer self.player.view_direction_mutex.unlock(io);
-    var current_view_dir = self.player.view_direction;
-    current_view_dir -= @Vector(3, f32){ view_dir_diff[0], view_dir_diff[1], 0 };
-    current_view_dir[0] = std.math.clamp(current_view_dir[0], -90 + small_f32, 90 - small_f32);
-    self.player.view_direction = current_view_dir;
+    const view_direction = &self.player.view_direction;
+    view_direction.* -= @Vector(3, f32){ view_dir_diff[0], view_dir_diff[1], 0 };
+    view_direction[0] = std.math.clamp(view_direction[0], -90 + small_f32, 90 - small_f32);
 
-    self.renderer.updateCameraDirection(current_view_dir);
+    self.renderer.updateCameraDirection(view_direction.*);
 }
 
 pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
@@ -698,13 +690,8 @@ pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     self.options_lock.lockSharedUncancelable(io);
     const scroll_sensitivity = self.options.scroll_sensitivity;
     self.options_lock.unlockShared(io);
-    switch (self.player.game_mode.load(.seq_cst)) {
-        .Creative, .Spectator => {
-            const scroll_delta = -scroll * scroll_sensitivity;
-            const fly_speed_linear_old = self.player.fly_speed_linear.fetchAdd(scroll_delta, .seq_cst);
-            const fly_speed_linear_new = fly_speed_linear_old + scroll_delta;
-            _ = self.player.fly_speed.store(@min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, fly_speed_linear_new)), .seq_cst);
-        },
+    switch (self.player.game_mode) {
+        .Creative, .Spectator => self.player.fly_speed_linear -= scroll * scroll_sensitivity,
         .Survival => {},
     }
 }
@@ -713,53 +700,48 @@ pub fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSe
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleButtonActions" });
     defer z.end();
     self.input_handled = true;
-    switch (self.player.game_mode.load(.unordered)) {
-        .Creative, .Spectator => self.flyMove(io, actions),
+    switch (self.player.game_mode) {
+        .Creative, .Spectator => self.flyMove(actions),
         .Survival => try self.walkMove(io, actions),
     }
     self.setSelectedSlot(actions);
     if (actions.contains(.spawn_explosive)) self.spawnExplosive(io) catch |err|
         std.log.err("error spawning explosive: {any}", .{err});
-    groupAsync(self, io, itemAction, .{ self, io, actions.* });
+    const item = self.player.selectedItem() orelse return;
+    self.options_lock.lockSharedUncancelable(io);
+    const use: Item.UseContext = .{
+        .actions = actions.*,
+        .player_pos = self.player.body.pos,
+        .looking = self.getCameraFront(),
+        .sphere_size = self.options.sphere_size,
+        .sphere_block = self.options.sphere_block,
+    };
+    self.options_lock.unlockShared(io);
+    groupAsync(self, io, itemAction, .{ self, io, item, use });
 }
 
 fn setSelectedSlot(self: *@This(), actions: *const Key.ActionSet) void {
-    const inventory = &self.player.main_inventory;
+    const player = self.player;
+    const inventory = &player.main_inventory;
     const first_hotbar = @backingInt(Key.Action.hotbar_key_0);
     const hotbar_key_count = 10;
     inline for (0..hotbar_key_count) |slot| {
-        if (actions.contains(@fromBackingInt(@intCast(first_hotbar + slot)))) self.selectSlot(self.selectedRow(), @intCast(slot));
+        if (actions.contains(@fromBackingInt(@intCast(first_hotbar + slot)))) player.selectSlot(player.selected_row, @intCast(slot));
     }
-    const row = self.selectedRow();
-    const col = self.selectedCol();
-    if (actions.contains(.hotbar_left)) self.selectSlot(row, if (col == 0) inventory.width - 1 else col - 1);
-    if (actions.contains(.hotbar_right)) self.selectSlot(row, (col + 1) % inventory.width);
-    if (actions.contains(.hotbar_up) or actions.contains(.hotbar_scroll_up)) self.selectSlot(if (row == 0) inventory.height - 1 else row - 1, col);
-    if (actions.contains(.hotbar_down) or actions.contains(.hotbar_scroll_down)) self.selectSlot((row + 1) % inventory.height, col);
-}
-
-pub fn selectedRow(self: *const @This()) u32 {
-    return self.selected_inventory_row.load(.seq_cst);
-}
-
-pub fn selectedCol(self: *const @This()) u32 {
-    return self.selected_inventory_col.load(.seq_cst);
-}
-
-/// Moves the selection, clamping to the inventory grid.
-pub fn selectSlot(self: *@This(), row: u32, col: u32) void {
-    const inventory = &self.player.main_inventory;
-    self.selected_inventory_row.store(@min(row, inventory.height - 1), .seq_cst);
-    self.selected_inventory_col.store(@min(col, inventory.width - 1), .seq_cst);
+    const row = player.selected_row;
+    const col = player.selected_col;
+    if (actions.contains(.hotbar_left)) player.selectSlot(row, if (col == 0) inventory.width - 1 else col - 1);
+    if (actions.contains(.hotbar_right)) player.selectSlot(row, (col + 1) % inventory.width);
+    if (actions.contains(.hotbar_up) or actions.contains(.hotbar_scroll_up)) player.selectSlot(if (row == 0) inventory.height - 1 else row - 1, col);
+    if (actions.contains(.hotbar_down) or actions.contains(.hotbar_scroll_down)) player.selectSlot((row + 1) % inventory.height, col);
 }
 
 fn spawnExplosive(self: *@This(), io: std.Io) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnExplosive" });
     defer z.end();
-    const player_pos = self.getPlayerPos(io);
-    const looking = self.getCameraFront(io);
+    const looking = self.getCameraFront();
     const spawn_distance: f64 = 2;
-    const pos = player_pos + @as(@Vector(3, f64), @floatCast(looking)) * @as(@Vector(3, f64), @splat(spawn_distance));
+    const pos = self.player.body.pos + @as(@Vector(3, f64), @floatCast(looking)) * @as(@Vector(3, f64), @splat(spawn_distance));
     const entity = try self.entity_registry.spawn(io, self.allocator, &self.world, EntityTypes.Explosive.init(
         pos,
         looking,
@@ -768,29 +750,14 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
     entity.release();
 }
 
-/// Runs the selected hotbar item for this frame's inputs. Item behavior lives in
+/// Runs the selected hotbar item for one frame's inputs. Item behavior lives in
 /// `Item.use`, so a raw click does nothing unless the matching tool is selected.
-fn itemAction(self: *@This(), io: std.Io, actions: Key.ActionSet) !void {
+fn itemAction(self: *@This(), io: std.Io, item: Item.Item, use: Item.UseContext) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "itemAction" });
     defer z.end();
-    const item = self.player.main_inventory.get(io, self.selectedRow(), self.selectedCol()) orelse return;
-    const player_pos = self.getPlayerPos(io);
-    const looking = self.getCameraFront(io);
-
-    try self.options_lock.lockShared(io);
-    const sphere_size = self.options.sphere_size;
-    const sphere_block = self.options.sphere_block;
-    self.options_lock.unlockShared(io);
-
     var editor: World.Editor = .{ .world = &self.world, .temp_allocator = self.allocator };
     defer editor.clear();
-    try item.use(.{
-        .editor = &editor,
-        .player_pos = player_pos,
-        .looking = looking,
-        .sphere_size = sphere_size,
-        .sphere_block = sphere_block,
-    }, actions);
+    try item.use(&editor, use);
     try editor.flush(io, self.allocator);
 }
 
@@ -811,17 +778,18 @@ fn wishDirection(camera_front: @Vector(3, f32), actions: *const Key.ActionSet) @
     return vel;
 }
 
-fn flyMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) void {
-    self.player.fly(io, wishDirection(self.getCameraFront(io), actions));
+fn flyMove(self: *@This(), actions: *const Key.ActionSet) void {
+    self.player.fly(wishDirection(self.getCameraFront(), actions));
 }
 
 fn walkMove(self: *@This(), io: std.Io, actions: *const Key.ActionSet) !void {
     const now = std.Io.Timestamp.now(io, .awake);
     try self.player.walk(io, self.allocator, &self.world, .{
-        .wish = wishDirectionHorizontal(self.player.viewDirection(io), actions),
+        .wish = wishDirectionHorizontal(self.player.view_direction, actions),
         .sprint = actions.contains(.sprint),
         .jump = actions.contains(.up),
         .elapsed_ns = @intCast(@max(self.last_frametime.durationTo(now).nanoseconds, 0)),
+        .tuning = self.playerTuning(io),
     });
 }
 
@@ -839,10 +807,11 @@ fn wishDirectionHorizontal(view_direction: @Vector(3, f32), actions: *const Key.
     return if (length > 0) wish / @as(@Vector(2, f64), @splat(length)) else wish;
 }
 
-/// Applies the tunable body size, movement, step, and jump to the live player.
-fn syncPlayerTuning(self: *@This(), io: std.Io) void {
+/// The tunable body size, movement, step, and jump from the options.
+fn playerTuning(self: *@This(), io: std.Io) EntityTypes.Player.Tuning {
     self.options_lock.lockSharedUncancelable(io);
-    const tuning: EntityTypes.Player.Tuning = .{
+    defer self.options_lock.unlockShared(io);
+    return .{
         .width = self.options.player_width,
         .height = self.options.player_height,
         .step_height = self.options.step_height,
@@ -851,27 +820,24 @@ fn syncPlayerTuning(self: *@This(), io: std.Io) void {
         .walk_speed = self.options.move_speed,
         .sprint_multiplier = self.options.sprint_multiplier,
     };
-    self.options_lock.unlockShared(io);
-    self.player.applyTuning(io, tuning);
 }
 
-pub fn getPlayerPos(self: *@This(), io: std.Io) @Vector(3, f64) {
-    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getPlayerPos" });
-    defer z.end();
-    self.player.physics.mutex.lockUncancelable(io);
-    defer self.player.physics.mutex.unlock(io);
-    return self.player.physics.pos;
+fn getCameraFront(self: *@This()) @Vector(3, f32) {
+    return Renderer.cameraFrontFromViewDirection(self.player.view_direction);
 }
 
-fn getCameraFront(self: *@This(), io: std.Io) @Vector(3, f32) {
-    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getCameraFront" });
-    defer z.end();
-    return Renderer.cameraFrontFromViewDirection(self.player.viewDirection(io));
+/// Publishes the block holding the player, the integer origin every chunk-window computation shares.
+fn publishPlayerBlock(self: *@This(), io: std.Io) void {
+    self.player_block_mutex.lockUncancelable(io);
+    defer self.player_block_mutex.unlock(io);
+    self.player_block = @intFromFloat(@floor(self.player.body.pos));
 }
 
-/// The block holding the player, the integer origin every chunk-window computation shares.
+/// The last published player block; safe from any task.
 fn playerBlock(self: *@This(), io: std.Io) World.BlockPos {
-    return @intFromFloat(@floor(self.getPlayerPos(io)));
+    self.player_block_mutex.lockUncancelable(io);
+    defer self.player_block_mutex.unlock(io);
+    return self.player_block;
 }
 
 fn snapshotView(self: *@This(), io: std.Io) ChunkStreamer.View {
@@ -904,7 +870,7 @@ fn isUniformInvisible(io: std.Io, chunk: *Chunk) !bool {
 }
 
 /// Runs one streamer request and always reports it back, so a canceled or failed
-/// task never strands the chunk as queued.
+/// task never strands the chunk as loading.
 fn streamChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, request: ChunkStreamer.Request) !void {
     var meshed = false;
     defer self.streamer.completions.push(io, .{ .pos = request.pos, .kind = request.kind, .meshed = meshed });
@@ -971,50 +937,35 @@ fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.Chu
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_pos: @Vector(3, f64)) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnPlayer" });
     defer z.end();
-    const default_game_mode = game.spawn.mode;
-    const initial_view_direction: @Vector(3, f32) = .{ 0.0001, -0.4, 0.001 };
+    var inventory: Item.Inventory = try .init(allocator, @max(game.options.inventory_width, 1), @max(game.options.inventory_height, 1));
+    errdefer inventory.deinit(allocator);
+    fillStarterRow(&inventory);
     const player_entity = try game.entity_registry.spawn(io, allocator, &game.world, EntityTypes.Player{
-        .player_name = .fromString("squid"),
-        .physics = .{
-            .elements = .{
-                .mover = .{
-                    .collisions = .init(false),
-                    .bounding_box = Physics.Mover.boxFor(@floatCast(game.options.player_width), @floatCast(game.options.player_height)),
-                    .enabled = .init(true),
-                    .zero_velocity = .init(true),
-                },
-                .gravity = .{
-                    .enabled = .init(false),
-                },
-            },
+        .body = .{
             .pos = spawn_pos,
-            .velocity = @splat(0),
+            .mover = .{ .bounding_box = Physics.Mover.boxFor(@floatCast(game.options.player_width), @floatCast(game.options.player_height)) },
             .last_update = .now(io, .awake),
         },
-        .game_mode = .init(default_game_mode),
-        .view_direction = initial_view_direction,
-        .main_inventory = undefined,
+        .game_mode = game.spawn.mode,
+        .view_direction = .{ 0.0001, -0.4, 0.001 },
+        .main_inventory = inventory,
     }, .{});
     game.player_entity = player_entity;
     // The held reference keeps the player resident; the frame lane drives it.
     game.player = @ptrCast(@alignCast(player_entity.ptr));
-    // The literal physics flags above match Spectator, so normalize them to the configured mode.
-    game.player.switchGameMode(default_game_mode);
-    game.player.main_inventory = .initBuffer(
-        10,
-        16,
-        &game.player.inventory_buffer,
-    );
-    // Placeholder starter row so the hotbar has icons to show; real item grants come
-    // later. Tool items always get a slot, so block items are capped to fit the row.
-    const hotbar_width = game.player.main_inventory.width;
-    const tool_count: u32 = @typeInfo(Item.ExtraItemType).@"enum".field_names.len;
-    const block_slots = @min(@as(u32, @intCast(Item.block_types.len)), hotbar_width -| tool_count);
+    game.publishPlayerBlock(io);
+    game.renderer.updateCameraDirection(game.player.view_direction);
+}
+
+/// Placeholder starter row so the hotbar has icons to show; real item grants come
+/// later. Tool items get slots first, so block items are capped to fit the row.
+fn fillStarterRow(inventory: *Item.Inventory) void {
+    const tools = Item.extra_item_types[0..@min(Item.extra_item_types.len, inventory.width)];
+    const block_slots = @min(Item.block_types.len, inventory.width - tools.len);
     for (Item.block_types[0..block_slots], 0..) |block, col| {
-        _ = game.player.main_inventory.set(io, 0, @intCast(col), .{ .item_type = Item.fromBlock(block).?, .amount = 1 });
+        inventory.set(0, @intCast(col), .{ .item_type = Item.fromBlock(block).?, .amount = 1 });
     }
-    for (Item.extra_item_types, 0..) |item_type, i| {
-        _ = game.player.main_inventory.set(io, 0, block_slots + @as(u32, @intCast(i)), .{ .item_type = item_type, .amount = 1 });
+    for (tools, block_slots..) |item_type, col| {
+        inventory.set(0, @intCast(col), .{ .item_type = item_type, .amount = 1 });
     }
-    game.renderer.updateCameraDirection(game.player.viewDirection(io));
 }

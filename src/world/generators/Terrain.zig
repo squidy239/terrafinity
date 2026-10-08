@@ -20,6 +20,7 @@ pub const DefaultGenerator = struct {
     pub const Noise = @import("fastnoise");
     const thc_fragments = if (builtin.is_test) 1 else 8;
     const sample_count = ChunkSize * ChunkSize;
+    const sample_step = 1.0 / @as(comptime_float, ChunkSize);
     const FloatV = @Vector(ChunkSize, f32);
 
     /// Sampling density for noise interpolators; coarser densities evaluate on a border-shared lattice and interpolate up.
@@ -46,6 +47,12 @@ pub const DefaultGenerator = struct {
         bounds: [2]f32,
         max: f32,
         scale: f32,
+
+        fn init(params: *const Params, scale: f32) Envelope {
+            const min: f32 = @floatFromInt(params.terrain_min);
+            const max: f32 = @floatFromInt(params.terrain_max);
+            return .{ .bounds = .{ min, max }, .max = @max(@abs(min), @abs(max)), .scale = scale };
+        }
     };
 
     /// Shared height-pipeline coordinates so helpers take one context instead of six scalars.
@@ -53,21 +60,17 @@ pub const DefaultGenerator = struct {
         params: *const Params,
         level: i32,
         pos: [2]f32,
-        step: f32,
         one_d_scale: f32,
         env: Envelope,
 
         fn init(params: *const Params, level: i32, chunk_pos: [2]i32) HeightCtx {
             const scale = @max(params.terrain_scale, 1e-6) / World.ChunkPos.toScale(level);
-            const min: f32 = @floatFromInt(params.terrain_min);
-            const max: f32 = @floatFromInt(params.terrain_max);
             return .{
                 .params = params,
                 .level = level,
                 .pos = .{ @floatFromInt(chunk_pos[0]), @floatFromInt(chunk_pos[1]) },
-                .step = 1.0 / @as(comptime_float, ChunkSize),
                 .one_d_scale = 1.0 / scale,
-                .env = .{ .bounds = .{ min, max }, .max = @max(@abs(min), @abs(max)), .scale = scale },
+                .env = .init(params, scale),
             };
         }
     };
@@ -464,24 +467,22 @@ pub const DefaultGenerator = struct {
         const slope_scale = self.params.grass_detail_slope_scale;
         const slope_interp = self.params.grass_detail_gradient_interp;
         var level_slopes = LevelSlopes{ .generator = self, .io = io, .interp = slope_interp };
-        // Hoisted so the pointer stored in the batch outlives the block below; left undefined (never read) when the branch is not taken.
+        // Hoisted so `fine` can point at it past the block below; left undefined (never read) when the branch is not taken.
         var fine_slopes: [ChunkSize][ChunkSize]f32 = undefined;
-        const batch: BladeBatch = blk: {
-            if (self.params.grass_detail_gradient_source == .fine) {
-                fine_slopes = try self.fineDetailSlopes(io, chunk_pos, slope_interp);
-                for (&fine_slopes) |*row| {
-                    for (row) |*slope| slope.* = bladeHeightScale(slope.*, slope_scale);
-                }
-                break :blk .{ .detail_grid = &detail_grid, .base = base, .fine_per_block = fine_per_block, .fine_slopes = &fine_slopes };
+        const fine: ?*const [ChunkSize][ChunkSize]f32 = blk: {
+            if (self.params.grass_detail_gradient_source != .fine) break :blk null;
+            fine_slopes = try self.fineDetailSlopes(io, chunk_pos, slope_interp);
+            for (&fine_slopes) |*row| {
+                for (row) |*slope| slope.* = bladeHeightScale(slope.*, slope_scale);
             }
-            break :blk .{ .detail_grid = &detail_grid, .base = base, .fine_per_block = fine_per_block, .fine_slopes = null };
+            break :blk &fine_slopes;
         };
-        try fanBladeColumns(&reader, io, allocator, batch, block_min, block_max, &level_slopes, slope_scale, blocks, grid_buffer);
+        try fanBladeColumns(&reader, io, allocator, .{ .detail_grid = &detail_grid, .base = base, .fine_per_block = fine_per_block }, block_min, block_max, fine, &level_slopes, slope_scale, blocks, grid_buffer);
     }
 
     /// Fans stamped level-0 columns out to fine voxels, scaling per-voxel from the fine grid when present,
     /// then merges the result: air when nothing was stamped, else the detail grid.
-    fn fanBladeColumns(reader: *World.Reader, io: std.Io, allocator: std.mem.Allocator, batch: BladeBatch, block_min: World.BlockPos, block_max: World.BlockPos, parent_slopes: *LevelSlopes, slope_scale: f32, blocks: *Chunk.Encoding, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
+    fn fanBladeColumns(reader: *World.Reader, io: std.Io, allocator: std.mem.Allocator, batch: BladeBatch, block_min: World.BlockPos, block_max: World.BlockPos, fine: ?*const [ChunkSize][ChunkSize]f32, parent_slopes: *LevelSlopes, slope_scale: f32, blocks: *Chunk.Encoding, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         var any_filled = false;
         var block_x = block_min[0];
         while (block_x <= block_max[0]) : (block_x += 1) {
@@ -490,8 +491,8 @@ pub const DefaultGenerator = struct {
                 var layers: [ChunkSize + 1]i64 = undefined;
                 const layer_count = try surfaceLayers(reader, io, allocator, block_x, block_min[1], block_max[1], block_z, &layers);
                 if (layer_count == 0) continue;
-                const slope: ?f32 = if (batch.fine_slopes == null) bladeHeightScale(try parent_slopes.slopeAt(block_x, block_z), slope_scale) else null;
-                if (fillBlades(batch, .{ .block_x = block_x, .block_z = block_z, .layers = layers[0..layer_count], .slope = slope })) any_filled = true;
+                const scale: BladeScale = if (fine) |grid| .{ .fine = grid } else .{ .uniform = bladeHeightScale(try parent_slopes.slopeAt(block_x, block_z), slope_scale) };
+                if (fillBlades(batch, .{ .block_x = block_x, .block_z = block_z, .layers = layers[0..layer_count], .scale = scale })) any_filled = true;
             }
         }
         if (!any_filled) {
@@ -571,14 +572,19 @@ pub const DefaultGenerator = struct {
         detail_grid: *[ChunkSize][ChunkSize][ChunkSize]Block,
         base: World.BlockPos,
         fine_per_block: i64,
-        fine_slopes: ?*const [ChunkSize][ChunkSize]f32,
+    };
+
+    /// Blade height scale: per fine voxel from this level's slope grid, or one value from the parent column.
+    const BladeScale = union(enum) {
+        fine: *const [ChunkSize][ChunkSize]f32,
+        uniform: f32,
     };
 
     const BladeColumn = struct {
         block_x: i64,
         block_z: i64,
         layers: []const i64,
-        slope: ?f32, // null while the batch fine grid selects the scale.
+        scale: BladeScale,
     };
 
     /// Fans one column's stamped layers to fine voxels; blades sit on alternating voxels at slope-scaled hash heights.
@@ -606,8 +612,10 @@ pub const DefaultGenerator = struct {
                 const gz: usize = @intCast(fine_z - batch.base[2]);
                 const blade: u32 = @bitCast(Noise.hash2D(0, @truncate(fine_x), @truncate(fine_z)));
                 const height: i64 = 1 + @as(i64, @intCast((blade >> 16) % @as(u32, @intCast(batch.fine_per_block))));
-                std.debug.assert((batch.fine_slopes == null) != (column.slope == null));
-                const scale = if (batch.fine_slopes) |grid| grid[gx][gz] else column.slope.?;
+                const scale = switch (column.scale) {
+                    .fine => |grid| grid[gx][gz],
+                    .uniform => |value| value,
+                };
                 // NaN scales fail the comparison below and skip the blade.
                 const scaled_f = @as(f32, @floatFromInt(height)) * scale;
                 if (!(scaled_f >= 1)) continue;
@@ -641,8 +649,8 @@ pub const DefaultGenerator = struct {
         // Negative base exercises two's-complement parity in the stride phase.
         const base: World.BlockPos = .{ -8, -8, -8 };
         var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.null)));
-        const batch = BladeBatch{ .detail_grid = &grid, .base = base, .fine_per_block = 8, .fine_slopes = null };
-        const filled = fillBlades(batch, .{ .block_x = -1, .block_z = -1, .layers = &.{0}, .slope = 1 });
+        const batch = BladeBatch{ .detail_grid = &grid, .base = base, .fine_per_block = 8 };
+        const filled = fillBlades(batch, .{ .block_x = -1, .block_z = -1, .layers = &.{0}, .scale = .{ .uniform = 1 } });
         try std.testing.expect(filled);
         for (grid, 0..) |plane, gx| {
             for (plane, 0..) |row, gy| {
@@ -662,10 +670,10 @@ pub const DefaultGenerator = struct {
         const base: World.BlockPos = .{ -8, -8, -8 };
         var slopes: [ChunkSize][ChunkSize]f32 = @splat(@splat(0));
         var grid: [ChunkSize][ChunkSize][ChunkSize]Block = @splat(@splat(@splat(.null)));
-        const batch = BladeBatch{ .detail_grid = &grid, .base = base, .fine_per_block = 8, .fine_slopes = &slopes };
-        try std.testing.expect(!fillBlades(batch, .{ .block_x = -1, .block_z = -1, .layers = &.{0}, .slope = null }));
+        const batch = BladeBatch{ .detail_grid = &grid, .base = base, .fine_per_block = 8 };
+        try std.testing.expect(!fillBlades(batch, .{ .block_x = -1, .block_z = -1, .layers = &.{0}, .scale = .{ .fine = &slopes } }));
         slopes[0][0] = 1;
-        try std.testing.expect(fillBlades(batch, .{ .block_x = -1, .block_z = -1, .layers = &.{0}, .slope = null }));
+        try std.testing.expect(fillBlades(batch, .{ .block_x = -1, .block_z = -1, .layers = &.{0}, .scale = .{ .fine = &slopes } }));
         for (grid, 0..) |plane, gx| {
             for (plane, 0..) |row, gy| {
                 for (row, 0..) |b, gz| {
@@ -741,6 +749,27 @@ pub const DefaultGenerator = struct {
         const depth_threshold: f32 = @floor(ctx.params.dirt_depth * scale) + 1.0;
         const block_height_vec: [ChunkSize]i32 = std.simd.iota(i32, ChunkSize) + @as(@Vector(ChunkSize, i32), @splat(chunk_pos.position[1] * ChunkSize));
 
+        // Only the voxel height and slope vary per surface hit.
+        var ground: GroundContext = .{
+            .block_height = undefined,
+            .sea_level = sea_level,
+            .block_randomness = ctx.params.terrain_block_randomness,
+            .one_d_terrain_scale = one_d_terrain_scale,
+            .slope = undefined,
+            .slope_randomness = ctx.params.slope_randomness,
+            .ground_threshold = ctx.params.ground_threshold,
+            .dirt_band = ctx.params.dirt_band,
+            .snow_line = ctx.params.snow_line,
+            .beach_band_blocks = ctx.params.beach_band * scale,
+            .sand_slope = ctx.params.sand_slope,
+            .sand_slope_falloff_blocks = ctx.params.sand_slope_falloff * scale,
+            .sea_floor_rock_slope = ctx.params.sea_floor_rock_slope,
+            .grass_height_falloff = ctx.params.grass_height_falloff,
+            .dirt_height_falloff = ctx.params.dirt_height_falloff,
+            .ground_altitude_base = ctx.params.ground_altitude_base,
+            .snow_slope_gain = ctx.params.snow_slope_gain,
+            .snow_cliff_slope = ctx.params.snow_cliff_slope,
+        };
         // The differential feeds randGround directly; each column computes its row lazily on first surface hit.
         for (heights, chunk_blocks, 0..) |heights_row, *col, x| {
             var differential_row: [ChunkSize]f32 = undefined;
@@ -767,37 +796,14 @@ pub const DefaultGenerator = struct {
                 var surface_bits: u32 = @as(u32, @bitCast(below_or)) & @as(u32, @bitCast(diff < one_v));
                 while (surface_bits != 0) {
                     if (!differential_ready) {
-                        const nx_row = heights[if (x + 1 < ChunkSize) x + 1 else x - 1];
-                        for (0..ChunkSize) |z| {
-                            const nz = heights_row[if (z + 1 < ChunkSize) z + 1 else z - 1];
-                            const gz = heights_row[z] - nz;
-                            const gx = heights_row[z] - nx_row[z];
-                            differential_row[z] = @sqrt(gx * gx + gz * gz);
-                        }
+                        differential_row = differentialRow(&heights, x);
                         differential_ready = true;
                     }
                     const z: usize = @ctz(surface_bits);
                     surface_bits &= surface_bits - 1;
-                    row[z] = randGround(ctx.rand, heights_row[z] * terrain_scales[@intFromBool(heights_row[z] <= sea_level_f)], .{
-                        .block_height = bh,
-                        .sea_level = sea_level,
-                        .block_randomness = ctx.params.terrain_block_randomness,
-                        .one_d_terrain_scale = one_d_terrain_scale,
-                        .slope = differential_row[z],
-                        .slope_randomness = ctx.params.slope_randomness,
-                        .ground_threshold = ctx.params.ground_threshold,
-                        .dirt_band = ctx.params.dirt_band,
-                        .snow_line = ctx.params.snow_line,
-                        .beach_band_blocks = ctx.params.beach_band * scale,
-                        .sand_slope = ctx.params.sand_slope,
-                        .sand_slope_falloff_blocks = ctx.params.sand_slope_falloff * scale,
-                        .sea_floor_rock_slope = ctx.params.sea_floor_rock_slope,
-                        .grass_height_falloff = ctx.params.grass_height_falloff,
-                        .dirt_height_falloff = ctx.params.dirt_height_falloff,
-                        .ground_altitude_base = ctx.params.ground_altitude_base,
-                        .snow_slope_gain = ctx.params.snow_slope_gain,
-                        .snow_cliff_slope = ctx.params.snow_cliff_slope,
-                    });
+                    ground.block_height = bh;
+                    ground.slope = differential_row[z];
+                    row[z] = randGround(ctx.rand, heights_row[z] * terrain_scales[@intFromBool(heights_row[z] <= sea_level_f)], ground);
                 }
             }
         }
@@ -945,7 +951,7 @@ pub const DefaultGenerator = struct {
         const base_coords_zone = tracy.Zone.begin(.{ .src = @src(), .name = "baseCoords" });
         var base_x: [sample_count]f32 = undefined;
         var base_z: [sample_count]f32 = undefined;
-        fillCoordGrid(ChunkSize, 0, &base_x, &base_z, ctx.pos, ctx.step, ctx.one_d_scale);
+        fillCoordGrid(ChunkSize, 0, &base_x, &base_z, ctx.pos, sample_step, ctx.one_d_scale);
         base_coords_zone.end();
 
         const warp_zone = tracy.Zone.begin(.{ .src = @src(), .name = "terrainWarp" });
@@ -1037,18 +1043,22 @@ pub const DefaultGenerator = struct {
         const stride: f32 = @floatFromInt(ChunkSize / G);
         var coarse_x: [N * N]f32 = undefined;
         var coarse_z: [N * N]f32 = undefined;
-        fillCoordGrid(N, 0, &coarse_x, &coarse_z, ctx.pos, ctx.step * stride, ctx.one_d_scale);
+        fillCoordGrid(N, 0, &coarse_x, &coarse_z, ctx.pos, sample_step * stride, ctx.one_d_scale);
         var warped_x: [N * N]f32 = undefined;
         var warped_z: [N * N]f32 = undefined;
         warp_state.fillWarp2DGrid(&warped_x, &warped_z, &coarse_x, &coarse_z);
         var coarse: [N * N]f32 = undefined;
         noise_state.fillNoise2DGrid(&coarse, &warped_x, &warped_z);
+        out.* = upsample(N, &coarse);
+    }
+
+    /// Interpolates a border-shared N x N lattice up to the flat full-resolution grid.
+    fn upsample(comptime N: usize, lattice: *const [N * N]f32) [sample_count]f32 {
         const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
-        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(&coarse)).*).sampleGrid();
-        for (0..ChunkSize) |x| {
-            const row: [ChunkSize]f32 = samples[x];
-            for (0..ChunkSize) |z| out[x * ChunkSize + z] = row[z];
-        }
+        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(lattice)).*).sampleGrid();
+        var out: [sample_count]f32 = undefined;
+        for (samples, 0..) |row, x| out[x * ChunkSize ..][0..ChunkSize].* = row;
+        return out;
     }
 
     /// Flat index of coarse node (a, b); the far edge clamps to the last sample since its neighbor belongs to the next chunk.
@@ -1063,7 +1073,7 @@ pub const DefaultGenerator = struct {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "terrainGradient" });
         defer zone.end();
         var scratch: GradientScratch = undefined;
-        const e = ctx.step * ctx.one_d_scale;
+        const e = sample_step * ctx.one_d_scale;
         const one_d_2e = 1.0 / (2.0 * e);
         inline for (0..2) |axis| {
             for ([2]f32{ 1.0, -1.0 }) |sign| {
@@ -1098,7 +1108,7 @@ pub const DefaultGenerator = struct {
         const stride_f: f32 = @floatFromInt(stride);
         var coarse_x: [N * N]f32 = undefined;
         var coarse_z: [N * N]f32 = undefined;
-        fillCoordGrid(N, 0, &coarse_x, &coarse_z, ctx.pos, ctx.step * stride_f, ctx.one_d_scale);
+        fillCoordGrid(N, 0, &coarse_x, &coarse_z, ctx.pos, sample_step * stride_f, ctx.one_d_scale);
         var raw: [N * N]f32 = undefined;
         ctx.params.surface_noise.fillNoise2DGrid(&raw, &coarse_x, &coarse_z);
         const uses_gradient = ctx.params.surface_noise_gradient_influence > 0;
@@ -1110,12 +1120,7 @@ pub const DefaultGenerator = struct {
                 prod[a * N + b] = surfaceNoiseAmount(mag, ctx.params) * raw[a * N + b];
             }
         }
-        const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
-        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(&prod)).*).sampleGrid();
-        for (0..ChunkSize) |x| {
-            const row: [ChunkSize]f32 = samples[x];
-            for (0..ChunkSize) |z| out[x * ChunkSize + z] = row[z];
-        }
+        @memcpy(out, &upsample(N, &prod));
     }
 
     /// Fade steepness from a coarse central difference; the fine gradient would flicker the mask between neighbors.
@@ -1124,7 +1129,7 @@ pub const DefaultGenerator = struct {
         const N = ChunkSize + 2 * stencil;
         var ext_x: [N * N]f32 = undefined;
         var ext_z: [N * N]f32 = undefined;
-        fillCoordGrid(N, stencil, &ext_x, &ext_z, ctx.pos, ctx.step, ctx.one_d_scale);
+        fillCoordGrid(N, stencil, &ext_x, &ext_z, ctx.pos, sample_step, ctx.one_d_scale);
         var warp_x: [N * N]f32 = undefined;
         var warp_z: [N * N]f32 = undefined;
         var large_warp_x: [N * N]f32 = undefined;
@@ -1141,7 +1146,7 @@ pub const DefaultGenerator = struct {
             const large: @Vector(N, f32) = large_noise[x * N ..][0..N].*;
             shaped_ext[x * N ..][0..N].* = shapedRow(N, ctx.params, large, raw);
         }
-        const e = ctx.step * ctx.one_d_scale;
+        const e = sample_step * ctx.one_d_scale;
         const one_d_2e = 1.0 / (2.0 * e);
         const inv_stencil = 1.0 / @as(f32, @floatFromInt(stencil));
         for (0..ChunkSize) |x| {
@@ -1189,37 +1194,33 @@ pub const DefaultGenerator = struct {
         var delta: [N * N]f32 = undefined;
         for (0..N) |a| {
             for (0..N) |b| {
-                const fx: usize = @min(a * stride, ChunkSize - 1);
-                const fz: usize = @min(b * stride, ChunkSize - 1);
-                const i = fx * ChunkSize + fz;
+                const i = coarseSourceIndex(stride, a, b);
                 delta[a * N + b] = erosion.erosionFilter(
                     .{ base_x[i] / p_scale, base_z[i] / p_scale },
-                    .{ shaped[fx][fz], -grad_x[i] * p_scale, -grad_z[i] * p_scale },
+                    .{ shaped[i / ChunkSize][i % ChunkSize], -grad_x[i] * p_scale, -grad_z[i] * p_scale },
                     fade[i],
                     eparams,
                 ).height_delta;
             }
         }
-        const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
-        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(&delta)).*).sampleGrid();
-        for (0..ChunkSize) |x| {
-            const row: [ChunkSize]f32 = samples[x];
-            for (0..ChunkSize) |z| extra[x * ChunkSize + z] += row[z];
-        }
+        for (extra, upsample(N, &delta)) |*sum, value| sum.* += value;
     }
 
     fn getDifferential(height: *const [ChunkSize][ChunkSize]f32) [ChunkSize][ChunkSize]f32 {
         var differential: [ChunkSize][ChunkSize]f32 = undefined;
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |z| {
-                const nz = height[x][if (z + 1 < ChunkSize) z + 1 else z - 1];
-                const nx = height[if (x + 1 < ChunkSize) x + 1 else x - 1][z];
-                const gz = height[x][z] - nz;
-                const gx = height[x][z] - nx;
-                differential[x][z] = @sqrt(gx * gx + gz * gz);
-            }
-        }
+        for (&differential, 0..) |*row, x| row.* = differentialRow(height, x);
         return differential;
+    }
+
+    /// Forward-difference slope magnitude of row `x`; the last row and column difference backward.
+    fn differentialRow(height: *const [ChunkSize][ChunkSize]f32, x: usize) [ChunkSize]f32 {
+        var row: [ChunkSize]f32 = undefined;
+        for (&row, height[x], height[if (x + 1 < ChunkSize) x + 1 else x - 1], 0..) |*out, h, nx, z| {
+            const gz = h - height[x][if (z + 1 < ChunkSize) z + 1 else z - 1];
+            const gx = h - nx;
+            out.* = @sqrt(gx * gx + gz * gz);
+        }
+        return row;
     }
 
     /// Grass slope grid at the configured density; coarser densities decimate and interpolate up.
@@ -1248,14 +1249,7 @@ pub const DefaultGenerator = struct {
                 lattice[a * N + b] = @sqrt(gx * gx + gz * gz);
             }
         }
-        const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
-        const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(&lattice)).*).sampleGrid();
-        var out: [ChunkSize][ChunkSize]f32 = undefined;
-        for (0..ChunkSize) |x| {
-            const row: [ChunkSize]f32 = samples[x];
-            for (0..ChunkSize) |z| out[x][z] = row[z];
-        }
-        return out;
+        return std.mem.bytesAsValue([ChunkSize][ChunkSize]f32, std.mem.asBytes(&upsample(N, &lattice))).*;
     }
 
     /// Shaped height row shared by the base grid, gradient samples, and fade ring; the lane count follows the args.
@@ -1305,7 +1299,7 @@ pub const DefaultGenerator = struct {
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
         const gen_structures_zone = tracy.Zone.begin(.{ .src = @src() });
         defer gen_structures_zone.end();
-        if (chunk_pos.level < 0) return;
+        if (chunk_pos.level < 0 or !self.params.gen_structures) return;
         const editor_buffer_size: usize = 100_000;
         var editor_buffer: [editor_buffer_size]u8 = undefined;
         var bfa: std.heap.BufferFirstAllocator = .init(&editor_buffer, allocator);
@@ -1317,7 +1311,6 @@ pub const DefaultGenerator = struct {
             defer chunk.releaseAndUnlockShared(io);
 
             if (chunk.structures_generated.load(.seq_cst)) return;
-            if (!self.params.gen_structures) return;
             const heights = try self.getTerrainHeight(io, [2]i32{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
             const scale: f32 = self.params.terrain_scale / ChunkPos.toScale(chunk_pos.level);
             const min_full_tree_lod: i32 = 2;
@@ -1336,10 +1329,10 @@ pub const DefaultGenerator = struct {
                     const lvl_x: f32 = @floatFromInt(chunk_pos.position[0] * ChunkSize + @as(i32, @intCast(x)));
                     const lvl_z: f32 = @floatFromInt(chunk_pos.position[2] * ChunkSize + @as(i32, @intCast(z)));
 
+                    const center_pos = chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize } + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                     for (self.params.trees) |tree_conf| {
                         if (!tree_conf.enabled) continue;
                         const structure_seed = tree_conf.placer.getStructure(.{ @trunc(lvl_x), @trunc(lvl_z) }, @intCast(chunk_pos.level)) orelse continue;
-                        const center_pos = chunk_pos.position * @Vector(3, i32){ ChunkSize, ChunkSize, ChunkSize } + @Vector(3, i32){ @intCast(x), @intCast(y), @intCast(z) };
                         const tree_seed = self.params.seed.? ^ @as(u64, @bitCast(structure_seed));
                         var random = std.Random.DefaultPrng.init(@bitCast(tree_seed));
                         const rand = random.random();
@@ -1382,19 +1375,18 @@ fn mapStructureError(err: anyerror) error{ OutOfMemory, Canceled, Unrecoverable 
 /// Single-point shaped height mirroring the full-resolution grid path; close enough for land/water classification.
 fn columnSpawnHeight(params: *const DefaultGenerator.Params, x: f32, z: f32) f32 {
     const scale = @max(params.terrain_scale, 1e-6);
-    var wx = x / (@as(f32, ChunkSize) * scale);
-    var wz = z / (@as(f32, ChunkSize) * scale);
+    const base_x = x / (@as(f32, ChunkSize) * scale);
+    const base_z = z / (@as(f32, ChunkSize) * scale);
+    var wx = base_x;
+    var wz = base_z;
     params.terrain_noise.domainWarp2D(&wx, &wz);
     const raw = params.terrain_noise.genNoise2D(wx, wz);
-    var lx = x / (@as(f32, ChunkSize) * scale);
-    var lz = z / (@as(f32, ChunkSize) * scale);
+    var lx = base_x;
+    var lz = base_z;
     params.large_terrain_noise_warp.domainWarp2D(&lx, &lz);
     const large = params.large_terrain_noise.genNoise2D(lx, lz);
     const shaped = DefaultGenerator.shapedRow(1, params, @as(@Vector(1, f32), @splat(large)), @as(@Vector(1, f32), @splat(raw)))[0];
-    const min: f32 = @floatFromInt(params.terrain_min);
-    const max: f32 = @floatFromInt(params.terrain_max);
-    const env = DefaultGenerator.Envelope{ .bounds = .{ min, max }, .max = @max(@abs(min), @abs(max)), .scale = scale };
-    return DefaultGenerator.composeErodedHeight(shaped, 0, env);
+    return DefaultGenerator.composeErodedHeight(shaped, 0, .init(params, scale));
 }
 
 pub fn generatorProposeSpawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {

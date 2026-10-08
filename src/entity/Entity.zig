@@ -45,7 +45,6 @@ pub const Interface = struct {
     update: ?*const fn (ptr: *Implementation, ctx: UpdateContext) UpdateError!void = null,
     /// Frees the implementation. Must not acquire locks held where the entity system runs.
     unload: *const fn (ptr: *Implementation, io: std.Io, world: *World, uuid: Handle, allocator: std.mem.Allocator) void,
-    getPos: ?*const fn (ptr: *Implementation, io: std.Io) @Vector(3, f64) = null,
 };
 
 /// An unload that only destroys the `T` behind the implementation pointer.

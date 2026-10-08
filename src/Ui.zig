@@ -239,11 +239,11 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
             self.terrain_recreate_error = null;
         }
 
-        if (self.menu_state.debug_info and self.menu_state.ingame) self.debugInfo(io) catch |err| {
+        if (self.menu_state.debug_info and self.menu_state.ingame) self.debugInfo() catch |err| {
             std.log.err("debugInfo failed: {}", .{err});
         };
         if (self.menu_state.crosshair and self.menu_state.ingame) crossHair();
-        if (self.menu_state.ingame) self.hotbar(io);
+        if (self.menu_state.ingame) self.hotbar();
         if (self.menu_state.esc) menu_changed = self.escMenu() catch false;
         if (self.menu_state.main and !menu_changed) menu_changed = self.mainPage(io, gpa) catch |err| blk: {
             showWorldError(frame_time, err);
@@ -386,7 +386,7 @@ pub fn escMenu(self: *@This()) !bool {
     return false;
 }
 
-pub fn debugInfo(self: *@This(), io: std.Io) !void {
+pub fn debugInfo(self: *@This()) !void {
     var fmt_buffer: [16000]u8 = undefined;
     const box = dvui.box(@src(), .{}, .{
         .gravity_x = 0.0,
@@ -410,7 +410,7 @@ pub fn debugInfo(self: *@This(), io: std.Io) !void {
 
     const total = chunk_hits + chunk_misses;
     const chunk_hit_ratio: f32 = if (total == 0) 0 else @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(total));
-    const player_pos = self.game.getPlayerPos(io);
+    const player_pos = self.game.player.body.pos;
     const pos: @Vector(3, i64) = @intFromFloat(@round(player_pos));
     const spawn: @Vector(3, i64) = @intFromFloat(@round(self.game.spawn.pos));
     const str = try std.mem.print(
@@ -473,15 +473,13 @@ pub fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !b
         const game_mode_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 4 } });
         defer game_mode_row.deinit();
         dvui.labelNoFmt(@src(), "Game Mode", .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 8, .w = 8 } });
-        var game_mode: EntityTypes.Player.GameMode = self.game.player.game_mode.load(.monotonic);
         _ = dvui.dropdownEnum(
             @src(),
             EntityTypes.Player.GameMode,
-            .{ .choice = &game_mode },
+            .{ .choice = &self.game.player.game_mode },
             .{ .null_selectable = false },
             .{},
         );
-        self.game.player.switchGameMode(game_mode);
     }
 
     try self.config_lock.lock(io);
@@ -794,7 +792,6 @@ fn drawGeneralSettings(self: *@This(), options: *Game.Options) void {
         settingsSlider("Horizontal Render Distance", &options.render_distance_x, 6, 64, settingsId("streaming.render_distance_x"));
         settingsSlider("Vertical Render Distance", &options.render_distance_y, 6, 64, settingsId("streaming.render_distance_y"));
         settingsSlider("LOD Overlap (chunks)", &options.lod_overlap, -4, 8, settingsId("streaming.lod_overlap"));
-        settingsInterval("Chunk Load Interval (ms)", &options.loader_frequency_ms, settingsId("streaming.loader_frequency_ms"));
         settingsInterval("Mesh Unload Interval (ms)", &options.mesh_unload_frequency_ms, settingsId("streaming.mesh_unload_frequency_ms"));
         settingsInterval("Autosave Interval (ms)", &options.save_frequency_ms, settingsId("streaming.save_frequency_ms"));
     }
@@ -885,10 +882,8 @@ const hotbar_border_color: dvui.Color = .{ .r = 150, .g = 150, .b = 150, .a = 16
 
 /// Hotbar along the bottom. Number keys move the selection. Slots do not take
 /// clicks: play has no cursor, and an open menu is drawn over the bar.
-fn hotbar(self: *@This(), io: std.Io) void {
-    const inventory = &self.game.player.main_inventory;
-    const selected_row = self.game.selectedRow();
-    const selected_col = self.game.selectedCol();
+fn hotbar(self: *@This()) void {
+    const player = self.game.player;
 
     const bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .gravity_x = 0.5,
@@ -900,10 +895,8 @@ fn hotbar(self: *@This(), io: std.Io) void {
     });
     defer bar.deinit();
 
-    for (0..inventory.width) |index| {
-        const col: u32 = @intCast(index);
-        const item = inventory.get(io, selected_row, col);
-        self.hotbarSlot(col, item, col == selected_col);
+    for (player.main_inventory.rowSlots(player.selected_row), 0..) |item, col| {
+        self.hotbarSlot(@intCast(col), item, col == player.selected_col);
     }
 }
 
