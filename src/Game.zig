@@ -310,7 +310,7 @@ fn cacheCapacity(comptime V: type, min: u64, bytes: u64, name: []const u8) u64 {
 const spawn_scan_above: f64 = 512;
 const spawn_scan_below: f64 = 1024;
 const spawn_max_nudges: u32 = 8;
-const spawn_rounds: u32 = 3;
+const spawn_rounds: u32 = 64;
 // Attempt budgets double as search reach (rings advance per sample):
 // phase 1 roams far for the canonical pick, phase 2 stays near home.
 const spawn_phase1_attempts: u32 = 128;
@@ -412,7 +412,7 @@ fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator, fol
         try world_options.save(io, folder);
         return pos;
     }
-    std.log.err("spawn phase 1 failed after {d} rounds around {d:.1}, {d:.1}, {d:.1}", .{ spawn_rounds, game.spawn.center[0], game.spawn.center[1], game.spawn.center[2] });
+    std.log.err("spawn phase 1 failed: all tested spawn locations blocked around {d:.1}, {d:.1}, {d:.1}", .{ game.spawn.center[0], game.spawn.center[1], game.spawn.center[2] });
     return error.GeneratorSpawnFailed;
 }
 

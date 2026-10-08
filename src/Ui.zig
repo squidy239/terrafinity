@@ -98,6 +98,8 @@ new_game: NewGameState = .{},
 /// World awaiting deletion confirmation, owned by the Ui allocator.
 delete_world_name: ?[]const u8 = null,
 terrain_recreate_error: ?[]const u8 = null,
+/// A world load that failed outside the menu (test play), shown on the next frame.
+world_error: ?anyerror = null,
 world_list: std.ArrayList(FolderData) = .empty,
 world_list_dirty: bool = true,
 /// Settings edits are saved when the menu closes, not on every edited frame.
@@ -237,6 +239,11 @@ pub fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time:
                 .title = "Terrain recreation failed",
             });
             self.terrain_recreate_error = null;
+        }
+
+        if (self.world_error) |err| {
+            showWorldError(frame_time, err);
+            self.world_error = null;
         }
 
         if (self.menu_state.debug_info and self.menu_state.ingame) self.debugInfo() catch |err| {

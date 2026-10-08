@@ -399,7 +399,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     };
 
     const total_candidates = self.scene.max_allocated_index.load(.monotonic);
-    try self.scene.ensureCapacity(io, total_candidates);
+    try self.scene.ensureCapacity(total_candidates);
 
     try self.dev.resetCommandBuffer(frame_ctx.cmd_buffer, .{});
     try self.dev.beginCommandBuffer(frame_ctx.cmd_buffer, &.{ .flags = .{ .one_time_submit = true }, .p_inheritance_info = null });

@@ -363,17 +363,24 @@ pub const GpuRegionAllocator = struct {
         _ = regions.orderedRemove(index + 1);
     }
 
-    pub fn grow(self: *GpuRegionAllocator, io: std.Io, gpu_allocator: std.mem.Allocator) !GrowInfo {
+    /// The buffer size the next `grow` needs: double the current one.
+    pub fn nextCapacity(self: *GpuRegionAllocator, io: std.Io) !vk.DeviceSize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return std.math.mul(vk.DeviceSize, self.buffer_slice.len, 2) catch error.OutOfMemory;
+    }
+
+    /// Swaps in `new_slice`, which the caller allocates outside its locks because
+    /// device allocation is slow. Returns null when the buffer already reached that size.
+    pub fn grow(self: *GpuRegionAllocator, io: std.Io, new_slice: []align(buf_align.toByteUnits()) u8) ?GrowInfo {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const new_capacity = std.math.mul(vk.DeviceSize, @as(vk.DeviceSize, @intCast(self.buffer_slice.len)), 2) catch return error.OutOfMemory;
+        if (new_slice.len <= self.buffer_slice.len) return null;
         log.info("growing from {d} MB to {d} MB", .{
             self.buffer_slice.len / (1024 * 1024),
-            new_capacity / (1024 * 1024),
+            new_slice.len / (1024 * 1024),
         });
-
-        const new_slice = try gpu_allocator.alignedAlloc(u8, buf_align, new_capacity);
 
         const old_info: GrowInfo = .{
             .old_slice = self.buffer_slice,
@@ -558,6 +565,7 @@ pub const MeshUploader = struct {
     region_allocator: GpuRegionAllocator,
     pool_reservoir: CommandPoolReservoir = .{},
     retired_face_buffers: std.ArrayList(RetiredFaceBuffer) = undefined,
+    retired_face_buffers_mutex: std.Io.Mutex = .init,
     transfer: TransferState = .{},
     /// True when transfer and graphics queues share a physical queue family; their
     /// submits then share the graphics queue mutex. On a distinct transfer family the
@@ -765,6 +773,12 @@ pub const MeshUploader = struct {
 
             try self.flush(io);
 
+            // Allocating device memory can take hundreds of milliseconds, so it happens
+            // before the queue locks the frame thread needs. Runs after the locks release.
+            const new_slice = try self.memory.gpuOnly().alignedAlloc(u8, buf_align, try self.region_allocator.nextCapacity(io));
+            var unused_slice: ?@TypeOf(new_slice) = new_slice;
+            defer if (unused_slice) |slice| self.memory.gpuOnly().free(slice);
+
             // Drain the GPU before swapping the buffer, without holding the queue mutex
             // (the render thread needs it to advance the graphics timeline). Concurrent
             // growers may both drain; the retry after locking makes the double-drain benign.
@@ -787,7 +801,8 @@ pub const MeshUploader = struct {
             if (self.region_allocator.allocRegion(io, buffer_size)) |result| return result;
 
             std.log.info("growing face data buffer...", .{});
-            const grow_info = try self.region_allocator.grow(io, self.memory.gpuOnly());
+            const grow_info = self.region_allocator.grow(io, new_slice) orelse continue;
+            unused_slice = null;
 
             const face_buf_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, self.region_allocator.buffer_slice.ptr);
             self.region_allocator.resolve(face_buf_info.buffer, face_buf_info.offset);
@@ -808,6 +823,8 @@ pub const MeshUploader = struct {
                 @panic("MeshUploader.allocRegion: GPU command submission or wait failed - cannot safely continue");
             };
 
+            self.retired_face_buffers_mutex.lockUncancelable(io);
+            defer self.retired_face_buffers_mutex.unlock(io);
             self.retired_face_buffers.append(self.allocator, .{
                 .slice = grow_info.old_slice,
                 .graphics_timeline_value = self.vk_ctx.frame_number.load(.acquire) + VulkanContext.max_frames_in_flight,
@@ -877,8 +894,7 @@ pub const MeshUploader = struct {
     }
 
     pub fn drainInFlightFrames(self: *MeshUploader) !void {
-        const frame_to_wait = self.vk_ctx.frame_number.load(.acquire);
-        if (frame_to_wait > 0) _ = try waitTimelineValue(self.dev, self.transfer.graphics_timeline_semaphore, frame_to_wait, std.math.maxInt(u64));
+        try self.vk_ctx.waitSubmittedFrames();
     }
 
     pub fn retireStaging(self: *MeshUploader, io: std.Io, current_transfer_val: u64) void {
@@ -886,10 +902,10 @@ pub const MeshUploader = struct {
     }
 
     pub fn processRetiredFaceBuffers(self: *MeshUploader, io: std.Io, current_graphics_val: u64) void {
-        // Serializes against allocRegion's append (which runs under the queue
-        // mutex): iterating the list while another thread reallocates it is a race.
-        self.vk_ctx.queue_mutex.lockUncancelable(io);
-        defer self.vk_ctx.queue_mutex.unlock(io);
+        // A dedicated lock, not the queue mutex: freeing a retired buffer is slow
+        // and must not stall frame submission.
+        self.retired_face_buffers_mutex.lockUncancelable(io);
+        defer self.retired_face_buffers_mutex.unlock(io);
         sweepRetired(self.memory.gpuOnly(), &self.retired_face_buffers, current_graphics_val);
     }
 
@@ -1268,8 +1284,8 @@ pub const IndirectScene = struct {
         return .{ .min = min, .max = max };
     }
 
-    pub fn ensureCapacity(self: *IndirectScene, io: std.Io, total_candidates: u32) !void {
-        if (total_candidates > self.draw_capacity) try self.growDrawCapacity(io, total_candidates);
+    pub fn ensureCapacity(self: *IndirectScene, total_candidates: u32) !void {
+        if (total_candidates > self.draw_capacity) try self.growDrawCapacity(total_candidates);
     }
 
     pub fn processRetired(self: *IndirectScene, io: std.Io, current_graphics_val: u64) void {
@@ -1342,7 +1358,7 @@ pub const IndirectScene = struct {
         return new_capacity;
     }
 
-    fn growDrawCapacity(self: *IndirectScene, io: std.Io, min_capacity: u32) !void {
+    fn growDrawCapacity(self: *IndirectScene, min_capacity: u32) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "growDrawCapacity" });
         defer zone.end();
 
@@ -1351,7 +1367,10 @@ pub const IndirectScene = struct {
         const new_capacity = try self.nextDrawCapacity(min_capacity);
         std.log.info("IndirectScene: Growing draw capacity from {d} to {d} for all frames...", .{ self.draw_capacity, new_capacity });
 
-        try self.vk_ctx.deviceWaitIdleLocked(io);
+        // Only submitted frames read the per-frame buffers and descriptor sets, so wait
+        // for the graphics timeline instead of idling the device: that would also wait
+        // out the transfer backlog while holding the queue locks uploads submit under.
+        try self.vk_ctx.waitSubmittedFrames();
 
         const old_draw_capacity = self.draw_capacity;
         const num_frames = self.frame_buffers.items.len;
@@ -1406,7 +1425,8 @@ pub const IndirectScene = struct {
         const new_capacity = old_capacity * 2;
         std.log.info("IndirectScene: Growing persistent GPU scene candidates from {d} to {d}...", .{ old_capacity, new_capacity });
 
-        try self.vk_ctx.deviceWaitIdleLocked(io);
+        // Only graphics frames read the candidate and visibility buffers.
+        try self.vk_ctx.waitSubmittedFrames();
 
         const new_slice = try self.memory.cpuToGpu().alloc(MeshCandidate, new_capacity);
         @memset(new_slice, MeshCandidate.zeroed());

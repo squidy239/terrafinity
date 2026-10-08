@@ -284,10 +284,10 @@ pub fn SetAssociativeCacheType(
             return @bitCast(result);
         }
         /// Runs one CLOCK pass from the set's clock hand, decrementing counts until
-        /// a free slot appears. Returns the victim way and the displaced value, if any.
+        /// a free slot appears. Returns the victim way and whether it holds a value.
         fn findVictim(self: *SetAssociativeCache, set: Set, clock_index: u64) struct {
             way: Clock,
-            evicted: ?Value,
+            occupied: bool,
         } {
             var way = self.clocks.get(clock_index);
             comptime assert(math.maxInt(@TypeOf(way)) == layout.ways - 1);
@@ -297,7 +297,7 @@ pub fn SetAssociativeCacheType(
             // all counts to 1, then frees one slot on the next pass.
             const clock_iterations_max = layout.ways * (math.maxInt(Count) - 1);
 
-            var evicted: ?Value = null;
+            var occupied = false;
             var safety_count: usize = 0;
             while (safety_count <= clock_iterations_max) : ({
                 safety_count += 1;
@@ -309,7 +309,7 @@ pub fn SetAssociativeCacheType(
                 count -= 1;
                 self.counts.set(set.offset + way, count);
                 if (count == 0) {
-                    evicted = set.values[way];
+                    occupied = true;
                     break;
                 }
             } else {
@@ -317,7 +317,7 @@ pub fn SetAssociativeCacheType(
             }
             assert(self.counts.get(set.offset + way) == 0);
 
-            return .{ .way = way, .evicted = evicted };
+            return .{ .way = way, .occupied = occupied };
         }
 
         /// Upsert a value, evicting an older entry if needed. The evicted value, if an update or
@@ -344,7 +344,7 @@ pub fn SetAssociativeCacheType(
 
             const victim = self.findVictim(set, clock_index);
             const way = victim.way;
-            const evicted = victim.evicted;
+            const evicted: ?Value = if (victim.occupied) set.values[way] else null;
 
             set.tags[way] = set.tag;
             set.values[way] = value.*;
@@ -357,6 +357,25 @@ pub fn SetAssociativeCacheType(
                 .updated = .insert,
                 .evicted = evicted,
             };
+        }
+
+        /// Like `upsert`, but returns the slot for `key` instead of copying a value in, so
+        /// large values can be written outside the lock. The slot's old contents are
+        /// discarded; the caller must write the key before the next lookup.
+        pub fn claim(self: *SetAssociativeCache, key: Key) *align(value_alignment) Value {
+            const set = self.associate(key);
+            if (self.search(set, key)) |way| {
+                self.counts.set(set.offset + way, 1);
+                return @alignCast(&set.values[way]);
+            }
+
+            const clock_index = @divExact(set.offset, layout.ways);
+            const victim = self.findVictim(set, clock_index);
+            set.tags[victim.way] = set.tag;
+            self.counts.set(set.offset + victim.way, 1);
+            self.clocks.set(clock_index, victim.way +% 1);
+            if (!victim.occupied) _ = self.metrics.value_count.fetchAdd(1, .acq_rel);
+            return @alignCast(&set.values[victim.way]);
         }
 
         /// Returns a pointer to the value that will be usurped (evicted/overwritten)

@@ -658,18 +658,13 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         caps.max_image_count,
     });
 
-    // Lock order is transfer then graphics, matching deviceWaitIdleLocked and the
-    // uploader submit path; taking them in the opposite order would deadlock those
-    // paths against a swapchain recreation during a resize. Callers must NOT hold
-    // either mutex.
-    self.transfer_queue_mutex.lockUncancelable(io);
-    defer self.transfer_queue_mutex.unlock(io);
+    // Only frames and presents touch the swapchain and the graphics command pools, so
+    // uploads keep running. Callers must NOT hold the queue mutex.
     self.queue_mutex.lockUncancelable(io);
     defer self.queue_mutex.unlock(io);
 
-    _ = self.dev.deviceWaitIdle() catch |err| {
-        std.log.err("deviceWaitIdle failed during swapchain creation: {}", .{err});
-    };
+    self.waitSubmittedFrames() catch |err| std.log.err("waiting for frames failed during swapchain creation: {}", .{err});
+    self.dev.queueWaitIdle(self.present_queue) catch |err| std.log.err("present queue wait failed during swapchain creation: {}", .{err});
     try self.dev.resetCommandPool(self.command_pool, .{});
     try self.dev.resetCommandPool(self.ui_command_pool, .{});
 
@@ -798,6 +793,19 @@ pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: 
 /// Waits for device idle while excluding both submit paths: deviceWaitIdle must
 /// not run concurrently with any queue submission, and transfer submits only hold
 /// the transfer mutex. Lock order is transfer then graphics, like allocRegion.
+/// Waits until every submitted frame finishes on the GPU. Unlike deviceWaitIdle it
+/// takes no queue lock and does not wait out the transfer queue's upload backlog.
+pub fn waitSubmittedFrames(self: *VulkanContext) !void {
+    const last_frame = self.frame_number.load(.acquire);
+    if (last_frame == 0) return;
+    const wait_info: vk.SemaphoreWaitInfo = .{
+        .semaphore_count = 1,
+        .p_semaphores = (&self.graphics_timeline_semaphore)[0..1],
+        .p_values = (&last_frame)[0..1],
+    };
+    if (try self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64)) != .success) return error.WaitFailed;
+}
+
 pub fn deviceWaitIdleLocked(self: *VulkanContext, io: std.Io) !void {
     self.transfer_queue_mutex.lockUncancelable(io);
     defer self.transfer_queue_mutex.unlock(io);
@@ -1317,10 +1325,15 @@ test "GpuRegionAllocator grow and retire old buffer" {
     const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
     alloc.resolve(buf_info.buffer, buf_info.offset);
 
-    const grow_info = try alloc.grow(std.testing.io, gpu_alloc);
-    gpu_alloc.free(grow_info.old_slice);
-    const grow_info2 = try alloc.grow(std.testing.io, gpu_alloc);
-    gpu_alloc.free(grow_info2.old_slice);
+    for (0..2) |_| {
+        const new_slice = try gpu_alloc.alignedAlloc(u8, .fromByteUnits(256), try alloc.nextCapacity(std.testing.io));
+        const grow_info = alloc.grow(std.testing.io, new_slice).?;
+        gpu_alloc.free(grow_info.old_slice);
+    }
+    // A slice no larger than the current buffer means another thread already grew it.
+    const stale_slice = try gpu_alloc.alignedAlloc(u8, .fromByteUnits(256), alloc.buffer_slice.len);
+    defer gpu_alloc.free(stale_slice);
+    try std.testing.expect(alloc.grow(std.testing.io, stale_slice) == null);
 
     alloc.deinit(gpu_alloc);
 }

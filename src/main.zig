@@ -126,12 +126,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var game: Game = undefined;
+    var test_play_error: ?anyerror = null;
     if (options.test_play != null) {
         const test_play_folder = try std.Io.Dir.path.join(gpa, &.{ worlds_path, "test_play" });
         defer gpa.free(test_play_folder);
         vk_ctx.swapchain_gamma.store(config.game_config.render_options.gamma_correction, .monotonic);
-        try game.init(io, gpa, &config.game_config, &config_lock, test_play_folder, vk_ctx, &generators);
+        // Fall back to the main menu with an error dialog instead of crashing.
+        game.init(io, gpa, &config.game_config, &config_lock, test_play_folder, vk_ctx, &generators) catch |err| {
+            std.log.err("test play world failed to load: {s}", .{@errorName(err)});
+            test_play_error = err;
+        };
     }
+    const in_game = options.test_play != null and test_play_error == null;
     var ui: Ui = .{
         .window = &window,
         .vk_ctx = vk_ctx,
@@ -139,7 +145,8 @@ pub fn main(init: std.process.Init) !void {
         .config_lock = &config_lock,
         .game = &game,
         .generators = &generators,
-        .menu_state = if (options.test_play != null) .{ .ingame = true } else .{ .main = true },
+        .menu_state = if (in_game) .{ .ingame = true } else .{ .main = true },
+        .world_error = test_play_error,
         .config_path = config_path,
         .worlds_path = worlds_path,
         .running = &running,

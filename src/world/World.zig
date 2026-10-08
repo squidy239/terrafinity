@@ -640,15 +640,18 @@ pub const Editor = struct {
 
         if (was_grid and chunk.encoding != .grid) world.freeGrid(io, chunk_pos);
         if (!was_grid and chunk.encoding == .grid) {
-            const shard, const lock = world.chunks.getShardAndLock(chunk_pos);
-            const zone_shard = tracy.Zone.begin(.{ .src = @src(), .name = "mergeChunk_lock_shard" });
-            defer zone_shard.end();
-            lock.lockUncancelable(io);
-            defer lock.unlock(io);
-            world.ownGrid(io, chunk, chunk_pos, shard) catch |err| {
-                chunk.encoding = old_encoding;
-                return err;
+            const grid_slot = blk: {
+                const shard, const lock = world.chunks.getShardAndLock(chunk_pos);
+                const zone_shard = tracy.Zone.begin(.{ .src = @src(), .name = "mergeChunk_lock_shard" });
+                defer zone_shard.end();
+                lock.lockUncancelable(io);
+                defer lock.unlock(io);
+                break :blk world.claimGrid(io, chunk, chunk_pos, shard) catch |err| {
+                    chunk.encoding = old_encoding;
+                    return err;
+                };
             };
+            fillGrid(chunk, grid_slot.?);
         }
 
         if (old_sides) |os| {
@@ -826,7 +829,7 @@ fn putChunk(
 
     const shard, const lock = self.chunks.getShardAndLock(chunk_pos);
     var skips: usize = 0;
-    while (true) {
+    const chunk_ptr, const grid_slot = while (true) {
         const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "putChunk_lock_shard" });
         defer zone_lock.end();
         try lock.lock(io);
@@ -852,29 +855,40 @@ fn putChunk(
         _ = shard.upsert(&.{ .chunk = chunk, .pos = chunk_pos });
         const chunk_ptr = &shard.get(chunk_pos).?.chunk;
         chunk_ptr.encoding_lock.lockUncancelable(io);
-        self.ownGrid(io, chunk_ptr, chunk_pos, shard) catch |err| {
+        const grid_slot = self.claimGrid(io, chunk_ptr, chunk_pos, shard) catch |err| {
             chunk_ptr.encoding_lock.unlock(io);
             _ = shard.remove(chunk_pos);
             return err;
         };
-        chunk_ptr.encoding_lock.unlock(io);
-        return .{ .inserted = chunk_ptr };
-    }
+        break .{ chunk_ptr, grid_slot };
+    };
+    defer chunk_ptr.encoding_lock.unlock(io);
+    if (grid_slot) |slot| fillGrid(chunk_ptr, slot);
+    return .{ .inserted = chunk_ptr };
 }
 
 fn freeGrid(self: *World, io: std.Io, chunk_pos: ChunkPos) void {
     _ = self.grids.remove(io, chunk_pos);
 }
 
-fn ownGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) error{Unrecoverable}!void {
+/// Copies the chunk's grid into its claimed slot. Runs outside the shard locks: the
+/// caller's exclusive encoding lock already keeps the slot's chunk from eviction.
+fn fillGrid(chunk_ptr: *Chunk, slot: *GridValue) void {
+    slot.grid = chunk_ptr.encoding.grid.*;
+    chunk_ptr.encoding.grid = &slot.grid;
+}
+
+/// Claims a grid-cache slot for a grid chunk, evicting a victim if needed, and
+/// returns it for `fillGrid`; returns null for a uniform chunk.
+fn claimGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) error{Unrecoverable}!?*GridValue {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     comptime std.debug.assert(self.grids.shards.len == self.chunks.shards.len);
 
-    if (chunk_ptr.encoding != .grid) return;
+    if (chunk_ptr.encoding != .grid) return null;
 
     const grid_shard, const lock = self.grids.getShardAndLock(chunk_pos);
-    const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "ownGrid_lock_shard" });
+    const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "claimGrid_lock_shard" });
     defer zone_lock.end();
     lock.lockUncancelable(io);
     defer lock.unlock(io);
@@ -900,8 +914,10 @@ fn ownGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chu
         break;
     }
 
-    _ = grid_shard.upsert(&GridValue{ .chunk = chunk_ptr, .grid = chunk_ptr.encoding.grid.*, .pos = chunk_pos });
-    chunk_ptr.encoding.grid = &grid_shard.get(chunk_pos).?.grid;
+    const slot = grid_shard.claim(chunk_pos);
+    slot.chunk = chunk_ptr;
+    slot.pos = chunk_pos;
+    return slot;
 }
 
 fn getBlocks(

@@ -294,16 +294,15 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
         applied.cascade_count = Csm.max_cascades;
     }
 
-    try self.teardownResources(io, applied, count, size);
+    try self.teardownResources(applied, count, size);
     if (!applied.enabled or count == 0 or size == 0) return;
     try self.buildResources(io, size, count);
 }
 
-/// Tears down the current shadow image and pipeline under the queue mutex so no
-/// in-flight submission races the destroy, and records the freshly-applied resource
-/// state. device-waits before releasing the resources.
-fn teardownResources(self: *ShadowRenderer, io: std.Io, applied: Csm.ShadowConfig, count: u32, size: u32) !void {
-    try self.vk_ctx.deviceWaitIdleLocked(io);
+/// Tears down the current shadow image and pipeline once no submitted frame uses
+/// them, and records the freshly-applied resource state.
+fn teardownResources(self: *ShadowRenderer, applied: Csm.ShadowConfig, count: u32, size: u32) !void {
+    try self.vk_ctx.waitSubmittedFrames();
     self.destroyShadowImage();
     core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
     self.config_applied = applied;
