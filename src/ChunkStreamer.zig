@@ -424,28 +424,50 @@ fn dispatchLoads(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, h
         streamer.loads.items[wanted] = pos;
         wanted += 1;
     }
-    const candidates = streamer.loads.items[0..wanted];
-    if (candidates.len == 0) return;
+    if (wanted == 0) return;
+
+    try streamer.loads_in_flight.ensureUnusedCapacity(gpa, @intCast(wanted));
+    try streamer.completions.reserve(io, gpa, wanted);
+    // Candidates can repeat; marking them in flight here keeps the dispatchers off shared state.
+    var unique: usize = 0;
+    for (streamer.loads.items[0..wanted]) |pos| {
+        if (streamer.loads_in_flight.getOrPutAssumeCapacity(pos).found_existing) continue;
+        streamer.loads.items[unique] = pos;
+        unique += 1;
+    }
+    streamer.completions.release(io, wanted - unique);
+    const candidates = streamer.loads.items[0..unique];
     std.mem.sort(World.ChunkPos, candidates, &current.clipmap, loadsFirst);
 
-    try streamer.loads_in_flight.ensureUnusedCapacity(gpa, @intCast(candidates.len));
-    try streamer.completions.reserve(io, gpa, candidates.len);
-    var dispatched: usize = 0;
-    for (candidates) |pos| {
-        // Candidates can repeat.
-        if (streamer.loads_in_flight.getOrPutAssumeCapacity(pos).found_existing) continue;
-        host.dispatch(io, .{ .pos = pos, .kind = .{ .load = current.settings } });
-        dispatched += 1;
+    // One dispatcher per level: when the pool is full, `async` runs a load inline on
+    // its dispatcher, and the other levels keep spawning on the threads that free up.
+    var group: std.Io.Group = .init;
+    var rest = candidates;
+    while (rest.len > 0) {
+        const level = rest[0].level;
+        const end = for (rest, 0..) |pos, i| {
+            if (pos.level != level) break i;
+        } else rest.len;
+        group.async(io, dispatchLevel(@TypeOf(host)), .{ io, host, rest[0..end], current.settings });
+        rest = rest[end..];
     }
-    streamer.completions.release(io, candidates.len - dispatched);
+    // The pass blocks cancellation, and every dispatched load must be started.
+    group.await(io) catch unreachable;
 }
 
-/// Orders by ring around the player, then level.
+/// `Group.async` cannot take a generic function, so this binds the host type.
+fn dispatchLevel(comptime Host: type) fn (std.Io, Host, []const World.ChunkPos, Settings) void {
+    return struct {
+        fn run(io: std.Io, host: Host, positions: []const World.ChunkPos, settings: Settings) void {
+            for (positions) |pos| host.dispatch(io, .{ .pos = pos, .kind = .{ .load = settings } });
+        }
+    }.run;
+}
+
+/// Orders by level, then ring around the player.
 fn loadsFirst(clipmap: *const ChunkClipmap, a: World.ChunkPos, b: World.ChunkPos) bool {
-    const a_ring = ring(clipmap, a);
-    const b_ring = ring(clipmap, b);
-    if (a_ring != b_ring) return a_ring < b_ring;
-    return a.level < b.level;
+    if (a.level != b.level) return a.level < b.level;
+    return ring(clipmap, a) < ring(clipmap, b);
 }
 
 fn ring(clipmap: *const ChunkClipmap, pos: World.ChunkPos) u32 {
@@ -555,8 +577,12 @@ fn detachedShownElsewhere(streamer: *const ChunkStreamer, pos: World.ChunkPos) b
 const FakeHost = struct {
     meshes: std.AutoHashMapUnmanaged(World.ChunkPos, void) = .empty,
     requests: std.ArrayList(Request) = .empty,
+    /// Per-level dispatchers call `dispatch` concurrently.
+    requests_mutex: std.Io.Mutex = .init,
 
-    fn dispatch(host: *FakeHost, _: std.Io, request: Request) void {
+    fn dispatch(host: *FakeHost, io: std.Io, request: Request) void {
+        host.requests_mutex.lockUncancelable(io);
+        defer host.requests_mutex.unlock(io);
         host.requests.append(std.testing.allocator, request) catch @panic("OOM");
     }
 
