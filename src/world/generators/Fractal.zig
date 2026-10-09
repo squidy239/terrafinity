@@ -24,111 +24,69 @@ pub const FractalTerrainGenerator = struct {
         pub const default: Params = .{};
     };
 
-    pub fn genChunk(self: *FractalTerrainGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
-        _ = allocator;
-        _ = io;
-        _ = world;
+    pub fn genChunk(self: *FractalTerrainGenerator, _: std.Io, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         const gen = tracy.Zone.begin(.{ .src = @src() });
         defer gen.end();
 
         const block_scale: i64 = @intFromFloat(ChunkPos.toScale(chunk_pos.level));
         const chunk_span: i64 = ChunkSize * block_scale;
-        const min_y: i64 = self.params.terrainmin;
-        const max_y: i64 = self.params.terrainmax;
         const chunk_min_y: i64 = @as(i64, chunk_pos.position[1]) * chunk_span;
 
         // Chunks above the ceiling are open sky.
-        if (chunk_min_y > max_y) {
-            blocks.merge(.{ .uniform = .air }, grid_buffer);
-            return;
-        }
-
+        if (chunk_min_y > self.params.terrainmax) return blocks.mergeUniform(.air);
         // Chunks below the floor are solid rock.
-        if (chunk_min_y + chunk_span < min_y) {
-            blocks.merge(.{ .uniform = .stone }, grid_buffer);
-            return;
-        }
+        if (chunk_min_y + chunk_span < self.params.terrainmin) return blocks.mergeUniform(.stone);
 
-        var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = comptime @splat(@splat(@splat(.null)));
+        var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
         const gen_terra = tracy.Zone.begin(.{ .src = @src(), .name = "Gen3DSierpinskiBlocks" });
 
         const chunk_block_pos = @as(@Vector(3, i64), chunk_pos.position) * @as(@Vector(3, i64), @splat(ChunkSize));
-        const scale_divider: i64 = @max(1, @as(i64, @intFromFloat(self.params.terrain_scale)));
-
-        for (0..ChunkSize) |x| {
-            const bx = (chunk_block_pos[0] + @as(i64, @intCast(x))) * block_scale;
-            for (0..ChunkSize) |y| {
-                const by = (chunk_block_pos[1] + @as(i64, @intCast(y))) * block_scale;
-                for (0..ChunkSize) |z| {
-                    const bz = (chunk_block_pos[2] + @as(i64, @intCast(z))) * block_scale;
-
-                    if (by > max_y) {
-                        block_grid[x][y][z] = .air;
-                        continue;
-                    }
-                    if (by < min_y) {
-                        block_grid[x][y][z] = .stone;
-                        continue;
-                    }
-
-                    const is_solid = isSierpinskiTetrahedron(bx, by, bz, scale_divider);
-
-                    if (is_solid) {
-                        const block_above_solid = isSierpinskiTetrahedron(bx, by + block_scale, bz, scale_divider);
-
-                        if (!block_above_solid and by >= self.params.SeaLevel) {
-                            block_grid[x][y][z] = .grass;
-                        } else if (by < self.params.SeaLevel) {
-                            block_grid[x][y][z] = .stone;
-                        } else {
-                            block_grid[x][y][z] = .dirt;
-                        }
-                    } else {
-                        // Gaps below sea level hold water.
-                        if (by <= self.params.SeaLevel) {
-                            block_grid[x][y][z] = .water;
-                        } else {
-                            block_grid[x][y][z] = .air;
-                        }
-                    }
+        const cell_size = self.cellSize();
+        for (&block_grid, 0..) |*plane, x| {
+            for (plane, 0..) |*row, y| {
+                for (row, 0..) |*block, z| {
+                    const local: @Vector(3, i64) = .{ @intCast(x), @intCast(y), @intCast(z) };
+                    block.* = self.blockAt((chunk_block_pos + local) * @as(@Vector(3, i64), @splat(block_scale)), block_scale, cell_size);
                 }
             }
         }
         gen_terra.end();
 
-        const one_block = Chunk.getUniform(&block_grid);
-        if (one_block) |block| {
-            blocks.merge(.{ .uniform = block }, grid_buffer);
-        } else {
-            blocks.merge(.{ .grid = &block_grid }, grid_buffer);
-        }
+        if (Chunk.getUniform(&block_grid)) |block| blocks.mergeUniform(block) else blocks.mergeGrid(&block_grid, grid_buffer);
+    }
+
+    fn blockAt(self: *const FractalTerrainGenerator, pos: @Vector(3, i64), block_scale: i64, cell_size: i64) Block {
+        const y = pos[1];
+        if (y > self.params.terrainmax) return .air;
+        if (y < self.params.terrainmin) return .stone;
+        // Gaps at or below sea level hold water.
+        if (!isSolid(pos, cell_size)) return if (y <= self.params.SeaLevel) .water else .air;
+        if (y < self.params.SeaLevel) return .stone;
+        return if (isSolid(pos + @Vector(3, i64){ 0, block_scale, 0 }, cell_size)) .dirt else .grass;
+    }
+
+    fn cellSize(self: *const FractalTerrainGenerator) i64 {
+        return @max(1, @as(i64, @intFromFloat(self.params.terrain_scale)));
     }
 
     /// Topmost solid voxel of the column at `x, z`, or null when the whole
     /// `[terrainmin, terrainmax]` band is open. Reuses the generator's own
     /// solidity test so spawn agrees with generated blocks.
     fn columnTopSolid(self: *const FractalTerrainGenerator, x: i64, z: i64) ?i64 {
-        const scale_divider: i64 = @max(1, @as(i64, @intFromFloat(self.params.terrain_scale)));
+        const cell_size = self.cellSize();
         var y: i64 = self.params.terrainmax;
         while (y >= self.params.terrainmin) : (y -= 1) {
-            if (isSierpinskiTetrahedron(x, y, z, scale_divider)) return y;
+            if (isSolid(.{ x, y, z }, cell_size)) return y;
         }
         return null;
     }
 
     /// Tests one point against the Sierpinski tetrahedron with bitwise logic.
-    inline fn isSierpinskiTetrahedron(bx: i64, by: i64, bz: i64, scale_divider: i64) bool {
-        const scaled_x = @divFloor(bx, scale_divider);
-        const scaled_y = @divFloor(by, scale_divider);
-        const scaled_z = @divFloor(bz, scale_divider);
-
+    inline fn isSolid(pos: @Vector(3, i64), cell_size: i64) bool {
         // Absolute values keep two's-complement bits out of the AND logic and mirror the fractal at the origins.
-        const sx = @as(u64, @intCast(@abs(scaled_x)));
-        const sy = @as(u64, @intCast(@abs(scaled_y)));
-        const sz = @as(u64, @intCast(@abs(scaled_z)));
-
+        const cell = @abs(@divFloor(pos, @as(@Vector(3, i64), @splat(cell_size))));
         // Inside means no two coordinates share a 1-bit in any position.
-        return (sx & sy) == 0 and (sy & sz) == 0 and (sz & sx) == 0;
+        return @reduce(.Or, cell & std.simd.rotateElementsLeft(cell, 1)) == 0;
     }
 };
 
@@ -158,16 +116,8 @@ pub fn generator_info() callconv(.c) *const generator_api.GeneratorInfo {
 
 const fractal_presets = [_]FractalTerrainGenerator.Params{
     .default,
-    blk: {
-        var p = FractalTerrainGenerator.Params.default;
-        p.terrain_scale = 2.0;
-        break :blk p;
-    },
-    blk: {
-        var p = FractalTerrainGenerator.Params.default;
-        p.terrain_scale = 8.0;
-        break :blk p;
-    },
+    .{ .terrain_scale = 2.0 },
+    .{ .terrain_scale = 8.0 },
 };
 const fractal_preset_names = [_][]const u8{ "Default", "Fine Fractal", "Coarse Fractal" };
 const fractal_preset_default: usize = 0;
@@ -204,15 +154,14 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
         .generator = .{ .params = params, .seed = seed },
-        .source = undefined,
-    };
-    instance.source = .{
-        .data = instance,
-        .getTerrainHeight = null,
-        .getBlocks = generator_api.instanceGenBlocks(FractalInstance),
-        .placeStructures = null,
-        .deinit = generator_api.instanceDeinit(FractalInstance),
-        .save = null,
+        .source = .{
+            .data = instance,
+            .getTerrainHeight = null,
+            .getBlocks = generator_api.instanceGenBlocks(FractalInstance),
+            .placeStructures = null,
+            .deinit = generator_api.instanceDeinit(FractalInstance),
+            .save = null,
+        },
     };
     return instance;
 }
@@ -222,12 +171,11 @@ pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.Chun
 }
 
 /// Samples columns near `center` and reports the first solid one. `y_hint` is
-/// the band ceiling; the host scans down from there to resolve exact feet.
+/// the band ceiling. The host scans down from there to find the exact feet position.
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *FractalInstance = @ptrCast(@alignCast(instance));
     const y_hint: f64 = @floatFromInt(self.generator.params.terrainmax);
-    const capped = @min(attempts, generator_api.spawn_attempt_cap);
-    for (0..capped) |i| {
+    for (0..@min(attempts, generator_api.spawn_attempt_cap)) |i| {
         const sample = generator_api.spawnSample(self.generator.seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
         const x: i64 = @intFromFloat(@round(sample[0]));
         const z: i64 = @intFromFloat(@round(sample[1]));
@@ -254,4 +202,8 @@ pub const generator_api_vtable: generator_api.GeneratorApi = .{
 comptime {
     // Test binaries link several generators, so only non-test builds export the shared symbol.
     if (!builtin.is_test) @export(&generator_api_vtable, .{ .name = generator_api.api_export_name });
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

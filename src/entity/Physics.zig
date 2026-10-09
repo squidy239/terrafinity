@@ -59,9 +59,9 @@ pub const Mover = struct {
     pub const max_substeps: u32 = 4096;
 
     const CellIter = struct {
-        lo: [3]i64,
-        hi: [3]i64,
-        at: [3]i64,
+        lo: World.BlockPos,
+        hi: World.BlockPos,
+        at: World.BlockPos,
 
         fn next(self: *CellIter) ?World.BlockPos {
             self.at[2] += 1;
@@ -73,8 +73,8 @@ pub const Mover = struct {
                     self.at[0] += 1;
                 }
             }
-            if (self.at[0] > self.hi[0] or self.at[1] > self.hi[1] or self.at[2] > self.hi[2]) return null;
-            return .{ self.at[0], self.at[1], self.at[2] };
+            if (@reduce(.Or, self.at > self.hi)) return null;
+            return self.at;
         }
     };
 
@@ -117,8 +117,7 @@ pub const Mover = struct {
     /// Substeps shrink with the body so a small or fast mover cannot tunnel, while
     /// a large, slow one is not over-stepped.
     fn maxSubstep(self: *const @This()) f64 {
-        const size = self.bounding_box.size();
-        const min_extent = @min(size.data[0], @min(size.data[1], size.data[2]));
+        const min_extent = @reduce(.Min, @as(@Vector(3, f64), self.bounding_box.size().data));
         return @max(@min(max_substep_size, min_extent / 2), 0.001);
     }
 
@@ -204,9 +203,7 @@ pub const Mover = struct {
 
     /// Measures the fluid the body box sits in; it drives swim, wade, and canopy drag.
     pub fn mediumAt(self: *const @This(), io: std.Io, allocator: std.mem.Allocator, pos: @Vector(3, f64), reader: *World.Reader) !Medium {
-        const lo = self.lowCorner(pos);
-        const hi = self.highCorner(pos);
-        const body_volume = (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]);
+        const body_volume = @reduce(.Mul, self.highCorner(pos) - self.lowCorner(pos));
         if (body_volume <= 0) return .{};
 
         var fluid_volume: f64 = 0;
@@ -217,7 +214,7 @@ pub const Mover = struct {
             const overlap = self.blockOverlap(block_pos, pos) orelse continue;
             const block = try reader.getBlock(io, allocator, block_pos, World.standard_level);
             const props = block.fluidProperties() orelse continue;
-            const volume = overlap[0] * overlap[1] * overlap[2];
+            const volume = @reduce(.Mul, overlap);
             fluid_volume += volume;
             buoyancy += props.buoyancy * volume;
             resistance += props.resistance * volume;
@@ -242,19 +239,12 @@ pub const Mover = struct {
         return best;
     }
 
-    /// Signed overlap of a body span and a block cell along one axis; <= 0 means separated.
-    fn overlapOnAxis(body_min: f64, body_max: f64, block_center: f64) f64 {
-        return @min(body_max, block_center + 0.5) - @max(body_min, block_center - 0.5);
-    }
-
-    fn blockOverlap(self: *const @This(), block_pos: World.BlockPos, pos: @Vector(3, f64)) ?[3]f64 {
-        const lo = self.lowCorner(pos);
-        const hi = self.highCorner(pos);
-        var overlap: [3]f64 = undefined;
-        inline for (0..3) |axis| {
-            overlap[axis] = overlapOnAxis(lo[axis], hi[axis], @floatFromInt(block_pos[axis]));
-            if (overlap[axis] <= 0) return null;
-        }
+    /// Per-axis overlap of the body and a block cell, or null when any axis is separated.
+    fn blockOverlap(self: *const @This(), block_pos: World.BlockPos, pos: @Vector(3, f64)) ?@Vector(3, f64) {
+        const block_center: @Vector(3, f64) = @floatFromInt(block_pos);
+        const half: @Vector(3, f64) = @splat(0.5);
+        const overlap = @min(self.highCorner(pos), block_center + half) - @max(self.lowCorner(pos), block_center - half);
+        if (@reduce(.Or, overlap <= @as(@Vector(3, f64), @splat(0)))) return null;
         return overlap;
     }
 
@@ -276,16 +266,11 @@ pub const Mover = struct {
     /// Cells the body can overlap, plus a one-cell shell so a contact on the boundary
     /// is not missed. Each axis is bounded from the box, not from its largest extent.
     fn overlappingCells(self: *const @This(), pos: @Vector(3, f64)) CellIter {
-        const lo = self.lowCorner(pos);
-        const hi = self.highCorner(pos);
-        var first: [3]i64 = undefined;
-        var last: [3]i64 = undefined;
-        inline for (0..3) |axis| {
-            first[axis] = @as(i64, @intFromFloat(@floor(lo[axis]))) - 1;
-            last[axis] = @as(i64, @intFromFloat(@floor(hi[axis]))) + 1;
-        }
+        const one: @Vector(3, i64) = @splat(1);
+        const first: @Vector(3, i64) = @as(@Vector(3, i64), @intFromFloat(@floor(self.lowCorner(pos)))) - one;
+        const last: @Vector(3, i64) = @as(@Vector(3, i64), @intFromFloat(@floor(self.highCorner(pos)))) + one;
         // The first `next` advances before yielding, so start one step behind.
-        return .{ .lo = first, .hi = last, .at = .{ first[0], first[1], first[2] - 1 } };
+        return .{ .lo = first, .hi = last, .at = first - @Vector(3, i64){ 0, 0, 1 } };
     }
 };
 
@@ -406,13 +391,7 @@ test "Mover lands on a flat floor and reports support" {
     defer world.deinit(io, allocator);
 
     // Solid below the y = 0 chunk boundary, air above, so the floor top sits at y = -0.5.
-    const FlatSource = struct {
-        fn getBlocks(_: World.ChunkSource, _: std.Io, _: std.mem.Allocator, _: *World, blocks: *Chunk.Encoding, chunk_pos: World.ChunkPos, _: *align(Chunk.Encoding.GridAlignment) [World.ChunkSize][World.ChunkSize][World.ChunkSize]World.Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-            blocks.* = .{ .uniform = if (chunk_pos.position[1] < 0) .stone else .air };
-            return .{ .from_disk = false, .structures = false };
-        }
-    };
-    setTestSource(&world, FlatSource.getBlocks);
+    setTestSource(&world, BandSource(.stone, .air, 0).getBlocks);
 
     var body = testBody(io, 1, 2, .{ 0.5, 0.6, 0.5 }, .{ 0, -5, 0 });
 

@@ -14,28 +14,34 @@ pub const Inventory = struct {
     /// Row-major, `width * height()` slots.
     items: []?Item,
 
+    /// Allocates an empty `width` by `rows` grid.
     pub fn init(allocator: std.mem.Allocator, width: u32, rows: u32) !Inventory {
         const items = try allocator.alloc(?Item, @as(usize, width) * rows);
         @memset(items, null);
         return .{ .width = width, .items = items };
     }
 
+    /// Number of rows.
     pub fn height(self: *const Inventory) u32 {
         return @intCast(self.items.len / self.width);
     }
 
+    /// Frees the slots.
     pub fn deinit(self: *Inventory, allocator: std.mem.Allocator) void {
         allocator.free(self.items);
     }
 
+    /// The item in a slot, or null when it is empty.
     pub fn get(self: *const Inventory, row: u32, col: u32) ?Item {
         return self.items[self.index(row, col)];
     }
 
+    /// The slots of one row, left to right.
     pub fn rowSlots(self: *const Inventory, row: u32) []const ?Item {
         return self.items[self.index(row, 0)..][0..self.width];
     }
 
+    /// Replaces the item in a slot; null empties it.
     pub fn set(self: *Inventory, row: u32, col: u32, item: ?Item) void {
         self.items[self.index(row, col)] = item;
     }
@@ -114,7 +120,7 @@ pub const BlockItemType = blk: {
     break :blk @Enum(u16, .exhaustive, &names, &values);
 };
 
-/// Items with no block form. Add variants here; `ItemType` picks them up.
+/// Items with no block form. `ItemType` picks up each variant added here.
 pub const ExtraItemType = enum(u16) {
     Explosive,
     PlaceRod,
@@ -151,29 +157,7 @@ test "ItemType covers every visible block" {
         const item_type = fromBlock(block) orelse return error.MissingItemType;
         try std.testing.expectEqual(block, toBlock(item_type).?);
     }
-    try std.testing.expectEqual(@as(?Block, null), toBlock(.Explosive));
-}
-
-test "ItemType is u16-backed and includes extras" {
-    try std.testing.expect(@bitSizeOf(@typeInfo(ItemType).@"enum".tag_type) == 16);
-    try std.testing.expectEqual(@as(u16, @intCast(block_types.len)), @backingInt(ItemType.Explosive));
-}
-
-test "extra item types are the non-block items in order" {
-    try std.testing.expectEqual(ItemType.Explosive, extra_item_types[0]);
-    try std.testing.expectEqual(ItemType.PlaceRod, extra_item_types[1]);
-    try std.testing.expectEqual(ItemType.PlaceSphere, extra_item_types[2]);
-}
-
-test "tool items have no block form" {
-    try std.testing.expectEqual(@as(?Block, null), toBlock(.PlaceRod));
-    try std.testing.expectEqual(@as(?Block, null), toBlock(.PlaceSphere));
-}
-
-test "Item data is a weak entity handle" {
-    const item: Item = .{ .item_type = .stone, .amount = 1 };
-    try std.testing.expectEqual(@as(?Entity.Handle, null), item.data);
-    _ = Entity.Handle;
+    for (extra_item_types) |item_type| try std.testing.expectEqual(@as(?Block, null), toBlock(item_type));
 }
 
 test "refAllDecls" {

@@ -10,12 +10,12 @@ const Entity = @import("Entity.zig");
 const Item = @import("Item.zig");
 const Physics = @import("Physics.zig");
 
-/// The pinned player. Only the frame thread touches it, so it needs no locks; other
+/// The pinned player. Only the frame thread touches it, so it needs no locks. Other
 /// tasks get copies of what they need.
 pub const Player = struct {
     game_mode: GameMode,
     /// Base-2 log of the fly speed, so scrolling scales it evenly.
-    fly_speed_linear: f32 = 10,
+    fly_speed_log2: f32 = 10,
     main_inventory: Item.Inventory,
     /// The inventory slot the player holds.
     selected_row: u32 = 0,
@@ -37,6 +37,7 @@ pub const Player = struct {
         Spectator = 3,
     };
 
+    /// Frees the player and its inventory when the registry drops it.
     pub fn unload(ptr: *Entity.Implementation, _: std.Io, _: *World, _: Entity.Handle, allocator: std.mem.Allocator) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.main_inventory.deinit(allocator);
@@ -95,6 +96,7 @@ pub const Player = struct {
         sprint_multiplier: f32,
     };
 
+    /// The item in the selected slot, or null when it is empty.
     pub fn selectedItem(self: *const @This()) ?Item.Item {
         return self.main_inventory.get(self.selected_row, self.selected_col);
     }
@@ -124,7 +126,7 @@ pub const Player = struct {
 
     /// Sets the velocity straight from the wish, so fly input is frame-independent.
     pub fn fly(self: *@This(), wish: @Vector(3, f64)) void {
-        const speed: f64 = @min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, self.fly_speed_linear));
+        const speed: f64 = @min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, self.fly_speed_log2));
         self.body.velocity = wish * @as(@Vector(3, f64), @splat(speed));
     }
 
@@ -170,14 +172,14 @@ pub const Player = struct {
         velocity[0] = horizontal[0];
         velocity[2] = horizontal[1];
 
-        if (fluid > 0) applyFluid(&velocity, medium, self.body.gravity, input.jump, dt_s);
+        if (fluid > 0) applyFluid(&velocity, medium, buoyant, self.body.gravity, input.jump, dt_s);
 
         velocity[1] = @max(velocity[1], -walk_terminal_speed);
         self.body.velocity = velocity;
     }
 
     /// Jump feel: coyote time, an input buffer, and release-to-shorten. A step in
-    /// progress counts as ground; a jump abandons the step. Returns whether a jump
+    /// progress counts as ground, and a jump abandons the step. Returns whether a jump
     /// fired, so the caller can cancel any pending climb.
     fn applyJump(self: *@This(), velocity: *@Vector(3, f64), grounded: bool, buoyant: f64, jump_pressed: bool, jump_speed: f64, dt_ns: u64) bool {
         const can_jump = grounded and buoyant < fluid_jump_block;
@@ -208,9 +210,8 @@ pub const Player = struct {
     /// Buoyancy lifts with the submerged fraction and drag drains every axis, scaled by
     /// the fluid's resistance. The swim clamp only applies to a buoyant fluid, so leaves
     /// slow the fall instead of holding the body at swim speed.
-    fn applyFluid(velocity: *@Vector(3, f64), medium: Physics.Mover.Medium, gravity: f64, jump_pressed: bool, dt_s: f64) void {
+    fn applyFluid(velocity: *@Vector(3, f64), medium: Physics.Mover.Medium, buoyant: f64, gravity: f64, jump_pressed: bool, dt_s: f64) void {
         const submerged = medium.fluid_fraction;
-        const buoyant = medium.buoyancy * submerged;
         const drag = @min(1.0, fluid_drag * medium.resistance * dt_s * submerged);
         velocity[0] -= velocity[0] * drag;
         velocity[2] -= velocity[2] * drag;
@@ -249,6 +250,7 @@ pub const Player = struct {
         self.body.pos[1] += (height - old_height) / 2;
     }
 
+    /// Integrates the body under the current game mode's physics rules.
     pub fn update(ptr: *Entity.Implementation, ctx: Entity.UpdateContext) error{ Canceled, Unrecoverable }!void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "updatePlayer" });
         defer zone.end();
@@ -260,6 +262,7 @@ pub const Player = struct {
         };
     }
 
+    /// The registry callbacks for the player.
     pub fn getInterface(_: *const @This()) Entity.Interface {
         return .{ .unload = unload, .update = update };
     }
@@ -270,15 +273,16 @@ pub const Explosive = struct {
     const travel_speed: f32 = 10;
     /// Blast sphere radius in blocks.
     const blast_radius: f32 = 8;
-    /// Largest integration step; a long drain gap must not skip past the blast radius.
+    /// Largest integration step, so a long drain gap must not skip past the blast radius.
     const max_step_s: f32 = 0.1;
 
     pos: @Vector(3, f64),
-    /// Unit travel direction fixed at spawn; `update` integrates it into `pos` without renormalizing.
+    /// Unit travel direction fixed at spawn. `update` integrates it into `pos` without renormalizing.
     dir: @Vector(3, f32),
     /// Last integration time on the `EntityRegistry.nowNs` clock.
     timestamp_ns: u64,
 
+    /// Normalizes `dir`; a zero direction leaves the explosive in place.
     pub fn init(pos: @Vector(3, f64), dir: @Vector(3, f32), timestamp_ns: u64) @This() {
         const unit = if (std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 }))
             dir
@@ -287,9 +291,10 @@ pub const Explosive = struct {
         return .{ .pos = pos, .dir = unit, .timestamp_ns = timestamp_ns };
     }
 
+    /// Carves the blast sphere, advances along `dir`, fills a grass sphere there, and re-arms.
     pub fn update(ptr: *Entity.Implementation, ctx: Entity.UpdateContext) error{ Canceled, Unrecoverable, OutOfMemory }!void {
-        const u = tracy.Zone.begin(.{ .src = @src(), .name = "updateExplosive" });
-        defer u.end();
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "updateExplosive" });
+        defer zone.end();
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const len_sq = @reduce(.Add, self.dir * self.dir);
         std.debug.assert(len_sq == 0 or std.math.approxEqAbs(f32, len_sq, 1, 1e-5));
@@ -297,7 +302,7 @@ pub const Explosive = struct {
         var editor = World.Editor{ .world = ctx.world, .temp_allocator = ctx.allocator };
         try editor.placeSamplerShape(.air, Sphere(f32).init(@floatCast(self.pos), blast_radius), World.standard_level);
 
-        // The drain supplies the watermark; sampling the wall here would drift under late firing.
+        // The drain supplies the watermark, because sampling the wall here would drift under late firing.
         // A watermark sampled before the spawn saturates to a zero step.
         const dt = @min(@as(f32, @floatFromInt(ctx.now_ns -| self.timestamp_ns)) / std.time.ns_per_s, max_step_s);
         self.timestamp_ns = ctx.now_ns;
@@ -316,6 +321,7 @@ pub const Explosive = struct {
 
     pub const unload = Entity.DestroyUnload(@This()).unload;
 
+    /// The registry callbacks for an explosive.
     pub fn getInterface(_: *const @This()) Entity.Interface {
         return .{ .unload = unload, .update = update };
     }

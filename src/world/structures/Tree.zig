@@ -66,7 +66,7 @@ pub const Tree = struct {
 
         var stack = std.ArrayList(StepGenData).initBuffer(&step_buffer);
         var branches: u64 = 0;
-        const trunk_vec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(&cursor, -0.05, 0.05);
+        const trunk_vec: @Vector(3, f64) = @Vector(3, f64){ 0, 1, 0 } + rand3Vec(&cursor, 0.05);
 
         try stack.appendBounded(.{
             .pos = @floatFromInt(self.pos),
@@ -81,7 +81,6 @@ pub const Tree = struct {
         while (stack.pop()) |data| {
             const pstep = tracy.Zone.begin(.{ .src = @src(), .name = "placeStep" });
             defer pstep.end();
-            std.debug.assert(self.config.steps.len > self.config.max_recursion_depth);
             const step = self.config.steps[data.recursion_depth];
             const first_branches = rand.intRangeAtMost(usize, step.branch_count_min, step.branch_count_max);
 
@@ -105,7 +104,7 @@ pub const Tree = struct {
                     const b = tracy.Zone.begin(.{ .src = @src(), .name = "branch" });
                     defer b.end();
                     branches += 1;
-                    const branch_vec = branchDirection(i, data.direction, step.branch_range, first_branches) + rand3Vec(&cursor, -step.branch_randomness, step.branch_randomness);
+                    const branch_vec = branchDirection(i, data.direction, step.branch_range, first_branches) + rand3Vec(&cursor, step.branch_randomness);
                     const radius = data.last_radius * step.radius_percent + getRand(&cursor) * step.radius_percent_randomness;
                     const branch = Cone(f64).init(data.pos, branch_vec, @floatCast(length), @floatCast(@max(self.config.min_radius, data.last_radius * step.base_radius_percent)), @floatCast(@max(self.config.min_radius, radius)));
                     try editor.placeSamplerShape(step.block_type, branch, level);
@@ -123,46 +122,28 @@ pub const Tree = struct {
         return branches;
     }
 
-    fn rand3Vec(cursor: *usize, range_base: f32, range_top: f32) @Vector(3, f32) {
-        const vec: @Vector(3, f32) = .{ getRand(cursor), getRand(cursor), getRand(cursor) };
-        return normalizeInRange(@Vector(3, f32), vec, @splat(0), @splat(1), @splat(range_base), @splat(range_top));
-    }
-    /// Maps `num` from the old bounds to the new bounds.
-    pub fn normalizeInRange(comptime t: type, num: t, old_lower_bound: t, old_upper_bound: t, new_lower_bound: t, new_upper_bound: t) t {
-        if (std.meta.eql(old_upper_bound, old_lower_bound)) return new_lower_bound;
-        return (num - old_lower_bound) / (old_upper_bound - old_lower_bound) * (new_upper_bound - new_lower_bound) + new_lower_bound;
+    /// Returns a vector with each component drawn uniformly from [-spread, spread].
+    fn rand3Vec(cursor: *usize, spread: f32) @Vector(3, f32) {
+        const unit: @Vector(3, f32) = .{ getRand(cursor), getRand(cursor), getRand(cursor) };
+        const high: @Vector(3, f32) = @splat(spread);
+        return std.math.lerp(-high, high, unit);
     }
 
     /// Spreads branches over a sphere. Range sets the per-axis angular width.
-    pub fn branchDirection(iteration: usize, base: @Vector(3, f64), range: @Vector(3, f64), branch_count: usize) @Vector(3, f64) {
+    fn branchDirection(iteration: usize, base: @Vector(3, f64), range: @Vector(3, f64), branch_count: usize) @Vector(3, f64) {
         @setFloatMode(.optimized);
-        const pi = std.math.pi;
-        const n = @as(f64, @floatFromInt(branch_count));
-        const i = @as(f64, @floatFromInt(iteration));
-        const offset = 2.0 / n;
-        const increment = pi * (3.0 - @sqrt(5.0));
+        const i: f64 = @floatFromInt(iteration);
+        const offset = 2.0 / @as(f64, @floatFromInt(branch_count));
         const y = (i * offset) - 1.0 + (offset * 0.5);
         const r = @sqrt(@max(0.0, 1.0 - y * y));
-        const azimuth = i * increment;
-        const x = @cos(azimuth) * r;
-        const z = @sin(azimuth) * r;
-        var sample = @Vector(3, f64){ x, y, z };
-
-        sample = ellipsoidToSphere(sample, range);
-        sample = sample * range;
-
-        sample += base;
-        sample = utils.vecNormalize(sample);
-        return sample;
+        const azimuth = i * (std.math.pi * (3.0 - @sqrt(5.0)));
+        const sample: @Vector(3, f64) = .{ @cos(azimuth) * r, y, @sin(azimuth) * r };
+        return utils.vecNormalize(ellipsoidToSphere(sample, range) * range + base);
     }
 
     fn ellipsoidToSphere(p: @Vector(3, f64), range: @Vector(3, f64)) @Vector(3, f64) {
-        const scaled = @Vector(3, f64){
-            if (range[0] != 0) p[0] / range[0] else 0.0,
-            if (range[1] != 0) p[1] / range[1] else 0.0,
-            if (range[2] != 0) p[2] / range[2] else 0.0,
-        };
-        return utils.vecNormalize(scaled);
+        const zero: @Vector(3, f64) = @splat(0);
+        return utils.vecNormalize(@select(f64, range != zero, p / range, zero));
     }
 };
 
@@ -181,4 +162,8 @@ fn makeTable(len: usize) [len]f32 {
     var table: [len]f32 = undefined;
     for (&table) |*value| value.* = rand.float(f32);
     return table;
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

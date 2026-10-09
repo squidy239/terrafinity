@@ -5,7 +5,7 @@ const Cache = @import("../libs/Cache.zig").Cache;
 const tracy = @import("tracy");
 
 pub const Entity = @import("Entity.zig");
-/// Entity identity; see `Entity.Handle`.
+/// Entity identity. See `Entity.Handle`.
 const Handle = Entity.Handle;
 const EntityTypes = @import("EntityTypes.zig");
 const World = @import("../world/World.zig");
@@ -32,9 +32,9 @@ const EntityMapType = Cache(
     if (builtin.is_test) 1 else 32,
 );
 
-const max_victim_skips = EntityMapType.Shard.value_count_max_multiple;
+const max_victim_skips = EntityMapType.Shard.value_count_min;
 
-/// Wheel bucket width; deadlines past the horizon park in overflow.
+/// Wheel bucket width. Deadlines past the horizon park in overflow.
 const tick_ns: u64 = std.time.ns_per_ms;
 const wheel_buckets: u32 = 1024;
 const horizon_ns: u64 = wheel_buckets * tick_ns;
@@ -50,7 +50,7 @@ const Link = union(enum) { free, parked, overflow, wheel: u10 };
 const Claim = union(enum) {
     idle,
     in_flight,
-    /// In flight, with a re-arm recorded during the update; it wins on settle.
+    /// In flight, with a re-arm recorded during the update. The re-arm wins on settle.
     rearm: u64,
 };
 
@@ -61,7 +61,7 @@ const TimerNode = struct {
     deadline_ns: u64 = 0,
     next: u32 = none,
     prev: u32 = none,
-    /// Drain generation that armed this timer; only older generations pop, so a
+    /// Drain generation that armed this timer. Only older generations pop, so a
     /// re-arm inside a drain waits for the next pass.
     armed_gen: u64 = 0,
 };
@@ -88,24 +88,24 @@ const SettleAction = union(enum) {
 pub const DeleteResult = enum { marked, missing };
 
 pub const SpawnOptions = struct {
-    /// Arms the first update; null parks dormant.
+    /// Delay of the first update. Null parks the entity dormant.
     initial_delay_ms: ?u64 = null,
 };
 
 map: EntityMapType,
-/// Guards spawn plus all scheduler state; acquire before any shard lock, never
+/// Guards spawn and all scheduler state. Lock it before any shard lock, never
 /// after, so spawn cannot deadlock against the drain.
 scheduler_mutex: std.Io.Mutex = .init,
 timers: std.ArrayList(TimerNode) = .empty,
 free_head: u32 = none,
 buckets: [wheel_buckets]u32 = @splat(none),
 overflow_head: u32 = none,
-/// Lower bound on the earliest overflow deadline; cascade waits until it reaches the horizon.
+/// Lower bound on the earliest overflow deadline. The cascade waits until it reaches the horizon.
 overflow_next_ns: u64 = std.math.maxInt(u64),
 drain_seq: u64 = 0,
 
 pub fn init(allocator: std.mem.Allocator, value_count_max: u64) !@This() {
-    return .{ .map = try .init(allocator, value_count_max, .{ .name = "entity cache" }) };
+    return .{ .map = try .init(allocator, value_count_max) };
 }
 
 /// Monotonic scheduler clock, clamped at zero.
@@ -137,7 +137,7 @@ pub fn spawn(
     errdefer allocator.destroy(impl);
     impl.* = entity;
 
-    // The clock is sampled before locking; holders must not suspend mid-section.
+    // Read the clock before the lock. Lock holders must not suspend in the section.
     const now = nowNs(io);
 
     try self.scheduler_mutex.lock(io);
@@ -189,17 +189,17 @@ fn insert(self: *@This(), io: std.Io, entity: Entity) !InsertResult {
         defer lock.unlock(io);
         if (shard.get(entity.uuid) != null) return error.EntityUuidExists;
 
-        if (shard.peek_victim(entity.uuid)) |victim| {
+        if (shard.peekVictim(entity.uuid)) |victim| {
             if (victim.ref_count.load(.seq_cst) != 1) {
                 if (skips >= max_victim_skips) return error.EntityCacheSetFull;
                 skips += 1;
-                shard.skip_victim(entity.uuid);
+                shard.skipVictim(entity.uuid);
                 continue;
             }
         }
 
-        // upsert displaces exactly the way peek_victim simulated, so its result is
-        // the victim the caller unloads once the shard lock is released.
+        // upsert displaces exactly the way peekVictim simulated, so its result is
+        // the victim that the caller unloads after it releases the shard lock.
         const evicted = shard.upsert(&entity).evicted;
         return .{ .entity = shard.get(entity.uuid).?, .evicted = evicted };
     }
@@ -226,8 +226,7 @@ pub fn getAndAddRef(self: *@This(), io: std.Io, uuid: Handle) ?*Entity {
     return entity;
 }
 
-/// Flags a resident entity for deletion. A far-future timer is replaced by the
-/// reap check.
+/// Flags a resident entity for deletion. The reap check replaces a far-future timer.
 pub fn markDeleted(self: *@This(), io: std.Io, uuid: Handle) DeleteResult {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -246,13 +245,13 @@ pub fn markDeleted(self: *@This(), io: std.Io, uuid: Handle) DeleteResult {
     if (node.claim != .idle) {
         node.claim = .{ .rearm = retry_deadline };
     } else if (node.link == .parked or node.deadline_ns > retry_deadline) {
-        // Only postpone an already-later deadline; soon-due timers keep their deadline.
+        // Move only a later deadline forward. A timer that is due sooner keeps its deadline.
         self.linkLocked(entity.timer_slot, retry_deadline, self.drain_seq -| 1, now);
     }
     return .marked;
 }
 
-/// Arms or re-arms an entity's timer from now; zero means the next drain.
+/// Arms or re-arms an entity's timer from now. Zero means the next drain.
 /// Returns false when the uuid is not resident.
 pub fn schedule(self: *@This(), io: std.Io, uuid: Handle, delay_ms: u64) bool {
     return self.rescheduleAt(io, uuid, nowNs(io), delay_ms);
@@ -284,7 +283,7 @@ pub fn rescheduleAt(self: *@This(), io: std.Io, uuid: Handle, base_ns: u64, dela
 }
 
 /// Runs one update for an entity the caller owns and holds by reference, outside
-/// the wheel. The caller keeps it resident; nothing schedules or reaps it.
+/// the wheel. The caller keeps it resident. Nothing schedules or reaps it.
 pub fn updateNow(
     self: *@This(),
     io: std.Io,
@@ -307,7 +306,7 @@ pub fn updateNow(
     });
 }
 
-/// Runs every due timer and re-arms from each decision; leftovers wait for the next call.
+/// Runs every due timer and re-arms from each decision. Leftovers wait for the next call.
 /// An update error ends the pass: the rest of the batch is re-armed and the error propagates.
 pub fn drain(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World, now_ns: u64) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -333,7 +332,7 @@ pub fn drain(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *W
 
         for (batch[0..batch_len], 0..) |due, i| {
             self.runDue(ctx, due.slot, due.uuid) catch |err| {
-                // The pass ends here; re-arm the remainder so no claim is left in flight.
+                // The pass ends here. Re-arm the remainder so that no claim stays in flight.
                 // A detached timer was due, so the watermark keeps it due for the next pass.
                 for (batch[i + 1 .. batch_len]) |rest| self.settleClaim(ctx, rest.slot, rest.uuid, .{ .link = ctx.watermark });
                 return err;
@@ -406,7 +405,7 @@ fn runDue(self: *@This(), ctx: DrainCtx, slot: u32, uuid: Handle) Entity.UpdateE
     defer zone.end();
 
     const entity = self.getAndAddRef(ctx.io, uuid) orelse {
-        // Evicted mid-flight; its slot was freed (or reused) before this claim settled.
+        // Eviction freed (or reused) the slot before this claim settled.
         self.settleClaim(ctx, slot, uuid, .free);
         return;
     };
@@ -440,7 +439,7 @@ fn reapDeleted(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: 
 }
 
 fn runUpdate(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: Handle) Entity.UpdateError!void {
-    // A failed update parks too; a reschedule or delete recorded during the update wins in settleClaim.
+    // A failed update parks too. A reschedule or delete recorded during the update wins in settleClaim.
     defer {
         entity.release();
         self.settleClaim(ctx, slot, uuid, .park);
@@ -448,7 +447,7 @@ fn runUpdate(self: *@This(), ctx: DrainCtx, entity: *Entity, slot: u32, uuid: Ha
     try self.updateNow(ctx.io, ctx.allocator, ctx.world, entity, ctx.watermark);
 }
 
-/// Ends one detached claim; a mid-flight wake wins over the fallback. Re-arms
+/// Ends one detached claim. A mid-flight wake wins over the fallback. Re-arms
 /// stamp the draining generation, so a zero delay waits for the next pass.
 fn settleClaim(self: *@This(), ctx: DrainCtx, slot: u32, uuid: Handle, action: SettleAction) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -575,7 +574,7 @@ pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *
 
 const testing = std.testing;
 
-/// Slots in use; every resident entity owns exactly one.
+/// Slots in use. Every resident entity owns exactly one.
 fn usedSlots(self: *const @This()) u64 {
     var used: u64 = 0;
     for (self.timers.items) |node| used += @intFromBool(node.link != .free);
@@ -587,7 +586,7 @@ const test_world: *World = undefined;
 var test_unloaded: std.atomic.Value(u32) = .init(0);
 
 const TestEntity = struct {
-    unloaded: *std.atomic.Value(u32),
+    unloaded: *std.atomic.Value(u32) = &test_unloaded,
     updates: ?*std.atomic.Value(u32) = null,
     del: bool = false,
     delay_ms: u64 = 0,
@@ -616,6 +615,16 @@ const TestEntity = struct {
     }
 };
 
+/// Resets the unload counter and builds a minimum-capacity registry.
+fn initTest() !@This() {
+    test_unloaded.store(0, .seq_cst);
+    return init(testing.allocator, EntityMapType.value_count_min);
+}
+
+fn deinitTest(registry: *@This()) void {
+    registry.deinit(testing.io, testing.allocator, test_world);
+}
+
 fn spawnTest(registry: *@This(), entity: TestEntity, options: SpawnOptions) !*Entity {
     return registry.spawn(testing.io, testing.allocator, test_world, entity, options);
 }
@@ -628,84 +637,76 @@ fn spawnAndGet(alloc: std.mem.Allocator, io: std.Io) !void {
     var registry = try init(alloc, EntityMapType.value_count_min);
     defer registry.deinit(io, alloc, test_world);
 
-    const entity = try registry.spawn(io, alloc, test_world, TestEntity{ .unloaded = &test_unloaded }, .{ .initial_delay_ms = 0 });
+    const entity = try registry.spawn(io, alloc, test_world, TestEntity{}, .{ .initial_delay_ms = 0 });
     entity.release();
-    const fetched = registry.getAndAddRef(io, entity.uuid);
-    try testing.expect(fetched != null);
-    if (fetched) |en| en.release();
+    (registry.getAndAddRef(io, entity.uuid) orelse return error.MissingEntity).release();
 }
 
 test "spawn allocation failure" {
     test_unloaded.store(0, .seq_cst);
     try testing.checkAllAllocationFailures(testing.allocator, spawnAndGet, .{testing.io});
-    try testing.expectEqual(@as(u32, 1), test_unloaded.load(.seq_cst));
+    try testing.expectEqual(1, test_unloaded.load(.seq_cst));
 }
 
 test "held entities are not evicted" {
-    test_unloaded.store(0, .seq_cst);
-    var registry = try init(testing.allocator, EntityMapType.value_count_min);
-    defer registry.deinit(testing.io, testing.allocator, test_world);
+    var registry = try initTest();
+    defer registry.deinitTest();
 
-    const held = try spawnTest(&registry, .{ .unloaded = &test_unloaded }, .{});
+    const held = try spawnTest(&registry, .{}, .{});
     defer held.release();
     for (0..EntityMapType.value_count_min) |_| {
-        const entity = try spawnTest(&registry, .{ .unloaded = &test_unloaded }, .{ .initial_delay_ms = 0 });
+        const entity = try spawnTest(&registry, .{}, .{ .initial_delay_ms = 0 });
         entity.release();
     }
 
     try testing.expectEqual(EntityMapType.value_count_min, registry.count());
-    try testing.expectEqual(@as(u32, 1), test_unloaded.load(.seq_cst));
-    const fetched = registry.getAndAddRef(testing.io, held.uuid);
-    try testing.expect(fetched != null);
-    if (fetched) |en| en.release();
+    try testing.expectEqual(1, test_unloaded.load(.seq_cst));
+    (registry.getAndAddRef(testing.io, held.uuid) orelse return error.MissingEntity).release();
 }
 
 test "evicted timers never fire" {
-    test_unloaded.store(0, .seq_cst);
     var updates: std.atomic.Value(u32) = .init(0);
-    var registry = try init(testing.allocator, EntityMapType.value_count_min);
-    defer registry.deinit(testing.io, testing.allocator, test_world);
+    var registry = try initTest();
+    defer registry.deinitTest();
 
     for (0..EntityMapType.value_count_min + 4) |_| {
-        const entity = try spawnTest(&registry, .{ .unloaded = &test_unloaded, .updates = &updates }, .{ .initial_delay_ms = 0 });
+        const entity = try spawnTest(&registry, .{ .updates = &updates }, .{ .initial_delay_ms = 0 });
         entity.release();
     }
 
     try testing.expectEqual(EntityMapType.value_count_min, registry.count());
-    try testing.expectEqual(@as(u32, 4), test_unloaded.load(.seq_cst));
+    try testing.expectEqual(4, test_unloaded.load(.seq_cst));
     try drainAt(&registry, nowNs(testing.io));
-    try testing.expectEqual(@as(u32, EntityMapType.value_count_min), updates.load(.seq_cst));
+    try testing.expectEqual(EntityMapType.value_count_min, updates.load(.seq_cst));
     try testing.expectEqual(registry.count(), registry.usedSlots());
 }
 
 test "deletion reaps without waiting for a prior deadline" {
-    test_unloaded.store(0, .seq_cst);
     var updates: std.atomic.Value(u32) = .init(0);
-    var registry = try init(testing.allocator, EntityMapType.value_count_min);
-    defer registry.deinit(testing.io, testing.allocator, test_world);
+    var registry = try initTest();
+    defer registry.deinitTest();
 
-    const due = try spawnTest(&registry, .{ .unloaded = &test_unloaded, .updates = &updates }, .{ .initial_delay_ms = 0 });
+    const due = try spawnTest(&registry, .{ .updates = &updates }, .{ .initial_delay_ms = 0 });
     due.release();
-    const far = try spawnTest(&registry, .{ .unloaded = &test_unloaded, .updates = &updates }, .{ .initial_delay_ms = 60_000 });
+    const far = try spawnTest(&registry, .{ .updates = &updates }, .{ .initial_delay_ms = 60_000 });
     far.release();
 
     try testing.expectEqual(DeleteResult.marked, registry.markDeleted(testing.io, due.uuid));
     try testing.expectEqual(DeleteResult.marked, registry.markDeleted(testing.io, far.uuid));
     try drainAt(&registry, nowNs(testing.io));
-    try testing.expectEqual(@as(u64, 1), registry.count());
+    try testing.expectEqual(1, registry.count());
     try drainAt(&registry, nowNs(testing.io) + 10 * std.time.ns_per_ms);
-    try testing.expectEqual(@as(u64, 0), registry.count());
-    try testing.expectEqual(@as(u32, 2), test_unloaded.load(.seq_cst));
-    try testing.expectEqual(@as(u32, 0), updates.load(.seq_cst));
+    try testing.expectEqual(0, registry.count());
+    try testing.expectEqual(2, test_unloaded.load(.seq_cst));
+    try testing.expectEqual(0, updates.load(.seq_cst));
     try testing.expectEqual(DeleteResult.missing, registry.markDeleted(testing.io, due.uuid));
 }
 
 test "handle resolves only while referenced, then misses" {
-    test_unloaded.store(0, .seq_cst);
-    var registry = try init(testing.allocator, EntityMapType.value_count_min);
-    defer registry.deinit(testing.io, testing.allocator, test_world);
+    var registry = try initTest();
+    defer registry.deinitTest();
 
-    const entity = try spawnTest(&registry, .{ .unloaded = &test_unloaded }, .{});
+    const entity = try spawnTest(&registry, .{}, .{});
     const handle = entity.uuid;
     entity.release();
 
@@ -718,74 +719,70 @@ test "handle resolves only while referenced, then misses" {
     const t0 = nowNs(testing.io);
     try drainAt(&registry, t0);
     try drainAt(&registry, t0 + 10 * std.time.ns_per_ms);
-    try testing.expectEqual(@as(u64, 0), registry.count());
+    try testing.expectEqual(0, registry.count());
     try testing.expect(registry.getAndAddRef(testing.io, handle) == null);
 }
 
 test "zero delay fires on the next drain, never the same one" {
-    test_unloaded.store(0, .seq_cst);
     var updates: std.atomic.Value(u32) = .init(0);
-    var registry = try init(testing.allocator, EntityMapType.value_count_min);
-    defer registry.deinit(testing.io, testing.allocator, test_world);
+    var registry = try initTest();
+    defer registry.deinitTest();
 
-    const entity = try spawnTest(&registry, .{ .unloaded = &test_unloaded, .updates = &updates }, .{ .initial_delay_ms = 0 });
+    const entity = try spawnTest(&registry, .{ .updates = &updates }, .{ .initial_delay_ms = 0 });
     entity.release();
 
     const t0 = nowNs(testing.io);
     try drainAt(&registry, t0);
-    try testing.expectEqual(@as(u32, 1), updates.load(.seq_cst));
+    try testing.expectEqual(1, updates.load(.seq_cst));
     try drainAt(&registry, t0);
-    try testing.expectEqual(@as(u32, 2), updates.load(.seq_cst));
+    try testing.expectEqual(2, updates.load(.seq_cst));
 }
 
 test "dormant entities sleep until woken" {
-    test_unloaded.store(0, .seq_cst);
     var updates: std.atomic.Value(u32) = .init(0);
-    var registry = try init(testing.allocator, EntityMapType.value_count_min);
-    defer registry.deinit(testing.io, testing.allocator, test_world);
+    var registry = try initTest();
+    defer registry.deinitTest();
 
-    const entity = try spawnTest(&registry, .{ .unloaded = &test_unloaded, .updates = &updates, .run_limit = 0 }, .{});
+    const entity = try spawnTest(&registry, .{ .updates = &updates, .run_limit = 0 }, .{});
     const uuid = entity.uuid;
     entity.release();
 
     try drainAt(&registry, nowNs(testing.io));
-    try testing.expectEqual(@as(u32, 0), updates.load(.seq_cst));
+    try testing.expectEqual(0, updates.load(.seq_cst));
 
     var random_uuid: Handle = undefined;
     testing.io.random(std.mem.asBytes(&random_uuid));
     try testing.expectEqual(false, registry.schedule(testing.io, random_uuid, 0));
     try testing.expect(registry.schedule(testing.io, uuid, 0));
     try drainAt(&registry, nowNs(testing.io));
-    try testing.expectEqual(@as(u32, 1), updates.load(.seq_cst));
+    try testing.expectEqual(1, updates.load(.seq_cst));
 
     try testing.expect(registry.schedule(testing.io, uuid, 0));
     try testing.expect(registry.schedule(testing.io, uuid, 0));
     try drainAt(&registry, nowNs(testing.io));
-    try testing.expectEqual(@as(u32, 2), updates.load(.seq_cst));
+    try testing.expectEqual(2, updates.load(.seq_cst));
 }
 
 test "a held entity runs only when the caller drives it" {
-    test_unloaded.store(0, .seq_cst);
     var updates: std.atomic.Value(u32) = .init(0);
-    var registry = try init(testing.allocator, EntityMapType.value_count_min);
-    defer registry.deinit(testing.io, testing.allocator, test_world);
+    var registry = try initTest();
+    defer registry.deinitTest();
 
-    const entity = try spawnTest(&registry, .{ .unloaded = &test_unloaded, .updates = &updates, .run_limit = 0 }, .{});
+    const entity = try spawnTest(&registry, .{ .updates = &updates, .run_limit = 0 }, .{});
     defer entity.release();
 
     try registry.updateNow(testing.io, testing.allocator, test_world, entity, nowNs(testing.io));
-    try testing.expectEqual(@as(u32, 1), updates.load(.seq_cst));
+    try testing.expectEqual(1, updates.load(.seq_cst));
 
     // Never armed, so the drain leaves it alone.
     try drainAt(&registry, nowNs(testing.io));
-    try testing.expectEqual(@as(u32, 1), updates.load(.seq_cst));
-    try testing.expectEqual(@as(u64, 1), registry.count());
+    try testing.expectEqual(1, updates.load(.seq_cst));
+    try testing.expectEqual(1, registry.count());
 }
 
 fn fuzzRegistry(_: void, smith: *std.testing.Smith) !void {
-    test_unloaded.store(0, .seq_cst);
-    var registry = try init(testing.allocator, EntityMapType.value_count_min);
-    defer registry.deinit(testing.io, testing.allocator, test_world);
+    var registry = try initTest();
+    defer registry.deinitTest();
 
     var updates: std.atomic.Value(u32) = .init(0);
     var held: [4]?*Entity = @splat(null);
@@ -793,7 +790,7 @@ fn fuzzRegistry(_: void, smith: *std.testing.Smith) !void {
         if (maybe_entity) |en| en.release();
     };
     var hold_i: usize = 0;
-    // Recent uuids bias wake/delete ops toward residents; stale entries miss.
+    // Recent uuids bias wake/delete ops toward residents. Stale entries miss.
     var recent: [4]Handle = @splat(0);
     var recent_i: usize = 0;
 
@@ -805,7 +802,6 @@ fn fuzzRegistry(_: void, smith: *std.testing.Smith) !void {
             .spawn => {
                 const delay: ?u64 = if (smith.value(bool)) @as(u64, smith.value(u16)) % 6000 else null;
                 const entity = registry.spawn(testing.io, testing.allocator, test_world, TestEntity{
-                    .unloaded = &test_unloaded,
                     .updates = &updates,
                     .del = smith.value(bool),
                     .delay_ms = smith.value(u6),
@@ -817,7 +813,6 @@ fn fuzzRegistry(_: void, smith: *std.testing.Smith) !void {
             },
             .hold => {
                 const entity = registry.spawn(testing.io, testing.allocator, test_world, TestEntity{
-                    .unloaded = &test_unloaded,
                     .updates = &updates,
                     .run_limit = smith.value(u2),
                 }, .{}) catch continue;

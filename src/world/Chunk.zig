@@ -41,37 +41,25 @@ pub const Encoding = union(enum(u1)) {
 
     pub fn mergeGrid(blocks: *Encoding, merge_grid: *const [ChunkSize][ChunkSize][ChunkSize]Block, grid_buffer: *align(GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         toGrid(blocks, grid_buffer);
-        const tag = @typeInfo(Block).@"enum".tag_type;
-        const flat_array: *[ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(blocks.grid);
-        const flat_merge_array: *const [ChunkSize * ChunkSize * ChunkSize]tag = @ptrCast(merge_grid);
-
-        selectBlocks(tag, ChunkSize * ChunkSize * ChunkSize, flat_array, flat_merge_array);
+        const volume = ChunkSize * ChunkSize * ChunkSize;
+        selectBlocks(Block.Tag, volume, @ptrCast(blocks.grid), @ptrCast(merge_grid));
         if (getUniform(blocks.grid)) |block| blocks.* = .{ .uniform = block };
     }
 
     // Workaround for https://codeberg.org/ziglang/zig/issues/35254
     fn selectBlocks(comptime T: type, comptime len: usize, flat_array: *[len]T, flat_merge_array: *const [len]T) void {
+        const null_tag = comptime @backingInt(Block.null);
+        var i: usize = 0;
         if (comptime std.simd.suggestVectorLength(T)) |vlen| {
             const VT = @Vector(vlen, T);
-            var i: usize = 0;
             while (i + vlen <= len) : (i += vlen) {
-                const a: VT = flat_array.*[i..][0..vlen].*;
+                const a: VT = flat_array[i..][0..vlen].*;
                 const b: VT = flat_merge_array[i..][0..vlen].*;
-                const pred = b == comptime @as(VT, @splat(@backingInt(Block.null)));
-                const result = @select(T, pred, a, b);
-                flat_array.*[i..][0..vlen].* = result;
+                flat_array[i..][0..vlen].* = @select(T, b == @as(VT, @splat(null_tag)), a, b);
             }
-            while (i < len) : (i += 1) {
-                if (flat_merge_array[i] != comptime @backingInt(Block.null)) {
-                    flat_array.*[i] = flat_merge_array[i];
-                }
-            }
-        } else {
-            for (flat_merge_array[0..len], flat_array.*[0..len]) |src, *dest| {
-                if (src != comptime @backingInt(Block.null)) {
-                    dest.* = src;
-                }
-            }
+        }
+        for (flat_merge_array[i..], flat_array[i..]) |src, *dest| {
+            if (src != null_tag) dest.* = src;
         }
     }
 
@@ -95,24 +83,19 @@ pub const Encoding = union(enum(u1)) {
 
         pub fn direction(self: FaceRotation) @Vector(3, i32) {
             return switch (self) {
-                .xplus => @Vector(3, i32){ 1, 0, 0 },
-                .xminus => @Vector(3, i32){ -1, 0, 0 },
-                .yplus => @Vector(3, i32){ 0, 1, 0 },
-                .yminus => @Vector(3, i32){ 0, -1, 0 },
-                .zplus => @Vector(3, i32){ 0, 0, 1 },
-                .zminus => @Vector(3, i32){ 0, 0, -1 },
+                .xplus => .{ 1, 0, 0 },
+                .xminus => .{ -1, 0, 0 },
+                .yplus => .{ 0, 1, 0 },
+                .yminus => .{ 0, -1, 0 },
+                .zplus => .{ 0, 0, 1 },
+                .zminus => .{ 0, 0, -1 },
             };
         }
 
+        /// Returns the opposite face.
         pub fn invert(self: FaceRotation) FaceRotation {
-            return switch (self) {
-                .xplus => .xminus,
-                .xminus => .xplus,
-                .yplus => .yminus,
-                .yminus => .yplus,
-                .zplus => .zminus,
-                .zminus => .zplus,
-            };
+            // Each plus face sits at an even value, directly before its minus face.
+            return @fromBackingInt(@backingInt(self) ^ 1);
         }
     };
 
@@ -123,25 +106,17 @@ pub const Encoding = union(enum(u1)) {
                 switch (comptime rotation) {
                     .xplus => result = grid[ChunkSize - 1],
                     .xminus => result = grid[0],
-                    .yplus => for (&result, 0..) |*row, i| {
-                        row.* = grid[i][ChunkSize - 1];
+                    .yplus => for (&result, grid) |*row, *plane| {
+                        row.* = plane[ChunkSize - 1];
                     },
-                    .yminus => for (&result, 0..) |*row, i| {
-                        row.* = grid[i][0];
+                    .yminus => for (&result, grid) |*row, *plane| {
+                        row.* = plane[0];
                     },
-                    .zplus => {
-                        for (&result, 0..) |*row, i| {
-                            for (row, 0..) |*item, j| {
-                                item.* = grid[i][j][ChunkSize - 1];
-                            }
-                        }
+                    .zplus => for (&result, grid) |*row, *plane| {
+                        for (row, plane) |*item, *line| item.* = line[ChunkSize - 1];
                     },
-                    .zminus => {
-                        for (&result, 0..) |*row, i| {
-                            for (row, 0..) |*item, j| {
-                                item.* = grid[i][j][0];
-                            }
-                        }
+                    .zminus => for (&result, grid) |*row, *plane| {
+                        for (row, plane) |*item, *line| item.* = line[0];
                     },
                 }
                 return if (getFaceUniform(&result)) |block| .{ .uniform = block } else .{ .grid = result };
@@ -163,9 +138,9 @@ pub const Encoding = union(enum(u1)) {
         uniform: Block,
     };
 
-    pub fn getFaceUniform(self: *align(GridAlignment) const [ChunkSize][ChunkSize]Block) ?Block {
-        const flat_blocks: *const [ChunkSize * ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(self);
-        const block_vector: @Vector(ChunkSize * ChunkSize, @typeInfo(Block).@"enum".tag_type) = flat_blocks.*;
+    fn getFaceUniform(self: *align(GridAlignment) const [ChunkSize][ChunkSize]Block) ?Block {
+        const flat_blocks: *const [ChunkSize * ChunkSize]Block.Tag = @ptrCast(self);
+        const block_vector: @Vector(ChunkSize * ChunkSize, Block.Tag) = flat_blocks.*;
         const count = std.simd.countElementsWithValue(block_vector, block_vector[0]);
         return if (count == ChunkSize * ChunkSize) self[0][0] else null;
     }
@@ -191,45 +166,28 @@ pub const Encoding = union(enum(u1)) {
 
     const TransparencyRow = @Vector(ChunkSize, bool);
 
-    /// Transparency of one grid row, memoized so each row is classified at most
-    /// once per simplifyBlocks call. Neighbor rows repeat across the masks of a
-    /// single cell and across adjacent cells, so a raw recompute paid ~5-20x.
-    fn rowTransparent(
-        grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag,
-        x: usize,
-        y: usize,
-        cache: *[ChunkSize][ChunkSize]TransparencyRow,
-        done: *[ChunkSize][ChunkSize]bool,
-    ) TransparencyRow {
-        if (done[x][y]) return cache[x][y];
-        const t = Block.isTransparentVector(ChunkSize, @bitCast(grid[x][y]));
-        cache[x][y] = t;
-        done[x][y] = true;
-        return t;
+    const TransparencyCache = [ChunkSize][ChunkSize]?TransparencyRow;
+
+    /// Transparency of one grid row. The cache classifies each row at most once per
+    /// simplifyBlocks call: neighbor rows repeat across cells, so a recompute cost ~5-20x.
+    fn rowTransparent(grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, x: usize, y: usize, cache: *TransparencyCache) TransparencyRow {
+        if (cache[x][y]) |row| return row;
+        const row = Block.isTransparentVector(ChunkSize, grid[x][y]);
+        cache[x][y] = row;
+        return row;
     }
 
-    fn getExposureMask(
-        x: usize,
-        y: usize,
-        grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag,
-        cache: *[ChunkSize][ChunkSize]TransparencyRow,
-        done: *[ChunkSize][ChunkSize]bool,
-    ) @Vector(ChunkSize, bool) {
-        const center_trans = rowTransparent(grid, x, y, cache, done);
-        var exposure_mask: @Vector(ChunkSize, bool) = @splat(false);
-
-        exposure_mask |= std.simd.shiftElementsRight(center_trans, 1, true);
-        exposure_mask |= std.simd.shiftElementsLeft(center_trans, 1, true);
-
-        exposure_mask |= if (x == 0) center_trans else rowTransparent(grid, x - 1, y, cache, done);
-        exposure_mask |= if (x == ChunkSize - 1) center_trans else rowTransparent(grid, x + 1, y, cache, done);
-        exposure_mask |= if (y == 0) center_trans else rowTransparent(grid, x, y - 1, cache, done);
-        exposure_mask |= if (y == ChunkSize - 1) center_trans else rowTransparent(grid, x, y + 1, cache, done);
-
+    fn getExposureMask(x: usize, y: usize, grid: *const [ChunkSize][ChunkSize][ChunkSize]Block.Tag, cache: *TransparencyCache) @Vector(ChunkSize, bool) {
+        const center_trans = rowTransparent(grid, x, y, cache);
+        var exposure_mask = std.simd.shiftElementsRight(center_trans, 1, true) | std.simd.shiftElementsLeft(center_trans, 1, true);
+        exposure_mask |= if (x == 0) center_trans else rowTransparent(grid, x - 1, y, cache);
+        exposure_mask |= if (x == ChunkSize - 1) center_trans else rowTransparent(grid, x + 1, y, cache);
+        exposure_mask |= if (y == 0) center_trans else rowTransparent(grid, x, y - 1, cache);
+        exposure_mask |= if (y == ChunkSize - 1) center_trans else rowTransparent(grid, x, y + 1, cache);
         return exposure_mask;
     }
 
-    pub fn findBestBlock(
+    fn findBestBlock(
         comptime len: usize,
         rows: [area_factor]@Vector(len, Block.Tag),
         exposures: [area_factor]@Vector(len, bool),
@@ -273,8 +231,7 @@ pub const Encoding = union(enum(u1)) {
 
     pub fn simplifyBlocks(grid: *align(GridAlignment) const [ChunkSize][ChunkSize][ChunkSize]Block) [simplified_size][simplified_size][simplified_size]Block {
         var simplified_grid: [simplified_size][simplified_size][simplified_size]Block align(GridAlignment) = undefined;
-        var trans_cache: [ChunkSize][ChunkSize]TransparencyRow = undefined;
-        var trans_done: [ChunkSize][ChunkSize]bool = @splat(@splat(false));
+        var trans_cache: TransparencyCache = @splat(@splat(null));
         for (0..simplified_size) |nx| {
             const x = nx * scale_factor;
 
@@ -291,7 +248,7 @@ pub const Encoding = union(enum(u1)) {
                     }
                 }
                 if (rows_all_eql) {
-                    simplified_grid[nx][ny] = @splat(@fromBackingInt(@intCast(rows[0][0])));
+                    simplified_grid[nx][ny] = @splat(@fromBackingInt(rows[0][0]));
                     continue;
                 }
                 var exposures: [area_factor]@Vector(ChunkSize, bool) = undefined;
@@ -299,7 +256,7 @@ pub const Encoding = union(enum(u1)) {
                 inline for (0..scale_factor) |dx| {
                     inline for (0..scale_factor) |dy| {
                         const idx = dx * scale_factor + dy;
-                        exposures[idx] = getExposureMask(x + dx, y + dy, @ptrCast(grid), &trans_cache, &trans_done);
+                        exposures[idx] = getExposureMask(x + dx, y + dy, @ptrCast(grid), &trans_cache);
                     }
                 }
 
@@ -312,9 +269,9 @@ pub const Encoding = union(enum(u1)) {
 
 /// The shared block if every cell matches, else null.
 pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?Block {
-    const first_block_vec: @Vector(ChunkSize, @typeInfo(Block).@"enum".tag_type) = @splat(@backingInt(block_array[0][0][0]));
+    const first_block_vec: @Vector(ChunkSize, Block.Tag) = @splat(@backingInt(block_array[0][0][0]));
     var uniform: @Vector(ChunkSize, bool) = comptime @splat(true);
-    const linear_block_array: *const [ChunkSize * ChunkSize][ChunkSize]@typeInfo(Block).@"enum".tag_type = @ptrCast(block_array);
+    const linear_block_array: *const [ChunkSize * ChunkSize][ChunkSize]Block.Tag = @ptrCast(block_array);
     // Check 8 rows per test. This amortizes the reduce and still exits early on mismatch.
     for (linear_block_array, 0..) |blocks, idx| {
         uniform &= (blocks == first_block_vec);
@@ -323,7 +280,7 @@ pub fn getUniform(block_array: *const [ChunkSize][ChunkSize][ChunkSize]Block) ?B
     return if (@reduce(.And, uniform)) block_array[0][0][0] else null;
 }
 
-/// Releases the caller's reference once the face is read.
+/// Reads one face, then releases the caller's reference.
 pub fn extractFace(self: *@This(), io: std.Io, comptime rotation: Encoding.FaceRotation) !Encoding.Face {
     defer self.release();
     try self.lockShared(io);

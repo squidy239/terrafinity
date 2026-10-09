@@ -18,7 +18,7 @@ touch: [10]dvui.Point = @splat(.{ .x = std.math.inf(f32), .y = std.math.inf(f32)
 
 renderer: vk_renderer,
 device: vk.DeviceProxy,
-/// Where the current frame records; null outside `beginFrame` and the caller's reset.
+/// The command buffer and extent of the current frame. It is null outside `beginFrame` and the caller's reset.
 target: ?Target = null,
 prepass_cmd: ?vk.CommandBuffer = null,
 
@@ -45,8 +45,8 @@ pub fn init(options: InitOptions) !@This() {
     return .{
         .io = options.io,
         .window = options.window,
-        .size_natural = .{ .w = @floatFromInt(options.size.width), .h = @floatFromInt(options.size.height) },
-        .size_physical = .{ .w = @floatFromInt(options.framebuffer.width), .h = @floatFromInt(options.framebuffer.height) },
+        .size_natural = convertSize(dvui.Size.Natural, options.size),
+        .size_physical = convertSize(dvui.Size.Physical, options.framebuffer),
         .device = options.dev,
         .renderer = try vk_renderer.init(options.gpa, .{
             .dev = options.dev,
@@ -74,8 +74,7 @@ pub fn deinit(back: *@This()) void {
 }
 
 pub fn nanoTime(self: *@This()) i128 {
-    const ret = std.Io.Clock.boot.now(self.io);
-    return ret.nanoseconds;
+    return std.Io.Clock.boot.now(self.io).nanoseconds;
 }
 
 pub fn sleep(self: *@This(), ns: u64) void {
@@ -204,11 +203,11 @@ pub fn addEvent(self: *@This(), win: *dvui.Window, event: wio.Event) !bool {
             return false;
         },
         .size_logical => |size| {
-            self.size_natural = .{ .w = @floatFromInt(size.width), .h = @floatFromInt(size.height) };
+            self.size_natural = convertSize(dvui.Size.Natural, size);
             return false;
         },
         .size_physical => |size| {
-            self.size_physical = .{ .w = @floatFromInt(size.width), .h = @floatFromInt(size.height) };
+            self.size_physical = convertSize(dvui.Size.Physical, size);
             return false;
         },
         .char => |char| {
@@ -236,13 +235,7 @@ pub fn addEvent(self: *@This(), win: *dvui.Window, event: wio.Event) !bool {
                 .right_gui => .rcommand,
                 else => .none,
             };
-            if (mod != .none) {
-                if (event == .button_press) {
-                    self.mod.combine(mod);
-                } else {
-                    self.mod.unset(mod);
-                }
-            }
+            if (event == .button_press) self.mod.combine(mod) else self.mod.unset(mod);
             return try win.addEventKey(.{
                 .code = buttonToDvuiKey(button),
                 .action = if (event == .button_press) .down else .up,
@@ -265,16 +258,12 @@ pub fn addEvent(self: *@This(), win: *dvui.Window, event: wio.Event) !bool {
             const button = touchIdToDvuiButton(touch.id) orelse return false;
             const xnorm = @as(f32, @floatFromInt(touch.x)) / self.size_natural.w;
             const ynorm = @as(f32, @floatFromInt(touch.y)) / self.size_natural.h;
-            const old = &self.touch[touch.id];
+            const old = self.touch[touch.id];
+            self.touch[touch.id] = .{ .x = xnorm, .y = ynorm };
             if (std.math.isInf(old.x)) {
-                old.* = .{ .x = xnorm, .y = ynorm };
-                return try win.addEventPointer(.{ .button = button, .action = .press, .xynorm = .{ .x = xnorm, .y = ynorm } });
-            } else {
-                const dxnorm = old.x - xnorm;
-                const dynorm = old.y - ynorm;
-                old.* = .{ .x = xnorm, .y = ynorm };
-                return try win.addEventTouchMotion(button, xnorm, ynorm, dxnorm, dynorm);
+                return try win.addEventPointer(.{ .button = button, .action = .press, .xynorm = self.touch[touch.id] });
             }
+            return try win.addEventTouchMotion(button, xnorm, ynorm, old.x - xnorm, old.y - ynorm);
         },
         .touch_end => |touch| {
             const button = touchIdToDvuiButton(touch.id) orelse return false;
@@ -347,51 +336,19 @@ pub fn renderTarget(_: *@This(), _: ?dvui.TextureTarget) !void {
     return error.NotImplemented;
 }
 
+fn convertSize(comptime Size: type, size: wio.Size) Size {
+    return .{ .w = @floatFromInt(size.width), .h = @floatFromInt(size.height) };
+}
+
 fn touchIdToDvuiButton(id: u8) ?dvui.enums.Button {
-    return switch (id) {
-        0 => .touch0,
-        1 => .touch1,
-        2 => .touch2,
-        3 => .touch3,
-        4 => .touch4,
-        5 => .touch5,
-        6 => .touch6,
-        7 => .touch7,
-        8 => .touch8,
-        9 => .touch9,
-        else => null,
-    };
+    if (id > 9) return null;
+    // dvui declares touch0 through touch9 in order.
+    return @fromBackingInt(@intCast(@backingInt(dvui.enums.Button.touch0) + id));
 }
 
 fn buttonToDvuiKey(button: wio.Button) dvui.enums.Key {
     return switch (button) {
         .mouse_left, .mouse_right, .mouse_middle, .mouse_back, .mouse_forward => unreachable,
-        .a => .a,
-        .b => .b,
-        .c => .c,
-        .d => .d,
-        .e => .e,
-        .f => .f,
-        .g => .g,
-        .h => .h,
-        .i => .i,
-        .j => .j,
-        .k => .k,
-        .l => .l,
-        .m => .m,
-        .n => .n,
-        .o => .o,
-        .p => .p,
-        .q => .q,
-        .r => .r,
-        .s => .s,
-        .t => .t,
-        .u => .u,
-        .v => .v,
-        .w => .w,
-        .x => .x,
-        .y => .y,
-        .z => .z,
         .@"1" => .one,
         .@"2" => .two,
         .@"3" => .three,
@@ -402,88 +359,25 @@ fn buttonToDvuiKey(button: wio.Button) dvui.enums.Key {
         .@"8" => .eight,
         .@"9" => .nine,
         .@"0" => .zero,
-        .enter => .enter,
-        .escape => .escape,
-        .backspace => .backspace,
-        .tab => .tab,
-        .space => .space,
-        .minus => .minus,
         .equals => .equal,
-        .left_bracket => .left_bracket,
-        .right_bracket => .right_bracket,
-        .backslash => .backslash,
-        .semicolon => .semicolon,
-        .apostrophe => .apostrophe,
-        .grave => .grave,
-        .comma => .comma,
         .dot => .period,
-        .slash => .slash,
-        .caps_lock => .caps_lock,
-        .f1 => .f1,
-        .f2 => .f2,
-        .f3 => .f3,
-        .f4 => .f4,
-        .f5 => .f5,
-        .f6 => .f6,
-        .f7 => .f7,
-        .f8 => .f8,
-        .f9 => .f9,
-        .f10 => .f10,
-        .f11 => .f11,
-        .f12 => .f12,
         .print_screen => .print,
-        .scroll_lock => .scroll_lock,
-        .pause => .pause,
-        .insert => .insert,
-        .home => .home,
-        .page_up => .page_up,
-        .delete => .delete,
-        .end => .end,
-        .page_down => .page_down,
-        .right => .right,
-        .left => .left,
-        .down => .down,
-        .up => .up,
-        .num_lock => .num_lock,
         .kp_slash => .kp_divide,
         .kp_star => .kp_multiply,
         .kp_minus => .kp_subtract,
         .kp_plus => .kp_add,
-        .kp_enter => .kp_enter,
-        .kp_1 => .kp_1,
-        .kp_2 => .kp_2,
-        .kp_3 => .kp_3,
-        .kp_4 => .kp_4,
-        .kp_5 => .kp_5,
-        .kp_6 => .kp_6,
-        .kp_7 => .kp_7,
-        .kp_8 => .kp_8,
-        .kp_9 => .kp_9,
-        .kp_0 => .kp_0,
         .kp_dot => .kp_decimal,
         .iso_backslash => .backslash,
         .application => .menu,
         .kp_equals => .kp_equal,
-        .f13 => .f13,
-        .f14 => .f14,
-        .f15 => .f15,
-        .f16 => .f16,
-        .f17 => .f17,
-        .f18 => .f18,
-        .f19 => .f19,
-        .f20 => .f20,
-        .f21 => .f21,
-        .f22 => .f22,
-        .f23 => .f23,
-        .f24 => .f24,
-        .left_control => .left_control,
-        .left_shift => .left_shift,
-        .left_alt => .left_alt,
         .left_gui => .left_command,
-        .right_control => .right_control,
-        .right_shift => .right_shift,
-        .right_alt => .right_alt,
         .right_gui => .right_command,
         .kp_comma, .international1, .international2, .international3, .international4, .international5, .lang1, .lang2 => .unknown,
+        // Every other button has a dvui key with the same name.
+        inline else => |same_name| @field(dvui.enums.Key, @tagName(same_name)),
     };
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

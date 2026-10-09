@@ -53,7 +53,7 @@ pub const ChunkPos = struct {
     }
 
     pub inline fn posInParent(self: ChunkPos) @Vector(3, @Int(.unsigned, std.math.log2(scale_factor))) {
-        return @intCast(@mod(self.position, comptime @Vector(3, i32){ scale_factor, scale_factor, scale_factor }));
+        return @intCast(@mod(self.position, @as(@Vector(3, i32), @splat(scale_factor))));
     }
 
     pub inline fn add(self: ChunkPos, delta: @Vector(3, i32)) ChunkPos {
@@ -61,7 +61,7 @@ pub const ChunkPos = struct {
     }
 
     pub fn offset(self: ChunkPos, rotation: Chunk.Encoding.FaceRotation) ChunkPos {
-        return .{ .level = self.level, .position = self.position + rotation.direction() };
+        return self.add(rotation.direction());
     }
 
     pub inline fn toLevel(self: ChunkPos, level: i32) ChunkPos {
@@ -70,7 +70,7 @@ pub const ChunkPos = struct {
         return .{ .position = @trunc(pos_vec * ratio_vec), .level = level };
     }
 
-    /// Chunk origin in world blocks. Exact only for level >= chunk_level; finer levels need fromGlobalBlockPos.
+    /// Chunk origin in world blocks. Exact only for level >= chunk_level. Finer levels need fromGlobalBlockPos.
     pub inline fn toGlobalBlockPos(self: ChunkPos) BlockPos {
         return self.position * @as(@Vector(3, i64), @splat(levelToBlockRatio(self.level)));
     }
@@ -107,8 +107,8 @@ pub const ChunkPos = struct {
 /// entity-domain, so this file must not depend on the entity layer.
 pub const WorldConfig = struct {};
 
-/// Hard ceiling for LOD propagation; propagation also stops as soon as a level
-/// stops modifying its parent, so this only bounds the worst case.
+/// Hard ceiling for LOD propagation. Propagation also stops when a level
+/// does not change its parent, so this only bounds the worst case.
 const max_propagate_level = 24;
 
 pub const ChunkSource = struct {
@@ -197,24 +197,19 @@ inline fn chunkPosHash(item: anytype) u64 {
     return hasher.final();
 }
 
-const ChunkMapType = Cache(
-    ChunkPos,
-    ChunkValue,
-    ChunkValue.keyFromValue,
-    chunkPosHash,
-    chunk_cache_layout,
-    if (builtin.is_test) 1 else 256,
-);
+const cache_shard_count = if (builtin.is_test) 1 else 256;
+const ChunkMapType = Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, chunk_cache_layout, cache_shard_count);
+const GridMapType = Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, chunk_cache_layout, cache_shard_count);
 
-/// `skip_victim` re-arms the way it skips, so a fully pinned set never yields a
-/// null victim; cap the tries per insert so a pathological set fails loudly
+/// `skipVictim` re-arms the way it skips, so a fully pinned set never yields a
+/// null victim. Cap the tries per insert so a pathological set fails loudly
 /// instead of spinning. This is a bound, not a guarantee: the selector can
 /// cycle past an evictable way.
-const max_victim_skips = ChunkMapType.Shard.value_count_max_multiple *
+const max_victim_skips = ChunkMapType.Shard.value_count_min *
     (1 << chunk_cache_layout.clock_bits);
 
 chunks: ChunkMapType,
-grids: Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, chunk_cache_layout, if (builtin.is_test) 1 else 256),
+grids: GridMapType,
 config: WorldConfig,
 chunk_sources: [4]?ChunkSource,
 edit_callback: ?EditCallback = null,
@@ -263,11 +258,7 @@ pub fn loadChunk(
         .ref_count = .init(2),
     };
 
-    const result = try self.putChunk(io, new_chunk, chunk_pos);
-    const chunk = switch (result) {
-        .existing => |existing| existing,
-        .inserted => |inserted| inserted,
-    };
+    const chunk = try self.putChunk(io, new_chunk, chunk_pos);
     errdefer chunk.release();
 
     if (structures) try self.tryGenStructures(io, allocator, chunk, chunk_pos);
@@ -295,7 +286,7 @@ pub fn saveAll(self: *World, io: std.Io) !void {
     if (failed.load(.seq_cst)) return error.SaveFailed;
 }
 
-/// Best-effort periodic save: skips shards whose lock is contended and logs
+/// Best-effort periodic save: skips shards whose lock another task holds and logs
 /// per-chunk failures instead of reporting them. Use `saveAll` when partial
 /// persistence is not acceptable.
 pub fn trySaveAll(self: *World, io: std.Io) !void {
@@ -380,7 +371,7 @@ pub const Reader = struct {
 
     pub fn getBlock(self: *Reader, io: std.Io, allocator: std.mem.Allocator, block_pos: BlockPos, level: i32) !Block {
         const chunk_pos: ChunkPos = .fromLocalBlockPos(block_pos, level);
-        const local_pos: @Vector(3, usize) = @intCast(@mod(block_pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+        const local_pos: @Vector(3, usize) = @intCast(@mod(block_pos, @as(BlockPos, @splat(ChunkSize))));
 
         if (self.last_chunk_read_cache) |cache| {
             if (std.meta.eql(cache.chunk_pos, chunk_pos)) return readBlockFromEncoding(cache.chunk.encoding, local_pos);
@@ -433,12 +424,24 @@ pub const Editor = struct {
         }
     };
 
-    /// First task error as its error int; 0 is never a valid error int, so it means no error.
+    /// First task error as its error int. 0 is never a valid error int, so it means no error.
     const ErrorStore = std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror)));
+
+    /// Returns `Canceled` to unwind the task, and records any other error in `err_store`.
+    fn storeTaskError(err_store: *ErrorStore, err: anyerror) std.Io.Cancelable!void {
+        if (err == error.Canceled) return error.Canceled;
+        err_store.store(@intFromError(err), .seq_cst);
+    }
+
+    /// Waits for every task in `group`, then returns the first error a task recorded.
+    fn awaitTasks(group: *std.Io.Group, io: std.Io, err_store: *const ErrorStore) !void {
+        try group.await(io);
+        if (err_store.raw != 0) return @errorFromInt(err_store.raw);
+    }
 
     pub inline fn placeBlock(self: *Editor, block: Block, pos: @Vector(3, i64), level: i32) !void {
         const chunk_pos: ChunkPos = .fromLocalBlockPos(pos, level);
-        const local_pos: @Vector(3, usize) = @intCast(@mod(pos, @Vector(3, i64){ ChunkSize, ChunkSize, ChunkSize }));
+        const local_pos: @Vector(3, usize) = @intCast(@mod(pos, @as(BlockPos, @splat(ChunkSize))));
 
         if (self.last_chunk_cache) |cache| {
             if (std.meta.eql(cache.chunk_pos, chunk_pos)) {
@@ -510,14 +513,13 @@ pub const Editor = struct {
                 const encoding: Chunk.Encoding = .fromBlocks(&diff_chunk.value_ptr.grid);
                 group.async(io, editChunk, .{ self, io, allocator, diff_chunk.key_ptr.*, encoding, sides, &err_store });
             }
-            try group.await(io);
-            if (err_store.raw != 0) return @errorFromInt(err_store.raw);
+            try awaitTasks(&group, io, &err_store);
 
             it = self.edit_buffer.iterator();
             for (sides_changed) |sides| {
                 const chunk_pos = it.next().?.key_ptr.*;
                 for (sides, std.enums.values(Chunk.Encoding.FaceRotation)) |changed, rotation| {
-                    if (changed) try remesh_neighbors.put(.{ .level = chunk_pos.level, .position = chunk_pos.position + rotation.direction() }, {});
+                    if (changed) try remesh_neighbors.put(chunk_pos.offset(rotation), {});
                 }
             }
         }
@@ -531,20 +533,13 @@ pub const Editor = struct {
         {
             const callbacks = tracy.Zone.begin(.{ .src = @src(), .name = "callbacks" });
             defer callbacks.end();
-            var it = self.edit_buffer.iterator();
-            while (it.next()) |pos| {
-                if (self.world.edit_callback) |cb| {
-                    group.async(io, runEditCallback, .{ cb, io, allocator, pos.key_ptr.*, &err_store });
-                }
+            if (self.world.edit_callback) |callback| {
+                var it = self.edit_buffer.keyIterator();
+                while (it.next()) |pos| group.async(io, runEditCallback, .{ callback, io, allocator, pos.*, &err_store });
+                var neighbor_it = remesh_neighbors.keyIterator();
+                while (neighbor_it.next()) |pos| group.async(io, runEditCallback, .{ callback, io, allocator, pos.*, &err_store });
             }
-            var rit = remesh_neighbors.iterator();
-            while (rit.next()) |pos| {
-                if (self.world.edit_callback) |cb| {
-                    group.async(io, runEditCallback, .{ cb, io, allocator, pos.key_ptr.*, &err_store });
-                }
-            }
-            try group.await(io);
-            if (err_store.raw != 0) return @errorFromInt(err_store.raw);
+            try awaitTasks(&group, io, &err_store);
         }
     }
 
@@ -593,11 +588,7 @@ pub const Editor = struct {
         for (0..simplified_size) |x| {
             for (0..simplified_size) |y| {
                 for (0..simplified_size) |z| {
-                    const world_pos = @Vector(3, i64){
-                        block_pos[0] + @as(i64, @intCast(x)),
-                        block_pos[1] + @as(i64, @intCast(y)),
-                        block_pos[2] + @as(i64, @intCast(z)),
-                    };
+                    const world_pos = block_pos + @as(BlockPos, @intCast(@Vector(3, usize){ x, y, z }));
                     const current = switch (parent.encoding) {
                         .grid => parent.encoding.grid[pos_in_parent[0] + x][pos_in_parent[1] + y][pos_in_parent[2] + z],
                         .uniform => parent.encoding.uniform,
@@ -624,8 +615,8 @@ pub const Editor = struct {
         const track_face_changes = if (world.edit_callback) |cb| cb.on_neighbor_face_change else false;
         const old_sides = if (track_face_changes) chunk.encoding.extractAllFaces() else null;
         const was_grid = chunk.encoding == .grid;
-        // A uniform chunk that merges into a grid borrows `grid_buffer`; restore
-        // this if the grid cannot be placed, or the chunk keeps a dead pointer.
+        // A uniform chunk that merges into a grid borrows `grid_buffer`. Restore
+        // this if no grid slot is free, or the chunk keeps a dead pointer.
         const old_encoding = chunk.encoding;
 
         chunk.encoding.merge(merge, &grid_buffer);
@@ -662,10 +653,7 @@ pub const Editor = struct {
         chunk_pos: ChunkPos,
         err_store: *ErrorStore,
     ) std.Io.Cancelable!void {
-        callback.function(io, allocator, chunk_pos, callback.context) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => |e| err_store.store(@intFromError(e), .seq_cst),
-        };
+        callback.function(io, allocator, chunk_pos, callback.context) catch |err| return storeTaskError(err_store, err);
     }
 
     fn editChunk(
@@ -680,21 +668,14 @@ pub const Editor = struct {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
 
-        const chunk = self.world.loadChunk(io, allocator, chunk_pos, false) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return err_store.store(@intFromError(err), .seq_cst),
-        };
+        const chunk = self.world.loadChunk(io, allocator, chunk_pos, false) catch |err| return storeTaskError(err_store, err);
         defer chunk.release();
 
-        sides_changed.* = mergeChunk(self.world, io, chunk_pos, chunk, encoding) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return err_store.store(@intFromError(err), .seq_cst),
-        };
+        sides_changed.* = mergeChunk(self.world, io, chunk_pos, chunk, encoding) catch |err| return storeTaskError(err_store, err);
     }
 
-    /// Fans the freshly edited chunks out to their parents, coalescing the
-    /// siblings that share one parent so each parent is merged and remeshed
-    /// once instead of once per edited child.
+    /// Propagates the edited chunks to their parents. Siblings that share one
+    /// parent go in one group, so each parent merges and remeshes once.
     fn propagateEditedGroups(
         self: *const Editor,
         io: std.Io,
@@ -702,7 +683,6 @@ pub const Editor = struct {
         group: *std.Io.Group,
         err_store: *ErrorStore,
     ) !void {
-        // Group edited children by parent so siblings merge and remesh once.
         var by_parent: std.AutoHashMap(ChunkPos, std.ArrayList(ChunkPos)) = .init(self.temp_allocator);
         defer {
             var vals = by_parent.valueIterator();
@@ -721,13 +701,12 @@ pub const Editor = struct {
         while (group_it.next()) |entry| {
             group.async(io, propagateLodGroup, .{ self, io, allocator, entry.value_ptr.items, err_store });
         }
-        try group.await(io);
-        if (err_store.raw != 0) return @errorFromInt(err_store.raw);
+        try awaitTasks(group, io, err_store);
     }
 
     /// Climbs the LOD chain for one parent group, merging and flushing each
-    /// level once. Stops as soon as a level stops modifying its parent, or at
-    /// max_propagate_level. The siblings slice is only read.
+    /// level once. Stops when a level does not change its parent, or at
+    /// max_propagate_level. It does not write to `siblings`.
     fn propagateLodGroup(
         self: *const Editor,
         io: std.Io,
@@ -749,27 +728,17 @@ pub const Editor = struct {
         // corner into a single editor and merges the parent exactly once.
         var current: []const ChunkPos = siblings;
         var parent_pos: ChunkPos = undefined;
-        var level = current[0].level;
-        while (level < max_propagate_level) {
+        while (current[0].level < max_propagate_level) {
             var any_changed = false;
             for (current) |pos| {
-                const changed = propagation_editor.propagateToParent(io, allocator, pos) catch |err| switch (err) {
-                    error.Canceled => return error.Canceled,
-                    else => return err_store.store(@intFromError(err), .seq_cst),
-                };
-                if (changed) any_changed = true;
+                if (propagation_editor.propagateToParent(io, allocator, pos) catch |err| return storeTaskError(err_store, err)) any_changed = true;
             }
-            // No child touched the parent, so the parent is unchanged and the
-            // chain above it cannot change either.
+            // No child changed the parent, so the chain above it cannot change either.
             if (!any_changed) break;
 
             parent_pos = current[0].parent();
-            propagation_editor.flush(io, allocator) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                else => return err_store.store(@intFromError(err), .seq_cst),
-            };
+            propagation_editor.flush(io, allocator) catch |err| return storeTaskError(err_store, err);
             current = (&parent_pos)[0..1];
-            level += 1;
         }
     }
 };
@@ -792,9 +761,7 @@ fn fetchChunk(self: *World, io: std.Io, chunk_pos: ChunkPos) !?*Chunk {
 }
 
 fn canEvict(chunk: *Chunk, io: std.Io) bool {
-    if (chunk.ref_count.load(.seq_cst) != 1) return false;
-    if (!chunk.encoding_lock.tryLockShared(io)) return false;
-    return true;
+    return chunk.ref_count.load(.seq_cst) == 1 and chunk.encoding_lock.tryLockShared(io);
 }
 
 fn putChunk(
@@ -802,7 +769,7 @@ fn putChunk(
     io: std.Io,
     chunk: Chunk,
     chunk_pos: ChunkPos,
-) !union(enum) { existing: *Chunk, inserted: *Chunk } {
+) !*Chunk {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     std.debug.assert(chunk.ref_count.raw == 2);
@@ -817,14 +784,14 @@ fn putChunk(
 
         if (shard.get(chunk_pos)) |cv| {
             cv.chunk.addRef();
-            return .{ .existing = &cv.chunk };
+            return &cv.chunk;
         }
 
-        if (shard.peek_victim(chunk_pos)) |victim| {
+        if (shard.peekVictim(chunk_pos)) |victim| {
             if (!canEvict(&victim.chunk, io)) {
                 if (skips >= max_victim_skips) return error.Unrecoverable;
                 skips += 1;
-                shard.skip_victim(chunk_pos);
+                shard.skipVictim(chunk_pos);
                 continue;
             }
             defer victim.chunk.encoding_lock.unlockShared(io);
@@ -844,7 +811,7 @@ fn putChunk(
     };
     defer chunk_ptr.encoding_lock.unlock(io);
     if (grid_slot) |slot| fillGrid(chunk_ptr, slot);
-    return .{ .inserted = chunk_ptr };
+    return chunk_ptr;
 }
 
 fn freeGrid(self: *World, io: std.Io, chunk_pos: ChunkPos) void {
@@ -859,7 +826,7 @@ fn fillGrid(chunk_ptr: *Chunk, slot: *GridValue) void {
 }
 
 /// Claims a grid-cache slot for a grid chunk, evicting a victim if needed, and
-/// returns it for `fillGrid`; returns null for a uniform chunk.
+/// returns it for `fillGrid`. Returns null for a uniform chunk.
 fn claimGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, chunks_shard: anytype) error{Unrecoverable}!?*GridValue {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -874,12 +841,12 @@ fn claimGrid(self: *World, io: std.Io, chunk_ptr: *Chunk, chunk_pos: ChunkPos, c
     defer lock.unlock(io);
 
     var skips: usize = 0;
-    while (grid_shard.peek_victim(chunk_pos)) |victim| {
+    while (grid_shard.peekVictim(chunk_pos)) |victim| {
         std.debug.assert(victim.chunk != chunk_ptr);
         if (!canEvict(victim.chunk, io)) {
             if (skips >= max_victim_skips) return error.Unrecoverable;
             skips += 1;
-            grid_shard.skip_victim(chunk_pos);
+            grid_shard.skipVictim(chunk_pos);
             continue;
         }
         // Release the encoding lock before `remove` poisons the owning value.
@@ -942,7 +909,7 @@ fn tryGenStructures(
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
-    // Two loaders may both place; the flag is set only after placement so no loader sees it early.
+    // Two loaders can both place structures. Set the flag only after placement, so no loader sees it early.
     if (chunk.structures_generated.load(.seq_cst)) return;
     try runPlaceStructures(self, io, allocator, chunk, chunk_pos);
     chunk.structures_generated.store(true, .seq_cst);
@@ -1004,35 +971,25 @@ pub fn makeTestingWorld(
     }
     generator.* = gen;
 
-    const chunk_count = @max(std.mem.alignForward(usize, chunks, 256), 256);
-    const grid_count = @max(std.mem.alignForward(usize, grids, 256), 256);
+    try initTestingCaches(world, allocator, grids, chunks);
+    world.chunk_sources = .{ generator.getSource(), null, null, null };
+}
 
-    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, .{}, 1).init(
-        allocator,
-        chunk_count,
-        .{ .name = "test chunk cache" },
-    );
-    errdefer {
-        var c = chunk_cache;
-        c.deinit(allocator);
-    }
-
-    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, 1).init(
-        allocator,
-        grid_count,
-        .{ .name = "test grid cache" },
-    );
-    errdefer {
-        var g = grid_cache;
-        g.deinit(allocator);
-    }
+/// Sets `world` to empty caches with room for at least `grids` grids and `chunks` chunks. The chunk sources stay undefined.
+fn initTestingCaches(world: *World, allocator: std.mem.Allocator, grids: usize, chunks: usize) !void {
+    var chunk_cache: ChunkMapType = try .init(allocator, testingCacheCount(chunks));
+    errdefer chunk_cache.deinit(allocator);
 
     world.* = .{
         .chunks = chunk_cache,
-        .grids = grid_cache,
+        .grids = try .init(allocator, testingCacheCount(grids)),
         .config = .{},
-        .chunk_sources = .{ generator.getSource(), null, null, null },
+        .chunk_sources = undefined,
     };
+}
+
+fn testingCacheCount(count: usize) usize {
+    return @max(std.mem.alignForward(usize, count, 256), 256);
 }
 
 fn testLoadChunkAllocation(allocator: std.mem.Allocator, io: std.Io) !void {
@@ -1093,38 +1050,10 @@ test "fuzz world" {
     defer _ = dba.deinitLog(false);
     const allocator = dba.allocator();
 
-    var threaded: std.Io.Threaded = .init(dba.allocator(), .{});
-    const chunk_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
-    const grid_count = @max(std.mem.alignForward(usize, 1000, 256), 256);
-
-    const chunk_cache = try Cache(ChunkPos, ChunkValue, ChunkValue.keyFromValue, chunkPosHash, .{}, 1).init(
-        allocator,
-        chunk_count,
-        .{ .name = "test chunk cache" },
-    );
-    errdefer {
-        var c = chunk_cache;
-        c.deinit(allocator);
-    }
-
-    const grid_cache = try Cache(ChunkPos, GridValue, GridValue.keyFromValue, chunkPosHash, .{}, 1).init(
-        allocator,
-        grid_count,
-        .{ .name = "test grid cache" },
-    );
-    errdefer {
-        var g = grid_cache;
-        g.deinit(allocator);
-    }
-
-    world = .{
-        .chunks = chunk_cache,
-        .grids = grid_cache,
-        .config = .{},
-        .chunk_sources = undefined,
-    };
-    defer world.deinit(threaded.io(), dba.allocator());
-    try std.testing.fuzz(Context{ .io = threaded.io(), .allocator = dba.allocator(), .world = &world }, fuzzChunkLoad, .{});
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    try initTestingCaches(&world, allocator, 1000, 1000);
+    defer world.deinit(threaded.io(), allocator);
+    try std.testing.fuzz(Context{ .io = threaded.io(), .allocator = allocator, .world = &world }, fuzzChunkLoad, .{});
 }
 
 const Context = struct {

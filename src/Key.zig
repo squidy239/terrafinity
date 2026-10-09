@@ -46,5 +46,9 @@ pub const single_press: ActionSet = .initMany(&.{
     .hotbar_key_6, .hotbar_key_7, .hotbar_key_8,    .hotbar_key_9,
 });
 
-/// The action each button triggers. Read only on the loop thread; rebinding is a `put`.
+/// The action each button triggers. Only the loop thread reads it. To rebind a button, `put` a new action.
 pub const Map = std.enums.EnumMap(wio.Button, Action);
+
+test {
+    std.testing.refAllDecls(@This());
+}

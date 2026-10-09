@@ -17,7 +17,7 @@ pub const Position = @Vector(3, i32);
 
 /// Level `lowest_level + i` lives in `levels[i]`.
 lowest_level: i32,
-/// Half-size of every window per axis; a window spans `2 * half_extent + 1` chunks.
+/// Half-size of every window per axis. A window spans `2 * half_extent + 1` chunks.
 half_extent: @Vector(3, u32),
 levels: []Level,
 /// Backs every level's `cells`.
@@ -95,7 +95,7 @@ pub const Region = struct {
         return if (low > high) empty_span else .{ low, high };
     }
 
-    /// Inclusive, sorted, disjoint z intervals of the row at (`x`, `y`); unused ones are empty.
+    /// Inclusive, sorted, disjoint z intervals of the row at (`x`, `y`). Unused intervals are empty.
     fn rowSpans(region: Region, x: i64, y: i64) [2][2]i64 {
         const center: @Vector(3, i64) = @intCast(region.center);
         const dx = @abs(x - center[0]);

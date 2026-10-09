@@ -1,6 +1,7 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 
+/// Solid sphere with an integer-aligned bounding box.
 pub fn Sphere(comptime T: type) type {
     return struct {
         position: @Vector(3, T),
@@ -19,4 +20,8 @@ pub fn Sphere(comptime T: type) type {
             return utils.dot(diff, diff) <= self.radius * self.radius;
         }
     };
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

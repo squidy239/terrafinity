@@ -1,8 +1,8 @@
 const std = @import("std");
-const mem = std.mem;
 const SetAssociativeCache = @import("SetAssociativeCache.zig");
 
-/// Each Key is associated with a set of n consecutive ways (or slots) that may contain the Value.
+/// A set-associative cache split into `fragments` shards, each with its own lock.
+/// The hash of a key selects the shard.
 pub fn Cache(
     comptime Key: type,
     comptime Value: type,
@@ -18,31 +18,26 @@ pub fn Cache(
         shards: [fragments]Shard,
         shard_locks: [fragments]std.Io.Mutex,
 
-        pub fn init(allocator: mem.Allocator, value_count_max: u64, options: Shard.Options) !Self {
+        pub fn init(allocator: std.mem.Allocator, value_count_max: u64) !Self {
             var self: Self = .{
                 .shards = undefined,
                 .shard_locks = @splat(.init),
             };
             var initialized_count: usize = 0;
-            errdefer {
-                while (initialized_count > 0) {
-                    initialized_count -= 1;
-                    self.shards[initialized_count].deinit(allocator);
-                }
-            }
+            errdefer for (self.shards[0..initialized_count]) |*shard| shard.deinit(allocator);
             for (&self.shards) |*shard| {
-                shard.* = try .init(allocator, value_count_max / fragments, options);
+                shard.* = try .init(allocator, value_count_max / fragments);
                 initialized_count += 1;
             }
             return self;
         }
 
-        pub fn deinit(self: *Self, allocator: mem.Allocator) void {
-            for (&self.shards) |*shard| {
-                shard.*.deinit(allocator);
-            }
+        /// Frees the memory of all shards.
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            for (&self.shards) |*shard| shard.deinit(allocator);
         }
 
+        /// Returns a copy of the value for `key`, or null when the cache does not hold it.
         pub fn get(self: *Self, io: std.Io, key: Key) ?Value {
             const shard, const lock = self.getShardAndLock(key);
             lock.lockUncancelable(io);
@@ -50,6 +45,7 @@ pub fn Cache(
             return if (shard.get(key)) |v| v.* else null;
         }
 
+        /// Removes `key` and returns its value, or null when the cache does not hold it.
         pub fn remove(self: *Self, io: std.Io, key: Key) ?Value {
             const shard, const lock = self.getShardAndLock(key);
             lock.lockUncancelable(io);
@@ -57,37 +53,34 @@ pub fn Cache(
             return shard.remove(key);
         }
 
+        /// Returns the shard that holds `key` and the lock that guards that shard.
         pub fn getShardAndLock(self: *Self, key: Key) struct { *Shard, *std.Io.Mutex } {
             const shard_index = hash(key) % fragments;
-            const shard = &self.shards[shard_index];
-            const lock = &self.shard_locks[shard_index];
-            return .{ shard, lock };
+            return .{ &self.shards[shard_index], &self.shard_locks[shard_index] };
         }
 
+        /// Returns the number of values in all shards.
         pub fn count(self: *const Self) u64 {
-            var total: u64 = 0;
-            for (&self.shards) |*shard| {
-                total += shard.metrics.value_count.load(.acquire);
-            }
-            return total;
+            return self.sumMetric("value_count");
         }
 
+        /// Returns the number of `get` calls on all shards that found their key.
         pub fn hits(self: *const Self) u64 {
-            var total: u64 = 0;
-            for (&self.shards) |*shard| {
-                total += shard.metrics.hits.load(.acquire);
-            }
-            return total;
+            return self.sumMetric("hits");
         }
 
+        /// Returns the number of `get` calls on all shards that did not find their key.
         pub fn misses(self: *const Self) u64 {
+            return self.sumMetric("misses");
+        }
+
+        fn sumMetric(self: *const Self, comptime name: []const u8) u64 {
             var total: u64 = 0;
-            for (&self.shards) |*shard| {
-                total += shard.metrics.misses.load(.acquire);
-            }
+            for (&self.shards) |*shard| total += @field(shard.metrics, name).load(.acquire);
             return total;
         }
 
+        /// Inserts or replaces the value and returns the value that it evicts.
         pub fn upsert(self: *Self, io: std.Io, value: *const Value) Shard.Upserted {
             const shard, const lock = self.getShardAndLock(key_from_value(value));
             lock.lockUncancelable(io);
@@ -95,4 +88,8 @@ pub fn Cache(
             return shard.upsert(value);
         }
     };
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

@@ -28,7 +28,7 @@ completions: Completions = .{},
 /// Active chunks outside the keep set, waiting until something covers them.
 lingering: std.ArrayList(World.ChunkPos) = .empty,
 /// Meshes of chunks evicted from their window before anything covered them.
-/// They have no cell; `unloadDetached` drops them once an ancestor shows the area.
+/// They have no cell. `unloadDetached` drops them once an ancestor shows the area.
 detached: std.AutoHashMapUnmanaged(World.ChunkPos, void) = .empty,
 /// Positions with a load task in flight. It survives eviction, so a chunk that leaves
 /// and re-enters its window never gets a second load while the first runs, and every
@@ -49,7 +49,7 @@ const Current = struct {
     }
 };
 
-/// Widens a (horizontal, vertical) radius to xyz; z reuses the horizontal radius.
+/// Widens a (horizontal, vertical) radius to xyz. z reuses the horizontal radius.
 fn horizontal(v: @Vector(2, u32)) @Vector(3, u32) {
     return .{ v[0], v[1], v[0] };
 }
@@ -106,7 +106,7 @@ pub const Completion = struct {
     meshed: bool,
 };
 
-/// Hands task results to the streamer. Any thread may push; only the pass takes.
+/// Hands task results to the streamer. Any thread may push. Only the pass takes.
 pub const Completions = struct {
     mutex: std.Io.Mutex = .init,
     list: std.ArrayList(Completion) = .empty,
@@ -260,11 +260,11 @@ fn recenter(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, player
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "ChunkStreamer.recenter" });
     defer zone.end();
 
+    var visitor: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = undefined };
     for (clipmap.levels, 0..) |*lvl, index| {
-        const level_index = clipmap.levelIndex(index);
-        const new_window = clipmap.window(ChunkClipmap.centerFor(player_block, level_index));
-        const evict: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = level_index };
-        try clipmap.window(lvl.center).forEachDifference(new_window, evict, @TypeOf(evict).evict);
+        visitor.level = clipmap.levelIndex(index);
+        const new_window = clipmap.window(ChunkClipmap.centerFor(player_block, visitor.level));
+        try clipmap.window(lvl.center).forEachDifference(new_window, visitor, @TypeOf(visitor).evict);
     }
 
     for (clipmap.levels, 0..) |*lvl, index| {
@@ -272,7 +272,7 @@ fn recenter(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, player
         const old_keep = current.settings.keepRegion(level_index, lvl.center);
         lvl.center = ChunkClipmap.centerFor(player_block, level_index);
         const new_keep = current.settings.keepRegion(level_index, lvl.center);
-        const visitor: Visitor(@TypeOf(host)) = .{ .streamer = streamer, .io = io, .gpa = gpa, .host = host, .level = level_index };
+        visitor.level = level_index;
         try old_keep.forEachDifference(new_keep, visitor, @TypeOf(visitor).leave);
         try new_keep.forEachDifference(old_keep, visitor, @TypeOf(visitor).load);
     }
@@ -411,7 +411,7 @@ fn dispatchLoads(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, h
     const current = &streamer.current.?;
     defer streamer.loads.clearRetainingCapacity();
 
-    // Candidates can repeat; the total order makes repeats adjacent.
+    // Candidates can repeat. The total order makes repeats adjacent.
     std.mem.sort(World.ChunkPos, streamer.loads.items, &current.clipmap, loadsFirst);
     var unique: usize = 0;
     var previous: ?World.ChunkPos = null;
@@ -467,7 +467,7 @@ fn loadsFirst(clipmap: *const ChunkClipmap, a: World.ChunkPos, b: World.ChunkPos
 }
 
 fn ring(clipmap: *const ChunkClipmap, pos: World.ChunkPos) u32 {
-    return @reduce(.Max, @abs(pos.position - clipmap.levels[@intCast(pos.level - clipmap.lowest_level)].center));
+    return @reduce(.Max, @abs(pos.position - clipmap.levelAt(pos.level).?.center));
 }
 
 /// Removes lingering chunks that are covered again, keeping the rest for a later pass.
@@ -497,7 +497,8 @@ fn unloadLingering(streamer: *ChunkStreamer, io: std.Io, host: anytype) !void {
     }
 }
 
-/// Whether a lingering chunk's area is shown by something else: its children, or an active ancestor once the player is far enough that no refinement is pending.
+/// Whether something else shows a lingering chunk's area: its children, or an active ancestor.
+/// An ancestor counts only when the player is far enough that no refinement is pending.
 fn canUnload(streamer: *ChunkStreamer, pos: World.ChunkPos, state: ChunkClipmap.State) bool {
     // Detail levels never mark coverage, so they unload as soon as they leave the keep set.
     if (pos.level < 0) return true;
@@ -536,7 +537,7 @@ fn unloadDetached(streamer: *ChunkStreamer, io: std.Io, gpa: std.mem.Allocator, 
         const pos = pos_ptr.*;
         if (current.clipmap.get(pos)) |state| {
             if (streamer.loads_in_flight.contains(pos)) {
-                // The load replaces the mesh; if it is skipped instead, this flag removes it.
+                // The load replaces the mesh. If the task skips the load, this flag removes the mesh.
                 state.edited = true;
             } else {
                 streamer.markActive(pos, state);
@@ -607,6 +608,11 @@ fn fuzzSettings(smith: *std.testing.Smith) Settings {
     };
 }
 
+/// A random offset within `reach` on every axis.
+fn fuzzOffset(comptime T: type, smith: *std.testing.Smith, reach: T) @Vector(3, T) {
+    return .{ smith.valueRangeAtMost(T, -reach, reach), smith.valueRangeAtMost(T, -reach, reach), smith.valueRangeAtMost(T, -reach, reach) };
+}
+
 fn fuzzStreamer(_: void, smith: *std.testing.Smith) !void {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -623,9 +629,9 @@ fn fuzzStreamer(_: void, smith: *std.testing.Smith) !void {
     const unload_interval_ms = smith.valueRangeAtMost(u64, 0, 800);
     for (0..smith.valueRangeAtMost(u8, 1, 40)) |_| {
         switch (smith.value(enum { walk, fly, teleport, settings, finish, edit })) {
-            .walk => view.player_block += @as(World.BlockPos, .{ smith.valueRangeAtMost(i64, -40, 40), smith.valueRangeAtMost(i64, -40, 40), smith.valueRangeAtMost(i64, -40, 40) }),
+            .walk => view.player_block += fuzzOffset(i64, smith, 40),
             // Far enough to outrun the margin at the lowest levels, so evicted meshes detach.
-            .fly => view.player_block += @as(World.BlockPos, .{ smith.valueRangeAtMost(i64, -600, 600), smith.valueRangeAtMost(i64, -600, 600), smith.valueRangeAtMost(i64, -600, 600) }),
+            .fly => view.player_block += fuzzOffset(i64, smith, 600),
             .teleport => view.player_block = .{ smith.value(i16), smith.value(i16), smith.value(i16) },
             .settings => view.settings = fuzzSettings(smith),
             .finish => for (0..smith.value(u4)) |_| {
@@ -637,7 +643,7 @@ fn fuzzStreamer(_: void, smith: *std.testing.Smith) !void {
             .edit => if (streamer.current) |current| {
                 const lvl_index = smith.valueRangeAtMost(i32, current.clipmap.lowest_level, current.clipmap.highestLevel());
                 const center = current.clipmap.levelAt(lvl_index).?.center;
-                const pos: World.ChunkPos = .{ .level = lvl_index, .position = center + @as(ChunkClipmap.Position, .{ smith.valueRangeAtMost(i32, -3, 3), smith.valueRangeAtMost(i32, -3, 3), smith.valueRangeAtMost(i32, -3, 3) }) };
+                const pos: World.ChunkPos = .{ .level = lvl_index, .position = center + fuzzOffset(i32, smith, 3) };
                 if (view.keeps(pos)) {
                     try streamer.completions.reserve(io, gpa, 1);
                     host.finish(&streamer, .{ .pos = pos, .kind = .remesh }, true);

@@ -1,34 +1,44 @@
 const std = @import("std");
 
+/// A hash map split into `bucket_amount` buckets, each guarded by its own read-write lock.
 pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: type, comptime bucket_amount: u32) type {
     return struct {
-        const Map = @This();
-        pub const Bkt = Bucket(K, V, Context);
-        buckets: [bucket_amount]Bkt,
-
         const Self = @This();
+        /// One lock-guarded part of the map.
+        pub const Bucket = BucketType(K, V, Context);
 
+        buckets: [bucket_amount]Bucket,
+
+        /// An empty map.
+        pub const init: Self = .{ .buckets = @splat(.init) };
+
+        /// Returns a copy of the value for `key`, or null when the map does not hold it.
         pub fn get(self: *Self, io: std.Io, key: K) ?V {
             return self.getBucket(key).get(io, key);
         }
 
-        pub fn getBucket(self: *Self, key: K) *Bkt {
+        /// Returns the bucket that holds `key`. The caller locks it for compound operations.
+        pub fn getBucket(self: *Self, key: K) *Bucket {
             const hash_code = (Context{}).hash(key);
-            return &self.buckets[@mod(hash_code, bucket_amount)];
+            return &self.buckets[hash_code % bucket_amount];
         }
 
+        /// Removes `key` and returns its value, or null when the map does not hold it.
         pub fn fetchRemove(self: *Self, io: std.Io, key: K) ?V {
             return self.getBucket(key).fetchRemove(io, key);
         }
 
+        /// Inserts or replaces the value for `key`.
         pub fn put(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !void {
             try self.getBucket(key).put(io, allocator, key, value);
         }
 
+        /// Inserts or replaces the value for `key` and returns the replaced value.
         pub fn fetchPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
             return self.getBucket(key).fetchPut(io, allocator, key, value);
         }
 
+        /// Returns the number of entries in all buckets.
         pub fn count(self: *Self, io: std.Io) usize {
             var total_count: usize = 0;
             for (&self.buckets) |*bucket| {
@@ -39,82 +49,69 @@ pub fn ConcurrentHashMap(comptime K: type, comptime V: type, comptime Context: t
             return total_count;
         }
 
-        pub const init = blk: {
-            var bkts: [bucket_amount]Bucket(K, V, Context) = undefined;
-            for (&bkts) |*bkt| {
-                bkt.* = Bucket(K, V, Context).init();
-            }
-            break :blk @This(){ .buckets = bkts };
-        };
-
+        /// Frees the memory of all buckets.
         pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
-            for (&self.buckets) |*b| {
-                b.deinit(io, allocator);
-            }
+            for (&self.buckets) |*bucket| bucket.deinit(io, allocator);
         }
 
+        /// Visits each entry. It holds the shared lock of the current bucket until `deinit`.
         pub const Iterator = struct {
-            map: *Map,
-            bkt_index: usize = 0,
-            bkt_iter: ?Bkt.Map.Iterator = null,
+            map: *Self,
+            bucket_index: usize = 0,
+            bucket_iterator: ?Bucket.HashMap.Iterator = null,
 
-            pub fn next(it: *Iterator, io: std.Io) !?Bkt.Map.Entry {
+            /// Returns the next entry, or null after the last bucket.
+            pub fn next(it: *Iterator, io: std.Io) !?Bucket.HashMap.Entry {
                 while (true) {
-                    if (it.bkt_iter) |*iter| {
-                        if (iter.next()) |entry| {
-                            return entry;
-                        }
+                    if (it.bucket_iterator) |*bucket_iterator| {
+                        if (bucket_iterator.next()) |entry| return entry;
 
-                        it.map.buckets[it.bkt_index].lock.unlockShared(io);
-                        it.bkt_iter = null;
-                        it.bkt_index += 1;
+                        it.map.buckets[it.bucket_index].lock.unlockShared(io);
+                        it.bucket_iterator = null;
+                        it.bucket_index += 1;
                         continue;
                     }
 
-                    if (it.bkt_index >= it.map.buckets.len)
-                        return null;
+                    if (it.bucket_index >= it.map.buckets.len) return null;
 
-                    const bucket = &it.map.buckets[it.bkt_index];
+                    const bucket = &it.map.buckets[it.bucket_index];
                     try bucket.lock.lockShared(io);
-                    it.bkt_iter = bucket.hash_map.iterator();
+                    it.bucket_iterator = bucket.hash_map.iterator();
                 }
             }
 
+            /// Releases the lock of the current bucket.
             pub fn deinit(it: *Iterator, io: std.Io) void {
-                if (it.bkt_iter != null) it.map.buckets[it.bkt_index].lock.unlockShared(io);
+                if (it.bucket_iterator != null) it.map.buckets[it.bucket_index].lock.unlockShared(io);
                 it.* = undefined;
             }
         };
 
+        /// Returns an iterator that starts at the first bucket.
         pub fn iterator(self: *Self) Iterator {
-            return .{
-                .map = self,
-            };
+            return .{ .map = self };
         }
     };
 }
 
-fn Bucket(comptime K: type, comptime V: type, comptime Context: type) type {
+fn BucketType(comptime K: type, comptime V: type, comptime Context: type) type {
     return struct {
         const Self = @This();
-        const Map = std.HashMapUnmanaged(K, V, Context, 80);
+        const HashMap = std.HashMapUnmanaged(K, V, Context, 80);
 
-        hash_map: Map,
+        hash_map: HashMap,
         lock: std.Io.RwLock,
 
-        pub fn init() Self {
-            return .{
-                .hash_map = .empty,
-                .lock = .init,
-            };
-        }
+        const init: Self = .{ .hash_map = .empty, .lock = .init };
 
+        /// Returns a copy of the value for `key` under the shared lock.
         pub fn get(self: *Self, io: std.Io, key: K) ?V {
             self.lock.lockSharedUncancelable(io);
             defer self.lock.unlockShared(io);
             return self.hash_map.get(key);
         }
 
+        /// Removes `key` and returns its value under the exclusive lock.
         pub fn fetchRemove(self: *Self, io: std.Io, key: K) ?V {
             self.lock.lockUncancelable(io);
             defer self.lock.unlock(io);
@@ -122,19 +119,21 @@ fn Bucket(comptime K: type, comptime V: type, comptime Context: type) type {
             return kv.value;
         }
 
+        /// Inserts or replaces the value for `key` and returns the replaced value.
         pub fn fetchPut(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !?V {
             self.lock.lockUncancelable(io);
             defer self.lock.unlock(io);
-            const kv = try self.hash_map.fetchPut(allocator, key, value);
-            return if (kv) |kv_val| kv_val.value else null;
+            return if (try self.hash_map.fetchPut(allocator, key, value)) |kv| kv.value else null;
         }
 
+        /// Inserts or replaces the value for `key` under the exclusive lock.
         pub fn put(self: *Self, io: std.Io, allocator: std.mem.Allocator, key: K, value: V) !void {
             self.lock.lockUncancelable(io);
             defer self.lock.unlock(io);
             try self.hash_map.put(allocator, key, value);
         }
 
+        /// Frees the memory of the bucket.
         pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
             self.lock.lockUncancelable(io);
             defer self.lock.unlock(io);
@@ -163,15 +162,19 @@ test "ConcurrentHashMap basic" {
 test "ConcurrentHashMap allocation failure" {
     const io = std.testing.io;
     const test_fn = struct {
-        fn run(allocator: std.mem.Allocator, _io: std.Io) !void {
+        fn run(allocator: std.mem.Allocator, test_io: std.Io) !void {
             var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 4).init;
-            defer map.deinit(_io, allocator);
-            try map.put(_io, allocator, 1, 10);
-            try map.put(_io, allocator, 2, 20);
-            _ = map.get(_io, 1);
-            _ = map.fetchRemove(_io, 2);
+            defer map.deinit(test_io, allocator);
+            try map.put(test_io, allocator, 1, 10);
+            try map.put(test_io, allocator, 2, 20);
+            _ = map.get(test_io, 1);
+            _ = map.fetchRemove(test_io, 2);
         }
     }.run;
 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, test_fn, .{io});
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

@@ -158,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
         vk_ctx.dev.freeCommandBuffers(vk_ctx.ui_command_pool, &ui_cmd_buffers);
     }
 
-    // Null once the automatic screenshot is requested.
+    // Null after the loop requests the automatic screenshot.
     var screenshot_after = options.screenshot_after;
     var exit_on_screenshot = false;
 
@@ -210,13 +210,13 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
-            try recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction, &swapchain_recreate_failures);
+            try recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options, &swapchain_recreate_failures);
             continue;
         }
 
         const frame_ctx = vk_ctx.beginFrame() catch |err| switch (err) {
             error.OutOfDate => {
-                try recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options.present_mode, config.game_config.render_options.gamma_correction, &swapchain_recreate_failures);
+                try recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options, &swapchain_recreate_failures);
                 continue;
             },
             error.SurfaceLost => {
@@ -264,18 +264,12 @@ pub fn main(init: std.process.Init) !void {
                 .p_values = (&current_frame_val)[0..1],
             };
             // The save reads the host-coherent staging buffer, so the frame's GPU work must
-            // finish first; a failed wait leaves undefined contents that must not be written.
-            const frame_ready = blk: {
-                _ = vk_ctx.dev.waitSemaphores(&wait_info, std.math.maxInt(u64)) catch |err| {
-                    std.log.err("Failed to wait for screenshot frame: {any}", .{err});
-                    break :blk false;
-                };
-                break :blk true;
-            };
-
-            if (!frame_ready) {
-                vk_ctx.screenshot_pending_save = false;
-            } else if (vk_ctx.savePendingScreenshot(io, gpa)) |saved_path| {
+            // finish first. After a failed wait the contents are undefined, so do not write them.
+            const saved = if (vk_ctx.dev.waitSemaphores(&wait_info, std.math.maxInt(u64))) |_|
+                vk_ctx.savePendingScreenshot(io, gpa)
+            else |err|
+                err;
+            if (saved) |saved_path| {
                 std.log.info("Screenshot saved: {s}", .{saved_path});
                 if (exit_on_screenshot) {
                     std.log.info("Auto screenshot completed, exiting", .{});
@@ -404,11 +398,10 @@ fn recreateSwapchainOrFail(
     vk_ctx: *VulkanContext,
     ui: *Ui,
     game: *Game,
-    present_mode: VulkanContext.PresentMode,
-    gamma_correction: bool,
+    render_options: Renderer.RenderOptions,
     consecutive_failures: *u32,
 ) !void {
-    recreateSwapchainForMenuOrGame(io, vk_ctx, ui, game, present_mode, gamma_correction) catch |err| {
+    recreateSwapchainForMenuOrGame(io, vk_ctx, ui, game, render_options) catch |err| {
         consecutive_failures.* += 1;
         if (consecutive_failures.* >= max_swapchain_recreate_failures) {
             std.log.err("swapchain recreation failed {d} consecutive times; last error: {}", .{ consecutive_failures.*, err });
@@ -420,17 +413,17 @@ fn recreateSwapchainOrFail(
     consecutive_failures.* = 0;
 }
 
-fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, present_mode: VulkanContext.PresentMode, gamma_correction: bool) !void {
+fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, render_options: Renderer.RenderOptions) !void {
     vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch |err| {
         std.log.err("queueWaitIdle failed during swapchain recreate: {}", .{err});
         return err;
     };
 
-    vk_ctx.present_mode = present_mode;
+    vk_ctx.present_mode = render_options.present_mode;
     if (ui.menu_state.ingame) {
         try game.renderer.recreateSwapchain(io);
     } else {
-        try vk_ctx.createSwapchainLocked(io, gamma_correction);
+        try vk_ctx.createSwapchainLocked(io, render_options.gamma_correction);
     }
     vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
 }

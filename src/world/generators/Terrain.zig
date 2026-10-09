@@ -23,7 +23,7 @@ pub const DefaultGenerator = struct {
     const sample_step = 1.0 / @as(comptime_float, ChunkSize);
     const FloatV = @Vector(ChunkSize, f32);
 
-    /// Sampling density for noise interpolators; coarser densities evaluate on a border-shared lattice and interpolate up.
+    /// Sampling density for noise interpolators. Coarser densities evaluate on a border-shared lattice and interpolate up.
     pub const InterpResolution = enum {
         full,
         half,
@@ -104,7 +104,7 @@ pub const DefaultGenerator = struct {
         const terrain_height_cache_size = @max(std.math.floorPowerOfTwo(u64, max_cache_bytes / @sizeOf(ChunkHeightsValue)), 256 * thc_fragments);
         std.log.info("Creating terrain height cache with size {d} ({d} bytes)", .{ terrain_height_cache_size, terrain_height_cache_size * @sizeOf(ChunkHeightsValue) });
         return DefaultGenerator{
-            .terrain_height_cache = try .init(allocator, terrain_height_cache_size, .{ .name = "terrain_height_cache" }),
+            .terrain_height_cache = try .init(allocator, terrain_height_cache_size),
             .params = params,
             .seed = seed,
         };
@@ -138,14 +138,14 @@ pub const DefaultGenerator = struct {
     }
 
     pub const Params = struct {
-        /// The host fills a null seed before create; every noise seed derives from it.
+        /// The host fills a null seed before create. Every noise seed derives from it.
         seed: ?u64 = null,
         terrain_scale: f32 = 1,
         terrain_block_randomness: f32 = 0.25,
         slope_randomness: f32 = 0.15,
         ground_threshold: f32 = 0.3,
         dirt_band: f32 = 0.2,
-        /// Deprecated: replaced by the erosion filter; kept with .skip so saved configs still parse.
+        /// Deprecated: the erosion filter replaces it. It stays with .skip so saved configs still parse.
         erosion_strength: f32 = 0.2,
         /// Applies the Phacelle erosion filter to the shaped height field.
         erosion_enabled: bool = true,
@@ -157,7 +157,7 @@ pub const DefaultGenerator = struct {
         erosion_gully_weight: f32 = 0.057686467,
         /// Exponent restricting fine gullies to slopes the coarse octaves carved.
         erosion_detail: f32 = 1.0999031,
-        /// Number of gully octaves; coarse LODs drop the finest ones.
+        /// Number of gully octaves. Coarse LODs drop the finest ones.
         erosion_octaves: u32 = 5,
         /// Frequency step between gully octaves.
         erosion_lacunarity: f32 = 2.0,
@@ -165,23 +165,23 @@ pub const DefaultGenerator = struct {
         erosion_gain: f32 = 0.43301594,
         /// Phacelle cell size relative to the stripe width.
         erosion_cell_scale: f32 = 1.0069951,
-        /// Ridge crispness; 1.0 can create loop artefacts where ridges meet.
+        /// Ridge crispness. 1.0 can create loop artefacts where ridges meet.
         erosion_normalization: f32 = 0.50142545,
         /// Fade-in width of the erosion mask on ridge crests.
         erosion_ridge_rounding: f32 = 1.0,
-        /// Fade-in width of the erosion mask in creases; 0 cuts in instantly.
+        /// Fade-in width of the erosion mask in creases. 0 cuts in instantly.
         erosion_crease_rounding: f32 = 1.0,
         /// Slope magnitude substituted for the terrain gradient.
         erosion_assumed_slope: f32 = 0.0,
         /// How much of the gradient magnitude `erosion_assumed_slope` replaces.
         erosion_assumed_slope_amount: f32 = 0.0,
-        /// Slope for full gullies; flatter ground fades out so peaks and stream beds survive. Zero disables the fade.
+        /// Slope for full gullies. Flatter ground fades out so peaks and stream beds survive. Zero disables the fade.
         erosion_fade_slope: f32 = 0.093972616,
         /// Deprecated: kept so saved configs that set it still parse. Skipped in the config tree.
         erosion_fade_altitude: f32 = 0.5,
-        /// Sampling density of the erosion delta lattice; coarse runs the filter on decimated inputs and interpolates up.
+        /// Sampling density of the erosion delta lattice. Coarse densities run the filter on decimated inputs and interpolate up.
         erosion_interp: InterpResolution = .full,
-        /// High-frequency noise applied after erosion; its amount follows the pre-erosion gradient so detail collects on slopes.
+        /// High-frequency noise applied after erosion. Its amount follows the pre-erosion gradient so detail collects on slopes.
         surface_noise: Noise.Noise(f32) = .{
             .frequency = 0.04,
             .noise_type = .simplex,
@@ -214,7 +214,7 @@ pub const DefaultGenerator = struct {
         snow_line: f32 = 0.6,
         beach_band: f32 = 6,
         sand_slope: f32 = 0.3,
-        /// Beach elevation lost per unit slope; steep shores get narrower beaches and cliffs meet water with stone.
+        /// Beach elevation lost per unit slope. Steep shores get narrower beaches and cliffs meet water with stone.
         sand_slope_falloff: f32 = 10,
         /// Slope above which the underwater floor is stone instead of sand.
         sea_floor_rock_slope: f32 = 0.6,
@@ -230,7 +230,7 @@ pub const DefaultGenerator = struct {
         grass_detail_gradient_source: GrassDetailGradient = .parent,
         /// Slope keeping full grass-blade hash height, fading to nothing on flat ground. Zero disables the fade.
         grass_detail_slope_scale: f32 = 0.5,
-        /// Sampling density of the grass slope lattice; coarser is faster
+        /// Sampling density of the grass slope lattice. Coarser is faster
         /// and smoother. Full disables interpolation.
         grass_detail_gradient_interp: InterpResolution = .quarter,
         /// How much the snow line rises per unit slope. Steep faces need more
@@ -288,10 +288,10 @@ pub const DefaultGenerator = struct {
             .domain_warp_type = .simplex,
             .domain_warp_amp = 400,
         },
-        /// Sampling density of the mountain (ridged) noise; warp and noise
+        /// Sampling density of the mountain (ridged) noise. Warp and noise
         /// share the coarse lattice. Full disables interpolation.
         terrain_interp: InterpResolution = .full,
-        /// Sampling density of the continental noise; the large warp follows
+        /// Sampling density of the continental noise. The large warp follows
         /// this setting on the same lattice. Full disables interpolation.
         large_terrain_interp: InterpResolution = .full,
         cave_noise: Noise.Noise(f32) = .{
@@ -335,17 +335,17 @@ pub const DefaultGenerator = struct {
 
         /// Mixes the world seed into every noise seed, so configured noise seeds still vary the result.
         pub fn setSeeds(self: *Params, seed: u64) void {
-            // Salts differentiate the noise streams; the large warp shares salt 4 with the large height noise.
+            // Salts differentiate the noise streams. The large warp shares salt 4 with the large height noise.
             const noise_salts = .{ 1, 3, 4, 4, 6 };
             inline for (.{ &self.cave_noise, &self.terrain_noise, &self.large_terrain_noise, &self.large_terrain_noise_warp, &self.surface_noise }, noise_salts) |noise, salt| {
                 noise.seed ^= @bitCast(std.hash.Murmur2_32.hashUint64(seed +% salt));
             }
         }
 
-        /// Default parameters; declaration defaults let older configs missing new fields still parse.
+        /// Default parameters. Declaration defaults let older configs missing new fields still parse.
         pub const default = Params{};
 
-        /// ErosionParams for the given LOD; coarser levels drop finest octaves whose wavelength falls below their spacing.
+        /// ErosionParams for the given LOD. Coarser levels drop finest octaves whose wavelength falls below their spacing.
         fn erosionFilterParams(self: *const Params, level: i32) erosion.ErosionParams {
             if (self.erosion_detail <= 0) std.log.warn("erosion: detail {d} <= 0; clamping", .{self.erosion_detail});
             const drop: u32 = @intCast(@max(level, 0));
@@ -371,7 +371,7 @@ pub const DefaultGenerator = struct {
         placer: JitteredGrid(2, i32) = .{},
         enabled: bool = true,
         size_variation: f32 = 0.5,
-        /// Hidden from the config tree (unreflectable); stays at the defaults.
+        /// Hidden from the config tree (unreflectable), so it stays at the defaults.
         tree: Tree.Config = .small,
     };
 
@@ -395,7 +395,7 @@ pub const DefaultGenerator = struct {
             blocks.merge(.{ .uniform = .air }, grid_buffer);
             return;
         }
-        // generateTerrain overwrites every voxel; Debug prefills .null so partial writes trip the assert below.
+        // generateTerrain overwrites every voxel. Debug prefills .null so partial writes trip the assert below.
         var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
         if (builtin.mode == .debug) block_grid = @splat(@splat(@splat(.null)));
         if (chunk_pos.position[1] < ChunkPos.fromGlobalBlockPos(.{ 0, min_global_y, 0 }, chunk_pos.level).position[1]) {
@@ -421,13 +421,12 @@ pub const DefaultGenerator = struct {
         }
         generateCavesInterpolate(&block_grid, chunk_pos, chunk_scale_factor, &self.params);
         if (chunk_pos.level == World.standard_level) try stampFineGrass(io, allocator, world, chunk_pos, &block_grid);
-        const one_block = Chunk.getUniform(&block_grid);
-        if (one_block) |block| {
+        if (Chunk.getUniform(&block_grid)) |block| {
             blocks.merge(.{ .uniform = block }, grid_buffer);
         } else blocks.merge(.{ .grid = &block_grid }, grid_buffer);
     }
 
-    /// Stamps air above grass/dirt with invisible fine_grass markers. The bottom row reads through the world so boundary-straddling surfaces are covered.
+    /// Stamps air above grass/dirt with invisible fine_grass markers. The bottom row reads through the world so it also covers surfaces that straddle the chunk boundary.
     fn stampFineGrass(io: std.Io, allocator: std.mem.Allocator, world: *World, chunk_pos: ChunkPos, block_grid: *[ChunkSize][ChunkSize][ChunkSize]Block) !void {
         var reader = World.Reader{ .world = world };
         defer reader.clear(io);
@@ -436,20 +435,15 @@ pub const DefaultGenerator = struct {
             for (plane, 0..) |*column, y| {
                 for (column, 0..) |*cell, z| {
                     if (cell.* != .air) continue;
-                    if (y > 0) {
-                        const below = block_grid[x][y - 1][z];
-                        if (below != .grass and below != .dirt) continue;
-                    } else {
-                        const below = try reader.getBlock(io, allocator, .{ base[0] + @as(i64, @intCast(x)), base[1] - 1, base[2] + @as(i64, @intCast(z)) }, World.standard_level);
-                        if (below != .grass and below != .dirt) continue;
-                    }
+                    const below = if (y > 0) block_grid[x][y - 1][z] else try reader.getBlock(io, allocator, .{ base[0] + @as(i64, @intCast(x)), base[1] - 1, base[2] + @as(i64, @intCast(z)) }, World.standard_level);
+                    if (below != .grass and below != .dirt) continue;
                     cell.* = .fine_grass;
                 }
             }
         }
     }
 
-    /// Grows alternating blades where level 0 stamped fine_grass. Every detail level reads level 0 directly so all LODs align; parent columns are read once and fanned out.
+    /// Grows alternating blades where level 0 stamped fine_grass. Every detail level reads level 0 directly so all LODs align. It reads each parent column once and fans it out.
     fn genDetailTest(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         if (chunk_pos.level >= World.standard_level or chunk_pos.level <= -60) return;
         // Integer math keeps the block mapping bit-exact where f64 would round.
@@ -463,7 +457,7 @@ pub const DefaultGenerator = struct {
         const slope_scale = self.params.grass_detail_slope_scale;
         const slope_interp = self.params.grass_detail_gradient_interp;
         var level_slopes = LevelSlopes{ .generator = self, .io = io, .interp = slope_interp };
-        // Hoisted so `fine` can point at it past the block below; left undefined (never read) when the branch is not taken.
+        // Hoisted so `fine` can point at it past the block below. It stays undefined (never read) when the branch is not taken.
         var fine_slopes: [ChunkSize][ChunkSize]f32 = undefined;
         const fine: ?*const [ChunkSize][ChunkSize]f32 = blk: {
             if (self.params.grass_detail_gradient_source != .fine) break :blk null;
@@ -477,7 +471,7 @@ pub const DefaultGenerator = struct {
     }
 
     /// Fans stamped level-0 columns out to fine voxels, scaling per-voxel from the fine grid when present,
-    /// then merges the result: air when nothing was stamped, else the detail grid.
+    /// then merges the result: air when no column has stamps, else the detail grid.
     fn fanBladeColumns(reader: *World.Reader, io: std.Io, allocator: std.mem.Allocator, batch: BladeBatch, block_min: World.BlockPos, block_max: World.BlockPos, fine: ?*const [ChunkSize][ChunkSize]f32, parent_slopes: *LevelSlopes, slope_scale: f32, blocks: *Chunk.Encoding, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) !void {
         var any_filled = false;
         var block_x = block_min[0];
@@ -499,18 +493,17 @@ pub const DefaultGenerator = struct {
         blocks.merge(.{ .grid = @alignCast(batch.detail_grid) }, grid_buffer);
     }
 
-    /// Slope grid at this chunk's own level; runs the height pipeline on the lattice and bypasses the height cache.
+    /// Slope grid at this chunk's own level. Full density reads the height cache. Coarser densities run the height pipeline on the lattice and bypass the cache.
     fn fineDetailSlopes(self: *DefaultGenerator, io: std.Io, chunk_pos: ChunkPos, interp: InterpResolution) ![ChunkSize][ChunkSize]f32 {
-        if (interp == .full) {
-            const heights = try self.getTerrainHeight(io, .{ chunk_pos.position[0], chunk_pos.position[2] }, chunk_pos.level);
-            return grassSlopes(&heights, interp);
-        }
-        var density_params = self.params;
-        density_params.terrain_interp = interp;
-        density_params.large_terrain_interp = interp;
-        density_params.surface_interp = interp;
-        density_params.erosion_interp = interp;
-        const heights = genTerrainHeight(&density_params, chunk_pos.level, .{ chunk_pos.position[0], chunk_pos.position[2] });
+        const column: [2]i32 = .{ chunk_pos.position[0], chunk_pos.position[2] };
+        const heights = if (interp == .full) try self.getTerrainHeight(io, column, chunk_pos.level) else blk: {
+            var density_params = self.params;
+            density_params.terrain_interp = interp;
+            density_params.large_terrain_interp = interp;
+            density_params.surface_interp = interp;
+            density_params.erosion_interp = interp;
+            break :blk genTerrainHeight(&density_params, chunk_pos.level, column);
+        };
         return grassSlopes(&heights, interp);
     }
 
@@ -528,7 +521,7 @@ pub const DefaultGenerator = struct {
         return layer_count;
     }
 
-    /// Lazily fetched level-0 slope grids; at most four overlap one detail chunk.
+    /// Level-0 slope grids, computed on first use. At most four grids overlap one detail chunk.
     const LevelSlopes = struct {
         generator: *DefaultGenerator,
         io: std.Io,
@@ -557,7 +550,7 @@ pub const DefaultGenerator = struct {
         }
     };
 
-    /// Blade height fraction kept on the given slope; flat grows nothing and non-positive scales disable the fade.
+    /// Blade height fraction kept on the given slope. Flat ground grows nothing and non-positive scales disable the fade.
     fn bladeHeightScale(slope: f32, slope_scale: f32) f32 {
         if (slope_scale <= 0) return 1;
         if (slope <= 0) return 0;
@@ -583,7 +576,7 @@ pub const DefaultGenerator = struct {
         scale: BladeScale,
     };
 
-    /// Fans one column's stamped layers to fine voxels; blades sit on alternating voxels at slope-scaled hash heights.
+    /// Fans one column's stamped layers to fine voxels. Blades sit on alternating voxels at slope-scaled hash heights.
     fn fillBlades(batch: BladeBatch, column: BladeColumn) bool {
         const fine_lo_x = @max(column.block_x * batch.fine_per_block, batch.base[0]);
         const fine_hi_x = @min(column.block_x * batch.fine_per_block + batch.fine_per_block - 1, batch.base[0] + ChunkSize - 1);
@@ -592,11 +585,11 @@ pub const DefaultGenerator = struct {
         var layer_los: [ChunkSize + 1]i64 = undefined;
         var layer_caps: [ChunkSize + 1]i64 = undefined;
         var layer_bases: [ChunkSize + 1]i64 = undefined;
-        for (column.layers, 0..) |layer_y, i| {
-            const layer_base = layer_y * batch.fine_per_block;
-            layer_bases[i] = layer_base;
-            layer_los[i] = @max(layer_base, batch.base[1]);
-            layer_caps[i] = @min(layer_base + batch.fine_per_block - 1, batch.base[1] + ChunkSize - 1);
+        const layer_count = column.layers.len;
+        for (column.layers, layer_bases[0..layer_count], layer_los[0..layer_count], layer_caps[0..layer_count]) |layer_y, *layer_base, *lo, *cap| {
+            layer_base.* = layer_y * batch.fine_per_block;
+            lo.* = @max(layer_base.*, batch.base[1]);
+            cap.* = @min(layer_base.* + batch.fine_per_block - 1, batch.base[1] + ChunkSize - 1);
         }
         var filled = false;
         var fine_x = fine_lo_x;
@@ -616,16 +609,12 @@ pub const DefaultGenerator = struct {
                 const scaled_f = @as(f32, @floatFromInt(height)) * scale;
                 if (!(scaled_f >= 1)) continue;
                 const scaled: i64 = @intFromFloat(scaled_f);
-                for (0..column.layers.len) |i| {
-                    const hi = @min(layer_caps[i], layer_bases[i] + scaled - 1);
-                    const lo = layer_los[i];
+                for (layer_bases[0..layer_count], layer_los[0..layer_count], layer_caps[0..layer_count]) |layer_base, lo, cap| {
+                    const hi = @min(cap, layer_base + scaled - 1);
                     if (hi < lo) continue;
                     const gy_lo: usize = @intCast(lo - batch.base[1]);
                     const gy_hi: usize = @intCast(hi - batch.base[1]);
-                    var gy = gy_lo;
-                    while (gy <= gy_hi) : (gy += 1) {
-                        batch.detail_grid[gx][gy][gz] = .grass;
-                    }
+                    for (batch.detail_grid[gx][gy_lo .. gy_hi + 1]) |*row| row[gz] = .grass;
                     filled = true;
                 }
             }
@@ -766,7 +755,7 @@ pub const DefaultGenerator = struct {
             .snow_slope_gain = ctx.params.snow_slope_gain,
             .snow_cliff_slope = ctx.params.snow_cliff_slope,
         };
-        // The differential feeds randGround directly; each column computes its row lazily on first surface hit.
+        // The differential feeds randGround directly. Each column computes its row lazily on first surface hit.
         for (heights, chunk_blocks, 0..) |heights_row, *col, x| {
             var differential_row: [ChunkSize]f32 = undefined;
             var differential_ready = false;
@@ -819,7 +808,7 @@ pub const DefaultGenerator = struct {
         }
     }
 
-    /// Cave noise on an HxVxH lattice interpolated to the full grid; full/full samples every voxel directly.
+    /// Cave noise on an HxVxH lattice interpolated to the full grid. Full/full samples every voxel directly.
     fn sampleCavesInterpolate(comptime H: usize, comptime V: usize, chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block, chunk_pos: ChunkPos, chunk_scale: f32, gen_params: *const Params) void {
         const float_pos: @Vector(3, f32) = .{ @floatFromInt(chunk_pos.position[0]), @floatFromInt(chunk_pos.position[1]), @floatFromInt(chunk_pos.position[2]) };
         const one_d_scale: f32 = 1.0 / (@max(gen_params.terrain_scale, 1e-6) * chunk_scale);
@@ -842,7 +831,7 @@ pub const DefaultGenerator = struct {
         carveCavesApply(chunk_blocks, float_pos, one_d_scale, gen_params, &cave_values);
     }
 
-    /// Coarse coordinates for mixed H/V lattices; X/Z fill once since only the Y row varies per slab.
+    /// Coarse coordinates for mixed H/V lattices. X/Z fill once since only the Y row varies per slab.
     fn sampleCaveGridMixed(comptime H: usize, comptime V: usize, grid_origin: @Vector(3, f32), one_d_scale: f32, gen_params: *const Params, grid_flat: *[H * V * H]f32) void {
         const x_spacing = one_d_scale / @as(f32, H - 1);
         const y_spacing = one_d_scale / @as(f32, V - 1);
@@ -929,9 +918,10 @@ pub const DefaultGenerator = struct {
     pub fn getTerrainHeight(self: *DefaultGenerator, io: std.Io, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]f32 {
         const gth = tracy.Zone.begin(.{ .src = @src() });
         defer gth.end();
-        if (self.terrain_height_cache.get(io, .{ .x = chunk_pos[0], .z = chunk_pos[1], .level = level })) |cached_height| return cached_height.value;
+        const key: ChunkHeightsKey = .{ .x = chunk_pos[0], .z = chunk_pos[1], .level = level };
+        if (self.terrain_height_cache.get(io, key)) |cached_height| return cached_height.value;
         const generated_heights = genTerrainHeight(&self.params, level, chunk_pos);
-        _ = self.terrain_height_cache.upsert(io, &.{ .key = .{ .x = chunk_pos[0], .z = chunk_pos[1], .level = level }, .value = generated_heights });
+        _ = self.terrain_height_cache.upsert(io, &.{ .key = key, .value = generated_heights });
         return generated_heights;
     }
 
@@ -953,38 +943,16 @@ pub const DefaultGenerator = struct {
         const warp_zone = tracy.Zone.begin(.{ .src = @src(), .name = "terrainWarp" });
         var terrain_noise_raw: [sample_count]f32 = undefined;
         var large_terrain_noise: [sample_count]f32 = undefined;
-        switch (params.terrain_interp) {
-            .full => {
-                var terrain_warped_x: [sample_count]f32 = undefined;
-                var terrain_warped_z: [sample_count]f32 = undefined;
-                params.terrain_noise.fillWarp2DGrid(&terrain_warped_x, &terrain_warped_z, &base_x, &base_z);
-                params.terrain_noise.fillNoise2DGrid(&terrain_noise_raw, &terrain_warped_x, &terrain_warped_z);
-            },
-            // Warp shares the noise lattice since warped coordinates are irregular.
-            inline else => |tag| sampleWarpNoiseCoarse(tag.size(), &params.terrain_noise, &params.terrain_noise, &ctx, &terrain_noise_raw),
-        }
-        switch (params.large_terrain_interp) {
-            .full => {
-                var large_warped_x: [sample_count]f32 = undefined;
-                var large_warped_z: [sample_count]f32 = undefined;
-                params.large_terrain_noise_warp.fillWarp2DGrid(&large_warped_x, &large_warped_z, &base_x, &base_z);
-                params.large_terrain_noise.fillNoise2DGrid(&large_terrain_noise, &large_warped_x, &large_warped_z);
-            },
-            inline else => |tag| sampleWarpNoiseCoarse(tag.size(), &params.large_terrain_noise_warp, &params.large_terrain_noise, &ctx, &large_terrain_noise),
-        }
+        sampleWarpNoise(params.terrain_interp, &params.terrain_noise, &params.terrain_noise, &ctx, &base_x, &base_z, &terrain_noise_raw);
+        sampleWarpNoise(params.large_terrain_interp, &params.large_terrain_noise_warp, &params.large_terrain_noise, &ctx, &base_x, &base_z, &large_terrain_noise);
         warp_zone.end();
 
         const heights_zone = tracy.Zone.begin(.{ .src = @src(), .name = "blockHeights" });
-        // The filter consumes the pre-envelope shaped value; the envelope applies after in the compose.
-        var shaped_center: [ChunkSize][ChunkSize]f32 = undefined;
-        for (0..ChunkSize) |x| {
-            const raw: FloatV = @as(FloatV, terrain_noise_raw[x * ChunkSize ..][0..ChunkSize].*);
-            const large = @as(FloatV, large_terrain_noise[x * ChunkSize ..][0..ChunkSize].*);
-            shaped_center[x] = shapedRow(ChunkSize, params, large, raw);
-        }
+        // The filter consumes the pre-envelope shaped value. The envelope applies after in the compose.
+        const shaped_center = shapedGrid(ChunkSize, params, &large_terrain_noise, &terrain_noise_raw);
         heights_zone.end();
 
-        // Central differences from world coordinates alone keep chunk borders seamless.
+        // Central differences use only world coordinates, so chunk borders stay continuous.
         var grad_x: [sample_count]f32 = @splat(0);
         var grad_z: [sample_count]f32 = @splat(0);
         if (erosion_on or (surface_on and params.surface_noise_gradient_influence > 0)) {
@@ -994,10 +962,8 @@ pub const DefaultGenerator = struct {
         var extra: [sample_count]f32 = @splat(0);
         if (surface_on) surfaceNorm(&ctx, &base_x, &base_z, &grad_x, &grad_z, &extra);
         if (erosion_on) applyErosion(&ctx, &base_x, &base_z, &grad_x, &grad_z, &shaped_center, &extra);
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |z| {
-                height[x][z] = composeErodedHeight(shaped_center[x][z], extra[x * ChunkSize + z], ctx.env);
-            }
+        for (&height, shaped_center, 0..) |*height_row, shaped_row, x| {
+            for (height_row, shaped_row, extra[x * ChunkSize ..][0..ChunkSize]) |*h, shaped, delta| h.* = composeErodedHeight(shaped, delta, ctx.env);
         }
         return height;
     }
@@ -1033,6 +999,20 @@ pub const DefaultGenerator = struct {
         }
     }
 
+    /// Warps the base grid and samples the noise at the configured density.
+    fn sampleWarpNoise(interp: InterpResolution, warp_state: *const Noise.Noise(f32), noise_state: *const Noise.Noise(f32), ctx: *const HeightCtx, base_x: *const [sample_count]f32, base_z: *const [sample_count]f32, out: *[sample_count]f32) void {
+        switch (interp) {
+            .full => {
+                var warped_x: [sample_count]f32 = undefined;
+                var warped_z: [sample_count]f32 = undefined;
+                warp_state.fillWarp2DGrid(&warped_x, &warped_z, base_x, base_z);
+                noise_state.fillNoise2DGrid(out, &warped_x, &warped_z);
+            },
+            // Warp shares the noise lattice since warped coordinates are irregular.
+            inline else => |tag| sampleWarpNoiseCoarse(tag.size(), warp_state, noise_state, ctx, out),
+        }
+    }
+
     /// Coarse warp+noise pipeline on a border-shared lattice, interpolated to the full grid so borders stay consistent.
     fn sampleWarpNoiseCoarse(comptime G: usize, warp_state: *const Noise.Noise(f32), noise_state: *const Noise.Noise(f32), ctx: *const HeightCtx, out: *[sample_count]f32) void {
         const N = G + 1;
@@ -1057,14 +1037,14 @@ pub const DefaultGenerator = struct {
         return out;
     }
 
-    /// Flat index of coarse node (a, b); the far edge clamps to the last sample since its neighbor belongs to the next chunk.
+    /// Flat index of coarse node (a, b). The far edge clamps to the last sample since its neighbor belongs to the next chunk.
     inline fn coarseSourceIndex(comptime stride: usize, a: usize, b: usize) usize {
         const fx: usize = @min(a * stride, ChunkSize - 1);
         const fz: usize = @min(b * stride, ChunkSize - 1);
         return fx * ChunkSize + fz;
     }
 
-    /// Central differences folded into the gradient accumulators, evaluated from world coordinates so borders stay seamless.
+    /// Adds central differences into the gradient accumulators. World coordinates keep borders continuous.
     fn computeGradient(ctx: *const HeightCtx, base_x: []const f32, base_z: []const f32, grad_x: []f32, grad_z: []f32) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "terrainGradient" });
         defer zone.end();
@@ -1079,7 +1059,7 @@ pub const DefaultGenerator = struct {
         }
     }
 
-    /// Surface detail in normalized units; the amount follows the pre-erosion gradient so detail collects on relief.
+    /// Surface detail in normalized units. The amount follows the pre-erosion gradient so detail collects on relief.
     fn surfaceNorm(ctx: *const HeightCtx, base_x: []const f32, base_z: []const f32, grad_x: []f32, grad_z: []f32, out: []f32) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "surfaceNoise" });
         defer zone.end();
@@ -1088,23 +1068,22 @@ pub const DefaultGenerator = struct {
                 var raw: [sample_count]f32 = undefined;
                 ctx.params.surface_noise.fillNoise2DGrid(&raw, base_x, base_z);
                 const uses_gradient = ctx.params.surface_noise_gradient_influence > 0;
-                for (0..sample_count) |i| {
-                    const mag = if (uses_gradient) @sqrt(grad_x[i] * grad_x[i] + grad_z[i] * grad_z[i]) else 0.0;
-                    out[i] = surfaceNoiseAmount(mag, ctx.params) * raw[i];
+                for (out, raw, grad_x, grad_z) |*sample, noise, gx, gz| {
+                    const mag = if (uses_gradient) @sqrt(gx * gx + gz * gz) else 0.0;
+                    sample.* = surfaceNoiseAmount(mag, ctx.params) * noise;
                 }
             },
             inline else => |tag| surfaceNormCoarse(tag.size(), ctx, grad_x, grad_z, out),
         }
     }
 
-    /// Coarse surface detail; noise runs on the lattice while the amount decimates the full-resolution gradient.
+    /// Coarse surface detail. Noise runs on the lattice while the amount decimates the full-resolution gradient.
     fn surfaceNormCoarse(comptime G: usize, ctx: *const HeightCtx, grad_x: []const f32, grad_z: []const f32, out: []f32) void {
         const N = G + 1;
         const stride: usize = ChunkSize / G;
-        const stride_f: f32 = @floatFromInt(stride);
         var coarse_x: [N * N]f32 = undefined;
         var coarse_z: [N * N]f32 = undefined;
-        fillCoordGrid(N, 0, &coarse_x, &coarse_z, ctx.pos, sample_step * stride_f, ctx.one_d_scale);
+        fillCoordGrid(N, 0, &coarse_x, &coarse_z, ctx.pos, sample_step * @as(f32, @floatFromInt(stride)), ctx.one_d_scale);
         var raw: [N * N]f32 = undefined;
         ctx.params.surface_noise.fillNoise2DGrid(&raw, &coarse_x, &coarse_z);
         const uses_gradient = ctx.params.surface_noise_gradient_influence > 0;
@@ -1119,7 +1098,7 @@ pub const DefaultGenerator = struct {
         @memcpy(out, &upsample(N, &prod));
     }
 
-    /// Fade steepness from a coarse central difference; the fine gradient would flicker the mask between neighbors.
+    /// Fade steepness from a coarse central difference. The fine gradient would flicker the mask between neighbors.
     fn fadeSteepness(ctx: *const HeightCtx, p_scale: f32, out: []f32) void {
         const stencil = 4;
         const N = ChunkSize + 2 * stencil;
@@ -1136,12 +1115,7 @@ pub const DefaultGenerator = struct {
         var large_noise: [N * N]f32 = undefined;
         ctx.params.terrain_noise.fillNoise2DGrid(&noise, &warp_x, &warp_z);
         ctx.params.large_terrain_noise.fillNoise2DGrid(&large_noise, &large_warp_x, &large_warp_z);
-        var shaped_ext: [N * N]f32 = undefined;
-        for (0..N) |x| {
-            const raw: @Vector(N, f32) = noise[x * N ..][0..N].*;
-            const large: @Vector(N, f32) = large_noise[x * N ..][0..N].*;
-            shaped_ext[x * N ..][0..N].* = shapedRow(N, ctx.params, large, raw);
-        }
+        const shaped_ext = shapedGrid(N, ctx.params, &large_noise, &noise);
         const e = sample_step * ctx.one_d_scale;
         const one_d_2e = 1.0 / (2.0 * e);
         const inv_stencil = 1.0 / @as(f32, @floatFromInt(stencil));
@@ -1149,14 +1123,14 @@ pub const DefaultGenerator = struct {
             for (0..ChunkSize) |z| {
                 const ex = x + stencil;
                 const ez = z + stencil;
-                const d_x = (shaped_ext[(ex + stencil) * N + ez] - shaped_ext[(ex - stencil) * N + ez]) * one_d_2e * inv_stencil;
-                const d_z = (shaped_ext[ex * N + (ez + stencil)] - shaped_ext[ex * N + (ez - stencil)]) * one_d_2e * inv_stencil;
+                const d_x = (shaped_ext[ex + stencil][ez] - shaped_ext[ex - stencil][ez]) * one_d_2e * inv_stencil;
+                const d_z = (shaped_ext[ex][ez + stencil] - shaped_ext[ex][ez - stencil]) * one_d_2e * inv_stencil;
                 out[x * ChunkSize + z] = @sqrt(d_x * d_x + d_z * d_z) * p_scale;
             }
         }
     }
 
-    /// Runs the erosion filter per sample into `extra`; slopes point downhill and the envelope applies once in the compose.
+    /// Runs the erosion filter per sample into `extra`. Slopes point downhill and the envelope applies once in the compose.
     fn applyErosion(ctx: *const HeightCtx, base_x: []const f32, base_z: []const f32, grad_x: []f32, grad_z: []f32, shaped: *const [ChunkSize][ChunkSize]f32, extra: []f32) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "erosionFilter" });
         defer zone.end();
@@ -1167,23 +1141,15 @@ pub const DefaultGenerator = struct {
         const eparams = ctx.params.erosionFilterParams(ctx.level);
         switch (ctx.params.erosion_interp) {
             .full => {
-                for (0..ChunkSize) |x| {
-                    for (0..ChunkSize) |z| {
-                        const i = x * ChunkSize + z;
-                        extra[i] += erosion.erosionFilter(
-                            .{ base_x[i] / p_scale, base_z[i] / p_scale },
-                            .{ shaped[x][z], -grad_x[i] * p_scale, -grad_z[i] * p_scale },
-                            fade[i],
-                            eparams,
-                        );
-                    }
+                for (extra, base_x, base_z, std.mem.bytesAsSlice(f32, std.mem.asBytes(shaped)), grad_x, grad_z, fade) |*sum, bx, bz, height, gx, gz, fade_steepness| {
+                    sum.* += erosion.erosionFilter(.{ bx / p_scale, bz / p_scale }, .{ height, -gx * p_scale, -gz * p_scale }, fade_steepness, eparams);
                 }
             },
             inline else => |tag| applyErosionCoarse(tag.size(), base_x, base_z, grad_x, grad_z, shaped, &fade, p_scale, eparams, extra),
         }
     }
 
-    /// Coarse erosion; the filter runs on the border-shared lattice from decimated inputs and interpolates up.
+    /// Coarse erosion. The filter runs on the border-shared lattice from decimated inputs and interpolates up.
     fn applyErosionCoarse(comptime G: usize, base_x: []const f32, base_z: []const f32, grad_x: []const f32, grad_z: []const f32, shaped: *const [ChunkSize][ChunkSize]f32, fade: []const f32, p_scale: f32, eparams: erosion.ErosionParams, extra: []f32) void {
         const N = G + 1;
         const stride: usize = ChunkSize / G;
@@ -1208,7 +1174,7 @@ pub const DefaultGenerator = struct {
         return differential;
     }
 
-    /// Forward-difference slope magnitude of row `x`; the last row and column difference backward.
+    /// Forward-difference slope magnitude of row `x`. The last row and column difference backward.
     fn differentialRow(height: *const [ChunkSize][ChunkSize]f32, x: usize) [ChunkSize]f32 {
         var row: [ChunkSize]f32 = undefined;
         for (&row, height[x], height[if (x + 1 < ChunkSize) x + 1 else x - 1], 0..) |*out, h, nx, z| {
@@ -1219,7 +1185,7 @@ pub const DefaultGenerator = struct {
         return row;
     }
 
-    /// Grass slope grid at the configured density; coarser densities decimate and interpolate up.
+    /// Grass slope grid at the configured density. Coarser densities decimate and interpolate up.
     fn grassSlopes(height: *const [ChunkSize][ChunkSize]f32, interp: InterpResolution) [ChunkSize][ChunkSize]f32 {
         return switch (interp) {
             .full => getDifferential(height),
@@ -1227,7 +1193,7 @@ pub const DefaultGenerator = struct {
         };
     }
 
-    /// Coarse grass slopes on a decimated lattice, interpolated up; the far edge clamps to the last sample.
+    /// Coarse grass slopes on a decimated lattice, interpolated up. The far edge clamps to the last sample.
     fn grassSlopesCoarse(comptime G: usize, height: *const [ChunkSize][ChunkSize]f32) [ChunkSize][ChunkSize]f32 {
         const N = G + 1;
         const stride: usize = ChunkSize / G;
@@ -1248,7 +1214,7 @@ pub const DefaultGenerator = struct {
         return std.mem.bytesAsValue([ChunkSize][ChunkSize]f32, std.mem.asBytes(&upsample(N, &lattice))).*;
     }
 
-    /// Shaped height row shared by the base grid, gradient samples, and fade ring; the lane count follows the args.
+    /// Shaped height row shared by the base grid, gradient samples, and fade ring. The lane count follows the args.
     inline fn shapedRow(comptime N: usize, params: *const Params, large: @Vector(N, f32), raw: @Vector(N, f32)) @Vector(N, f32) {
         const V = @Vector(N, f32);
         const height_power_v: V = @splat(params.height_power);
@@ -1283,13 +1249,18 @@ pub const DefaultGenerator = struct {
         params.large_terrain_noise_warp.fillWarp2DGrid(&scratch.large_warp_x, &scratch.large_warp_z, &scratch.off_x, &scratch.off_z);
         params.terrain_noise.fillNoise2DGrid(&scratch.noise, &scratch.warp_x, &scratch.warp_z);
         params.large_terrain_noise.fillNoise2DGrid(&scratch.large_noise, &scratch.large_warp_x, &scratch.large_warp_z);
-        for (0..ChunkSize) |x| {
-            const raw: FloatV = @as(FloatV, scratch.noise[x * ChunkSize ..][0..ChunkSize].*);
-            const large = @as(FloatV, scratch.large_noise[x * ChunkSize ..][0..ChunkSize].*);
-            const grad_row: FloatV = @as(FloatV, grad[x * ChunkSize ..][0..ChunkSize].*);
+        for (shapedGrid(ChunkSize, params, &scratch.large_noise, &scratch.noise), 0..) |shaped, x| {
+            const grad_row = grad[x * ChunkSize ..][0..ChunkSize];
             // Fuse the accumulation so Debug and optimized builds agree bit-identically on low-slope gradients.
-            grad[x * ChunkSize ..][0..ChunkSize].* = @mulAdd(FloatV, shapedRow(ChunkSize, params, large, raw), @as(FloatV, @splat(sign * one_d_2e)), grad_row);
+            grad_row.* = @mulAdd(FloatV, shaped, @splat(sign * one_d_2e), grad_row.*);
         }
+    }
+
+    /// Shaped height grid from two row-major N x N noise grids, one shapedRow call per row.
+    fn shapedGrid(comptime N: usize, params: *const Params, large: *const [N * N]f32, raw: *const [N * N]f32) [N][N]f32 {
+        var shaped: [N][N]f32 = undefined;
+        for (&shaped, 0..) |*row, x| row.* = shapedRow(N, params, large[x * N ..][0..N].*, raw[x * N ..][0..N].*);
+        return shaped;
     }
 
     fn generateStructures(self: *DefaultGenerator, io: std.Io, allocator: std.mem.Allocator, world: *World, chunk: *Chunk, chunk_pos: ChunkPos) !void {
@@ -1368,7 +1339,7 @@ fn mapStructureError(err: anyerror) error{ OutOfMemory, Canceled, Unrecoverable 
     };
 }
 
-/// Single-point shaped height mirroring the full-resolution grid path; close enough for land/water classification.
+/// Single-point shaped height mirroring the full-resolution grid path. It is close enough for land/water classification.
 fn columnSpawnHeight(params: *const DefaultGenerator.Params, x: f32, z: f32) f32 {
     const scale = @max(params.terrain_scale, 1e-6);
     const base_x = x / (@as(f32, ChunkSize) * scale);
@@ -1456,7 +1427,7 @@ const field_specs = .{
     .surface_interp = .{ .label = "Surface Noise Resolution", .description = "Sampling density of the surface detail noise; coarser is faster and smoother. Full disables interpolation." },
     .terrain_noise_balance = .{ .label = "Terrain Noise Balance", .description = "Blends the continental noise (0) into the mountain (ridged) noise (1).", .min = 0, .max = 1 },
     .terrain_interp = .{ .label = "Terrain Detail Resolution", .description = "Sampling density of the mountain noise; warp and noise share the coarse lattice. Full disables interpolation." },
-    .large_terrain_interp = .{ .label = "Continental Resolution", .description = "Sampling density of the continental noise; the large warp follows this setting. Full disables interpolation." },
+    .large_terrain_interp = .{ .label = "Continental Resolution", .description = "Sampling density of the continental noise. The large warp follows this setting. Full disables interpolation." },
     .height_power = .{ .label = "Height Power", .min = 0.25, .max = 4 },
     .large_power = .{ .label = "Large Shape Power", .min = 0.25, .max = 8 },
     .small_power = .{ .label = "Detail Power", .min = 0.25, .max = 8 },
@@ -1626,11 +1597,11 @@ fn benchHeights(io: std.Io, label: []const u8, heights: [ChunkSize][ChunkSize]f3
     const end = std.Io.Clock.Timestamp.now(io, .awake);
     const vec_ns = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / @as(f64, @floatFromInt(iterations));
 
-    std.debug.print("generateTerrain {s} ({s}): vector {d:.1} ns/call (sink {d})\n", .{ @tagName(@import("builtin").mode), label, vec_ns, sink });
+    std.debug.print("generateTerrain {s} ({s}): vector {d:.1} ns/call (sink {d})\n", .{ @tagName(builtin.mode), label, vec_ns, sink });
 }
 
 fn benchTerrainHeights(io: std.Io, params: *const DefaultGenerator.Params, label: []const u8) void {
-    const iterations = if (@import("builtin").mode == .debug) 50 else 500;
+    const iterations = if (builtin.mode == .debug) 50 else 500;
     var sink: f32 = 0;
     var height: [ChunkSize][ChunkSize]f32 = undefined;
     const start = std.Io.Clock.Timestamp.now(io, .awake);
@@ -1640,11 +1611,11 @@ fn benchTerrainHeights(io: std.Io, params: *const DefaultGenerator.Params, label
     }
     const end = std.Io.Clock.Timestamp.now(io, .awake);
     const ns = @as(f64, @floatFromInt(start.durationTo(end).raw.toNanoseconds())) / @as(f64, @floatFromInt(iterations));
-    std.debug.print("genTerrainHeight {s} {s}: {d:.1} ns/call (sink {d})\n", .{ @tagName(@import("builtin").mode), label, ns, sink });
+    std.debug.print("genTerrainHeight {s} {s}: {d:.1} ns/call (sink {d})\n", .{ @tagName(builtin.mode), label, ns, sink });
 }
 
 test "benchmark generateTerrain" {
-    // Random and uniform height fields exercise distinct fill paths; the printed sink keeps the calls live.
+    // Random and uniform height fields exercise distinct fill paths. The printed sink keeps the calls live.
     const iterations = if (builtin.mode == .debug) 100 else 2000;
     const io = std.testing.io;
     var seed_rng = std.Random.DefaultPrng.init(0xC0FFEE);
@@ -1669,16 +1640,13 @@ test "legacy config with erosion_strength parses" {
     @setEvalBranchQuota(100000000);
     // Skipped fields must still parse from declaration defaults so old configs load without migration.
     const legacy = ".{ .seed = null, .terrain_scale = 2, .erosion_strength = 1.5, .terrain_block_randomness = 0.1 }";
-    var buf: [512]u8 = undefined;
-    @memcpy(buf[0..legacy.len], legacy);
-    buf[legacy.len] = 0;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     const params = try std.zon.parse.fromSlice(DefaultGenerator.Params, .{
         .gpa = std.testing.allocator,
         .arena = arena.allocator(),
-        .source = buf[0..legacy.len :0],
+        .source = legacy,
         .diagnostics = &diagnostics,
     });
     try std.testing.expectEqual(@as(f32, 1.5), params.erosion_strength);
@@ -1700,16 +1668,13 @@ test "config tree round trips through zon" {
     var buf: [16384]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try generator_api.emitZon(&w, tree);
+    try w.writeByte(0);
     const emitted = w.buffered();
-
-    var source: [16384]u8 = undefined;
-    @memcpy(source[0..emitted.len], emitted);
-    source[emitted.len] = 0;
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     const params = try std.zon.parse.fromSlice(DefaultGenerator.Params, .{
         .gpa = std.testing.allocator,
         .arena = arena.allocator(),
-        .source = source[0..emitted.len :0],
+        .source = emitted[0 .. emitted.len - 1 :0],
         .diagnostics = &diagnostics,
     });
     try std.testing.expectEqual(DefaultGenerator.Params.default.erosion_strength, params.erosion_strength);
@@ -1748,19 +1713,17 @@ test "proposeSpawn is deterministic and plausible" {
     const a = generatorProposeSpawn(&instance, &center, 64, 32, 1);
     const b = generatorProposeSpawn(&instance, &center, 64, 32, 1);
     try std.testing.expect(a.found);
-    try std.testing.expectEqual(a.pos[0], b.pos[0]);
-    try std.testing.expectEqual(a.pos[1], b.pos[1]);
-    try std.testing.expectEqual(a.pos[2], b.pos[2]);
+    try std.testing.expectEqual(a.pos, b.pos);
     try std.testing.expect(std.math.isFinite(a.pos[1]));
 }
 
 /// Pins border continuity: the jump across a chunk border must stay within a few local steps.
 fn expectSeamContinuous(west: [ChunkSize][ChunkSize]f32, east: [ChunkSize][ChunkSize]f32) !void {
-    for (0..ChunkSize) |z| {
-        const jump = @abs(west[ChunkSize - 1][z] - east[0][z]);
+    for (west[ChunkSize - 1], west[ChunkSize - 2], east[0], east[1]) |w_edge, w_inner, e_edge, e_inner| {
+        const jump = @abs(w_edge - e_edge);
         // Neighboring samples bound the local slope, but gully ripple can double it at a steep phase.
-        const step_w = @abs(west[ChunkSize - 1][z] - west[ChunkSize - 2][z]);
-        const step_e = @abs(east[1][z] - east[0][z]);
+        const step_w = @abs(w_edge - w_inner);
+        const step_e = @abs(e_inner - e_edge);
         try std.testing.expect(jump <= (step_w + step_e) * 2.5 + 256.0);
     }
 }
@@ -1807,10 +1770,8 @@ test "surface noise relief stays within the symmetric bound" {
     const rough = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 5 });
     params.surface_noise_amplitude = 0.0;
     const base = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 5 });
-    for (0..ChunkSize) |x| {
-        for (0..ChunkSize) |z| {
-            try std.testing.expect(@abs(rough[x][z] - base[x][z]) <= 0.05 * max_bound * scale * 2.0 + 0.5);
-        }
+    for (rough, base) |rough_row, base_row| {
+        for (rough_row, base_row) |r, b| try std.testing.expect(@abs(r - b) <= 0.05 * max_bound * scale * 2.0 + 0.5);
     }
 }
 
@@ -1825,27 +1786,23 @@ test "eroded height stays continuous across the shoreline" {
 }
 
 test "erosion LOD consistency between level 0 and level 1" {
-    // Coarser levels drop the finest octave; level 1 must match box-filtered level 0 up to that amplitude.
+    // Coarser levels drop the finest octave. Level 1 must match box-filtered level 0 up to that amplitude.
     const params = DefaultGenerator.Params.default;
     const coarse = DefaultGenerator.genTerrainHeight(&params, 1, .{ 1, 1 });
     var fine: [4][ChunkSize][ChunkSize]f32 = undefined;
-    fine[0] = DefaultGenerator.genTerrainHeight(&params, 0, .{ 2, 2 });
-    fine[1] = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 2 });
-    fine[2] = DefaultGenerator.genTerrainHeight(&params, 0, .{ 2, 3 });
-    fine[3] = DefaultGenerator.genTerrainHeight(&params, 0, .{ 3, 3 });
+    for (&fine, 0..) |*quadrant, i| quadrant.* = DefaultGenerator.genTerrainHeight(&params, 0, .{ @intCast(2 + i % 2), @intCast(2 + i / 2) });
     const max_abs_bound: f32 = @floatFromInt(@max(@abs(params.terrain_min), @abs(params.terrain_max)));
-    // The dropped octave shifts gullies slightly; allow 40% of the filter magnitude plus fixed slack.
+    // The dropped octave shifts gullies slightly. Allow 40% of the filter magnitude plus fixed slack.
     const filter_amp: f32 = params.erosion_filter_strength / (1.0 - params.erosion_gain) * params.erosion_gully_weight;
     const limit = max_abs_bound * filter_amp * 0.4 + 128.0;
     for (0..ChunkSize) |x| {
         for (0..ChunkSize) |z| {
             // Each coarse sample covers four fine samples box-filtered at half the fine envelope.
             const h = ChunkSize / 2;
-            const cx: usize = @intCast(x / h);
-            const fx: usize = @intCast(2 * (x % h));
-            const cz: usize = @intCast(z / h);
-            const fz: usize = @intCast(2 * (z % h));
-            const avg = (fine[cx + 2 * cz][fx][fz] + fine[cx + 2 * cz][fx + 1][fz] + fine[cx + 2 * cz][fx][fz + 1] + fine[cx + 2 * cz][fx + 1][fz + 1]) * 0.25;
+            const quadrant = &fine[x / h + 2 * (z / h)];
+            const fx = 2 * (x % h);
+            const fz = 2 * (z % h);
+            const avg = (quadrant[fx][fz] + quadrant[fx + 1][fz] + quadrant[fx][fz + 1] + quadrant[fx + 1][fz + 1]) * 0.25;
             const diff = @abs(coarse[x][z] - avg * 0.5);
             try std.testing.expect(diff <= limit);
         }
@@ -1867,17 +1824,17 @@ test "coarse interp densities stay finite and seamless" {
     try std.testing.expectEqual(@as(usize, ChunkSize / 4), DefaultGenerator.InterpResolution.quarter.size());
     try std.testing.expectEqual(@as(usize, ChunkSize / 8), DefaultGenerator.InterpResolution.eighth.size());
     try std.testing.expectEqual(@as(usize, ChunkSize / 16), DefaultGenerator.InterpResolution.sixteenth.size());
-    // World-coordinate evaluation keeps borders continuous; error against full-res stays far below the envelope.
+    // World-coordinate evaluation keeps borders continuous. Error against full-res stays far below the envelope.
     const full = heightsAtInterpDensity(.full, .{ 3, 5 });
     const max_abs_bound: f32 = @floatFromInt(@max(@abs(DefaultGenerator.Params.default.terrain_min), @abs(DefaultGenerator.Params.default.terrain_max)));
     inline for ([_]DefaultGenerator.InterpResolution{ .half, .quarter, .eighth, .sixteenth }) |d| {
         const coarse = heightsAtInterpDensity(d, .{ 3, 5 });
         const neighbor = heightsAtInterpDensity(d, .{ 4, 5 });
         var max_diff: f32 = 0;
-        for (0..ChunkSize) |x| {
-            for (0..ChunkSize) |z| {
-                try std.testing.expect(std.math.isFinite(coarse[x][z]));
-                max_diff = @max(max_diff, @abs(coarse[x][z] - full[x][z]));
+        for (coarse, full) |coarse_row, full_row| {
+            for (coarse_row, full_row) |c, f| {
+                try std.testing.expect(std.math.isFinite(c));
+                max_diff = @max(max_diff, @abs(c - f));
             }
         }
         try expectSeamContinuous(coarse, neighbor);
@@ -1949,7 +1906,7 @@ test "interp densities round trip through the config tree" {
 }
 
 test "terrain noise balance zero excludes the mountain noise" {
-    // balance is the mountain (ridged) noise weight; at zero nothing about that
+    // balance is the mountain (ridged) noise weight. At zero nothing about that
     // noise may change the height, even with erosion and surface detail enabled.
     var params = DefaultGenerator.Params.default;
     params.seed = 7;
@@ -1961,9 +1918,7 @@ test "terrain noise balance zero excludes the mountain noise" {
     changed.terrain_noise.frequency *= 3.7;
     changed.terrain_noise.seed +%= 99991;
     const mountain_changed = DefaultGenerator.genTerrainHeight(&changed, 0, .{ 2, 3 });
-    for (0..ChunkSize) |x| {
-        for (0..ChunkSize) |z| try std.testing.expectEqual(base[x][z], mountain_changed[x][z]);
-    }
+    try std.testing.expectEqual(base, mountain_changed);
 }
 
 test "terrain noise balance crossfades continental into mountain" {

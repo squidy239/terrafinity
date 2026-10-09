@@ -10,8 +10,8 @@ const World = @import("../World.zig");
 pub const ApiVersion: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 };
 
 /// Whether a plugin built against `plugin_version` can run on this host.
-/// Major must always match; while major is 0 (pre-1.0, including now) the
-/// minor and patch must match exactly, since anything may still break.
+/// Major must always match. While major is 0, minor and patch must also
+/// match exactly, because any change can break the interface.
 pub fn apiCompatible(plugin_version: std.SemanticVersion) bool {
     if (plugin_version.major != ApiVersion.major) return false;
     if (ApiVersion.major == 0) return plugin_version.minor == ApiVersion.minor and plugin_version.patch == ApiVersion.patch;
@@ -32,10 +32,9 @@ pub const CreateOptions = struct {
     max_cache_bytes: u64,
 };
 
-/// The value of a single config parameter. Config trees are plain data: all
-/// Config keys, values, and choice entries are allocated with the allocator
-/// that created the tree. Presentation metadata in `Spec` is borrowed from the
-/// generator library, so it remains valid while that library is loaded.
+/// The value of a single config parameter. The allocator that creates a config
+/// tree owns its keys, values, and choice entries. `Spec` label and description
+/// point into the generator library, so they stay valid while the host keeps it loaded.
 pub const Value = union(enum) {
     group: Group,
     array: Array,
@@ -64,7 +63,7 @@ pub const Spec = struct {
     is_seed: bool = false,
     /// Excludes the field from the config tree entirely.
     skip: bool = false,
-    /// Hides the field until the host's advanced settings are enabled.
+    /// Hides the field until the user enables the host's advanced settings.
     advanced: bool = false,
 };
 
@@ -150,13 +149,13 @@ fn scoreSpawnColumn(dist: f64, height_above_water: f32, slope: f32) SpawnScore {
 
 /// Shared best-candidate tracker for the pick-test-retry loops.
 pub const SpawnBest = struct {
-    point: Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false },
+    point: Spawnpoint = no_spawn,
     score: f64 = std.math.inf(f64),
     good: bool = false,
 };
 
 /// Folds one sampled column into `best`. Scores distance from `center` plus
-/// `extra_score` (a generator-specific penalty, 0 when unused); `extra_good`
+/// `extra_score`, a generator-specific penalty that is 0 when unused. `extra_good`
 /// joins the shared wet/steep gate for early exit.
 pub fn considerSpawnColumn(center: *const [3]f64, sample: [2]f64, height_above_water: f32, slope: f32, top: f64, extra_score: f64, extra_good: bool, best: *SpawnBest) void {
     const dx = sample[0] - center[0];
@@ -169,7 +168,7 @@ pub fn considerSpawnColumn(center: *const [3]f64, sample: [2]f64, height_above_w
     best.good = !scored.wet and !scored.steep and extra_good;
 }
 
-/// Shared pick-test-retry loop for heightfield generators. Pure; the host re-validates the winner.
+/// Shared pick-test-retry loop for heightfield generators. It only tests columns analytically, so the host re-validates the winner.
 pub fn proposeSpawnField(
     seed: u64,
     center: [3]f64,
@@ -180,10 +179,8 @@ pub fn proposeSpawnField(
     context: anytype,
     comptime columnHeight: anytype,
 ) Spawnpoint {
-    var best = SpawnBest{};
-    const capped = @min(attempts, spawn_attempt_cap);
-    for (0..capped) |i| {
-        // Analytic test only; the host re-validates the winner.
+    var best: SpawnBest = .{};
+    for (0..@min(attempts, spawn_attempt_cap)) |i| {
         const sample = spawnSample(seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
         const sx: f32 = @floatCast(sample[0]);
         const sz: f32 = @floatCast(sample[1]);
@@ -191,14 +188,14 @@ pub fn proposeSpawnField(
         const hx = columnHeight(context, sx + 2, sz);
         const hz = columnHeight(context, sx, sz + 2);
         const slope = @max(@abs(hx - h), @abs(hz - h)) / 2.0;
-        // Top solid block is floor(h); the hint only needs the column.
+        // The top solid block is floor(h). The host resolves the exact feet height.
         considerSpawnColumn(&center, sample, h - sea_level, slope, @floor(h), 0, true, &best);
         if (i >= spawn_samples_per_ring - 1 and best.good) break;
     }
     return best.point;
 }
 
-/// Vtable each generator exports. Aggregates cross as pointers; teardown runs through `get_source`.
+/// Vtable each generator exports. Aggregates cross as pointers. Teardown runs through `get_source`.
 pub const GeneratorApi = extern struct {
     info: *const fn () callconv(.c) *const GeneratorInfo,
     create: *const fn (opts: *const CreateOptions, config: *const ConfigTree) callconv(.c) ?*anyopaque,
@@ -209,11 +206,11 @@ pub const GeneratorApi = extern struct {
     preset_default_index: *const fn () callconv(.c) usize,
     /// Config tree for the preset at `index`. The host frees it with `generator_api.free`.
     preset_config: *const fn (allocator: *const std.mem.Allocator, index: usize) callconv(.c) ?*ConfigTree,
-    /// Null on invalid bytes; the host then uses the default preset.
+    /// Null on invalid bytes. The host then uses the default preset.
     config_from_zon: *const fn (allocator: *const std.mem.Allocator, bytes: [*]const u8, bytes_len: usize) callconv(.c) ?*ConfigTree,
     /// Fills unset seeds. Runs before `create` so seeds persist.
     config_set_seeds: *const fn (io: *const std.Io, config: *ConfigTree) callconv(.c) void,
-    /// Spawn near `center` with a soft `radius`. Pure and deterministic; Y is a hint the host resolves.
+    /// Spawn near `center` with a soft `radius`. Pure and deterministic. Y is a hint the host resolves.
     /// `found == false` fails the spawn loudly.
     propose_spawn: *const fn (
         instance: *anyopaque,
@@ -242,20 +239,22 @@ pub fn clone(allocator: std.mem.Allocator, tree: *const ConfigTree) error{OutOfM
 
 /// Content equality for change detection. Templates compare by pointee.
 pub fn eql(a: *const ConfigTree, b: *const ConfigTree) bool {
-    if (a.params.len != b.params.len) return false;
-    for (a.params, b.params) |*pa, *pb| {
+    return paramsEql(a.params, b.params);
+}
+
+fn paramsEql(a: []const Param, b: []const Param) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |*pa, *pb| {
         if (!paramEql(pa, pb)) return false;
     }
     return true;
 }
 
 fn paramEql(a: *const Param, b: *const Param) bool {
-    if (!std.mem.eql(u8, a.name, b.name)) return false;
-    if (a.spec.min != b.spec.min or a.spec.max != b.spec.max) return false;
-    if (a.spec.step != b.spec.step or a.spec.is_seed != b.spec.is_seed) return false;
-    if (a.spec.advanced != b.spec.advanced) return false;
-    if (!entriesEql(a.spec.entries, b.spec.entries)) return false;
-    return valueEql(&a.value, &b.value);
+    return std.mem.eql(u8, a.name, b.name) and
+        a.spec.min == b.spec.min and a.spec.max == b.spec.max and a.spec.step == b.spec.step and
+        a.spec.is_seed == b.spec.is_seed and a.spec.advanced == b.spec.advanced and
+        entriesEql(a.spec.entries, b.spec.entries) and valueEql(&a.value, &b.value);
 }
 
 fn entriesEql(a: []const []const u8, b: []const []const u8) bool {
@@ -270,21 +269,10 @@ fn valueEql(a: *const Value, b: *const Value) bool {
     if (std.meta.activeTag(a.*) != std.meta.activeTag(b.*)) return false;
     switch (a.*) {
         .group => |*ga| return eql(ga, &b.group),
-        .array => |*aa| {
-            if (aa.items.len != b.array.items.len) return false;
-            if (!paramEql(aa.element, b.array.element)) return false;
-            for (aa.items, b.array.items) |*ia, *ib| {
-                if (!paramEql(ia, ib)) return false;
-            }
-            return true;
-        },
+        .array => |*aa| return paramEql(aa.element, b.array.element) and paramsEql(aa.items, b.array.items),
         .string => |sa| return std.mem.eql(u8, sa, b.string),
-        .f32 => |va| return va == b.f32,
-        .i32 => |va| return va == b.i32,
-        .u32 => |va| return va == b.u32,
-        .u64 => |va| return va == b.u64,
-        .bool => |va| return va == b.bool,
-        .choice => |va| return va == b.choice,
+        // Scal-ars only: `std.meta.eql` compares slices by pointer.
+        else => return std.meta.eql(a.*, b.*),
     }
 }
 
@@ -309,9 +297,8 @@ pub fn arrayRemove(allocator: std.mem.Allocator, array: *Array, index: usize) vo
     freeParam(allocator, &removed);
 }
 
-pub fn emitZon(w: *std.Io.Writer, tree: *const ConfigTree) !void {
-    try emitGroup(w, tree);
-}
+/// Writes the config tree as ZON.
+pub const emitZon = emitGroup;
 
 fn emitGroup(w: *std.Io.Writer, group: *const Group) std.Io.Writer.Error!void {
     try w.print(".{{\n", .{});
@@ -359,11 +346,7 @@ fn emitValue(w: *std.Io.Writer, value: *const Value) std.Io.Writer.Error!void {
 fn emitFloat(w: *std.Io.Writer, value: f32) std.Io.Writer.Error!void {
     var buffer: [64]u8 = undefined;
     const s = std.mem.print(&buffer, "{d}", .{value}) catch unreachable;
-    if (std.mem.findAny(u8, s, ".eE") == null) {
-        try w.print("{s}.0", .{s});
-    } else {
-        try w.print("{s}", .{s});
-    }
+    try w.print("{s}{s}", .{ s, if (std.mem.findAny(u8, s, ".eE") == null) ".0" else "" });
 }
 
 fn emitString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
@@ -383,27 +366,15 @@ fn emitString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 /// every struct at any nesting depth that has a field with the same name.
 fn fieldSpec(comptime field_specs: anytype, comptime name: []const u8) Spec {
     if (!@hasField(@TypeOf(field_specs), name)) return .{};
-    const s = @field(field_specs, name);
-    const is_spec = @hasField(@TypeOf(s), "label") or @hasField(@TypeOf(s), "description") or
-        @hasField(@TypeOf(s), "min") or @hasField(@TypeOf(s), "max") or
-        @hasField(@TypeOf(s), "step") or @hasField(@TypeOf(s), "entries") or
-        @hasField(@TypeOf(s), "is_seed") or @hasField(@TypeOf(s), "skip") or
-        @hasField(@TypeOf(s), "advanced");
-    if (!is_spec) return .{};
-    return .{
-        .label = if (@hasField(@TypeOf(s), "label")) s.label else "",
-        .description = if (@hasField(@TypeOf(s), "description")) s.description else "",
-        .min = if (@hasField(@TypeOf(s), "min")) s.min else null,
-        .max = if (@hasField(@TypeOf(s), "max")) s.max else null,
-        .step = if (@hasField(@TypeOf(s), "step")) s.step else null,
-        .entries = if (@hasField(@TypeOf(s), "entries")) s.entries else &.{},
-        .is_seed = if (@hasField(@TypeOf(s), "is_seed")) s.is_seed else false,
-        .skip = if (@hasField(@TypeOf(s), "skip")) s.skip else false,
-        .advanced = if (@hasField(@TypeOf(s), "advanced")) s.advanced else false,
-    };
+    const entry = @field(field_specs, name);
+    var spec: Spec = .{};
+    inline for (@typeInfo(Spec).@"struct".field_names) |field| {
+        if (@hasField(@TypeOf(entry), field)) @field(spec, field) = @field(entry, field);
+    }
+    return spec;
 }
 
-/// Builds a config tree from a struct. Unhandled field types are skipped.
+/// Builds a config tree from a struct. The tree leaves out fields of unhandled types.
 pub fn fromStruct(comptime T: type, allocator: std.mem.Allocator, value: *const T, comptime field_specs: anytype) error{OutOfMemory}!*ConfigTree {
     const tree = try allocator.create(ConfigTree);
     errdefer allocator.destroy(tree);
@@ -484,8 +455,7 @@ fn valueFromField(comptime T: type, allocator: std.mem.Allocator, field_value: a
         .@"enum" => return .{ .choice = @backingInt(value) },
         .optional => |info| {
             if (@typeInfo(info.child) != .int) return null;
-            if (value) |v| return .{ .u64 = @intCast(v) };
-            return .{ .u64 = 0 };
+            return .{ .u64 = if (value) |v| @intCast(v) else 0 };
         },
         .@"struct" => {
             const tree = try fromStruct(T, allocator, &value, field_specs);
@@ -547,20 +517,11 @@ fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, par
         .optional => |info| {
             if (param.value != .u64) return;
             if (@typeInfo(info.child) != .int) return;
-            if (param.value.u64 == 0) {
-                field_ptr.* = null;
-            } else {
-                field_ptr.* = std.math.cast(info.child, param.value.u64) orelse return;
-            }
+            field_ptr.* = if (param.value.u64 == 0) null else std.math.cast(info.child, param.value.u64) orelse return;
         },
         .@"struct" => {
             if (param.value != .group) return;
-            const info = @typeInfo(T).@"struct";
-            inline for (info.field_names, info.field_types) |name, F| {
-                if (findParam(&param.value.group, name)) |child| {
-                    try applyField(F, allocator, &@field(field_ptr, name), child, fieldSpec(field_specs, name), field_specs);
-                }
-            }
+            try fromTree(T, allocator, &param.value.group, field_ptr, field_specs);
         },
         .pointer => |info| {
             if (param.value != .array) return;
@@ -590,18 +551,10 @@ fn findParam(group: *const ConfigTree, name: []const u8) ?*const Param {
 }
 
 fn dupeSpec(allocator: std.mem.Allocator, spec: *const Spec) error{OutOfMemory}!Spec {
-    return .{
-        // label/description/advanced stay borrowed from the loaded generator library.
-        .label = spec.label,
-        .description = spec.description,
-        .min = spec.min,
-        .max = spec.max,
-        .step = spec.step,
-        .entries = try dupeEntries(allocator, spec.entries),
-        .is_seed = spec.is_seed,
-        .skip = spec.skip,
-        .advanced = spec.advanced,
-    };
+    // The label and description stay borrowed from the loaded generator library.
+    var copy = spec.*;
+    copy.entries = try dupeEntries(allocator, spec.entries);
+    return copy;
 }
 
 fn dupeEntries(allocator: std.mem.Allocator, entries: []const []const u8) error{OutOfMemory}![]const []const u8 {
@@ -660,13 +613,12 @@ fn cloneParam(allocator: std.mem.Allocator, src: *const Param) error{OutOfMemory
     errdefer allocator.free(name);
     const spec = try dupeSpec(allocator, &src.spec);
     errdefer allocator.free(spec.entries);
-    var value: Value = undefined;
-    switch (src.value) {
-        .string => |s| value = .{ .string = try allocator.dupe(u8, s) },
-        .group => |*group| value = .{ .group = .{ .params = try cloneParams(allocator, group.params) } },
-        .array => |*array| value = .{ .array = try cloneArray(allocator, array) },
-        else => value = src.value,
-    }
+    const value: Value = switch (src.value) {
+        .string => |s| .{ .string = try allocator.dupe(u8, s) },
+        .group => |*group| .{ .group = .{ .params = try cloneParams(allocator, group.params) } },
+        .array => |*array| .{ .array = try cloneArray(allocator, array) },
+        else => src.value,
+    };
     return .{ .name = name, .spec = spec, .value = value };
 }
 
@@ -715,7 +667,7 @@ pub fn configSetSeeds(io: *const std.Io, config: *ConfigTree) void {
 }
 
 /// Abstention a `propose_spawn` returns when it finds no column. The host fails loudly.
-pub const no_spawn: Spawnpoint = .{ .pos = .{ 0, 0, 0 }, .found = false };
+pub const no_spawn: Spawnpoint = .{ .pos = @splat(0) };
 
 pub fn getSource(comptime Instance: type, instance: *anyopaque) *const World.ChunkSource {
     const self: *Instance = @ptrCast(@alignCast(instance));
@@ -784,6 +736,10 @@ const test_specs = .{
     .seed = .{ .is_seed = true },
     .value = .{ .min = 0, .max = 10 },
 };
+
+test {
+    std.testing.refAllDecls(@This());
+}
 
 test "fromStruct fromTree round trip" {
     const allocator = std.testing.allocator;

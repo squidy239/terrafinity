@@ -9,7 +9,7 @@ const World = @import("../World.zig");
 const ChunkPos = World.ChunkPos;
 const generator_api = @import("generator_api.zig");
 
-/// Base-3 levels tested per voxel; 3^15 blocks cover any practical world.
+/// Base-3 levels tested per voxel. 3^15 blocks cover any practical world.
 const menger_levels = 15;
 /// How far below the ceiling the spawn search looks for a floor.
 const spawn_scan_depth: i64 = 512;
@@ -20,7 +20,7 @@ pub const InfiniteMengerGenerator = struct {
 
     pub fn init(params: Params, seed: u64) InfiniteMengerGenerator {
         var clamped = params;
-        // A zero scale would divide by zero on every voxel; the config UI clamps too.
+        // A zero scale divides by zero on every voxel. The config UI clamps too.
         if (clamped.fractal_scale < 1) clamped.fractal_scale = 1;
         return .{ .params = clamped, .seed = seed };
     }
@@ -36,37 +36,19 @@ pub const InfiniteMengerGenerator = struct {
     };
 
     /// Tests one point against the infinite sponge.
-    inline fn isMengerSolid(bx: i64, by: i64, bz: i64, fractal_scale: i64) bool {
+    inline fn isMengerSolid(pos: @Vector(3, i64), fractal_scale: i64) bool {
+        const three: @Vector(3, i64) = @splat(3);
         // Widen walls by sampling in scaled coordinates.
-        const scaled_x = @divFloor(bx, fractal_scale);
-        const scaled_y = @divFloor(by, fractal_scale);
-        const scaled_z = @divFloor(bz, fractal_scale);
-
-        var scale: i64 = 1;
-
+        var digits_left = @divFloor(pos, @as(@Vector(3, i64), @splat(fractal_scale)));
         for (0..menger_levels) |_| {
-            const px = @mod(@divFloor(scaled_x, scale), 3);
-            const py = @mod(@divFloor(scaled_y, scale), 3);
-            const pz = @mod(@divFloor(scaled_z, scale), 3);
-
             // Hollow cells have two or three centered digits.
-            var middle_count: u8 = 0;
-            if (px == 1) middle_count += 1;
-            if (py == 1) middle_count += 1;
-            if (pz == 1) middle_count += 1;
-
-            if (middle_count >= 2) return false;
-
-            scale *= 3;
+            if (std.simd.countTrues(@mod(digits_left, three) == @as(@Vector(3, i64), @splat(1))) >= 2) return false;
+            digits_left = @divFloor(digits_left, three);
         }
-
         return true;
     }
 
-    pub fn genChunk(self: *InfiniteMengerGenerator, io: std.Io, allocator: std.mem.Allocator, chunk_pos: ChunkPos, blocks: *Chunk.Encoding, world: *World, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
-        _ = allocator;
-        _ = io;
-        _ = world;
+    pub fn genChunk(self: *InfiniteMengerGenerator, _: std.Io, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "GenMengerMegastructure" });
         defer zone.end();
 
@@ -78,52 +60,40 @@ pub const InfiniteMengerGenerator = struct {
         const fractal_scale: i64 = self.params.fractal_scale;
 
         // Chunks above the ceiling are open sky.
-        if (chunk_start[1] > @as(f32, @floatFromInt(max_height))) {
-            blocks.merge(.{ .uniform = .air }, grid_buffer);
-            return;
-        }
+        if (chunk_start[1] > @as(f32, @floatFromInt(max_height))) return blocks.mergeUniform(.air);
 
         var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = comptime @splat(@splat(@splat(.air)));
 
-        for (0..ChunkSize) |x| {
+        for (&block_grid, 0..) |*plane, x| {
             const bx = blockCoord(chunk_start[0], block_step, x);
-            for (0..ChunkSize) |y| {
+            for (plane, 0..) |*row, y| {
                 const by = blockCoord(chunk_start[1], block_step, y);
-
                 if (by > max_height) continue;
-
-                for (0..ChunkSize) |z| {
-                    const bz = blockCoord(chunk_start[2], block_step, z);
-
-                    if (!isMengerSolid(bx, by, bz, fractal_scale)) {
+                for (row, 0..) |*block, z| {
+                    const pos: @Vector(3, i64) = .{ bx, by, blockCoord(chunk_start[2], block_step, z) };
+                    block.* = if (!isMengerSolid(pos, fractal_scale))
                         // Voids below sea level hold water.
-                        block_grid[x][y][z] = if (by <= sea_level) .water else .air;
-                    } else if (by == max_height) {
-                        block_grid[x][y][z] = .grass;
-                    } else if (!isMengerSolid(bx, by + 1, bz, fractal_scale)) {
-                        block_grid[x][y][z] = if (by >= sea_level) .grass else .dirt;
-                    } else if (!isMengerSolid(bx, by - 1, bz, fractal_scale) and by > sea_level) {
+                        if (by <= sea_level) .water else .air
+                    else if (by == max_height)
+                        .grass
+                    else if (!isMengerSolid(pos + @Vector(3, i64){ 0, 1, 0 }, fractal_scale))
+                        if (by >= sea_level) .grass else .dirt
+                    else if (!isMengerSolid(pos - @Vector(3, i64){ 0, 1, 0 }, fractal_scale) and by > sea_level)
                         // Sparse emissive markers break up dark ceilings.
-                        const hash: u64 = @bitCast(bx *% 73856093 +% bz *% 19349663 +% by *% 83492791);
-                        block_grid[x][y][z] = if (hash % 15 == 0) .snow else .stone;
-                    } else {
-                        block_grid[x][y][z] = .stone;
-                    }
+                        if (@as(u64, @bitCast(pos[0] *% 73856093 +% pos[2] *% 19349663 +% pos[1] *% 83492791)) % 15 == 0) .snow else .stone
+                    else
+                        .stone;
                 }
             }
         }
 
-        if (Chunk.getUniform(&block_grid)) |uniform| {
-            blocks.merge(.{ .uniform = uniform }, grid_buffer);
-        } else {
-            blocks.merge(.{ .grid = &block_grid }, grid_buffer);
-        }
+        if (Chunk.getUniform(&block_grid)) |block| blocks.mergeUniform(block) else blocks.mergeGrid(&block_grid, grid_buffer);
     }
 };
 
-/// Block coordinate covered by cell `i` of one chunk axis. Exact at the
-/// standard level, where a cell is one block; finer levels cover sub-block
-/// cells and resolve to the block that contains them.
+/// Block coordinate covered by cell `i` of one chunk axis. It is exact at the
+/// standard level, where a cell is one block. At finer levels a cell is smaller
+/// than a block and resolves to the block that contains it.
 inline fn blockCoord(chunk_start: f32, block_step: f32, i: usize) i64 {
     return @intFromFloat(@floor(chunk_start + @as(f32, @floatFromInt(i)) * block_step));
 }
@@ -137,7 +107,7 @@ fn columnTopSolid(params: *const InfiniteMengerGenerator.Params, bx: i64, bz: i6
     const bottom = max_height - spawn_scan_depth;
     var y = max_height;
     while (y >= bottom) : (y -= 1) {
-        if (InfiniteMengerGenerator.isMengerSolid(bx, y, bz, fractal_scale)) return y;
+        if (InfiniteMengerGenerator.isMengerSolid(.{ bx, y, bz }, fractal_scale)) return y;
     }
     return null;
 }
@@ -145,10 +115,9 @@ fn columnTopSolid(params: *const InfiniteMengerGenerator.Params, bx: i64, bz: i6
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *SpongeInstance = @ptrCast(@alignCast(instance));
     const params = &self.generator.params;
-    var best = generator_api.SpawnBest{};
-    // Disc samples honor `radius`; later rings expand to escape hollow columns.
-    const capped = @min(attempts, generator_api.spawn_attempt_cap);
-    for (0..capped) |i| {
+    var best: generator_api.SpawnBest = .{};
+    // Disc samples honor `radius`. Later rings expand to escape hollow columns.
+    for (0..@min(attempts, generator_api.spawn_attempt_cap)) |i| {
         const sample = generator_api.spawnSample(self.generator.seed, .{ center[0], center[2] }, radius, nonce, @intCast(i));
         // Round to the block the host resolves for this column (`@round` there).
         const bx: i64 = @intFromFloat(@round(sample[0]));
@@ -272,4 +241,8 @@ pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const
 
 pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.ChunkSource {
     return generator_api.getSource(SpongeInstance, instance);
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

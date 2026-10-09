@@ -50,17 +50,17 @@ player_block_mutex: std.Io.Mutex = .init,
 
 last_stream: std.Io.Timestamp = .zero,
 stream_is_running: std.atomic.Value(bool) = .init(false),
-stream_future: ?std.Io.Future(@typeInfo(@TypeOf(streamPass)).@"fn".return_type.?) = null,
+stream_future: TaskFuture(streamPass) = null,
 
 last_save: std.Io.Timestamp = .zero,
 save_is_running: std.atomic.Value(bool) = .init(false),
-save_future: ?std.Io.Future(@typeInfo(@TypeOf(saveFuture)).@"fn".return_type.?) = null,
+save_future: TaskFuture(saveFuture) = null,
 
-/// Background entity-drain task, started when idle like the chunk loader. The
-/// previous pass is joined before a new one starts; the new pass then runs
+/// Background entity-drain task, started when idle like the stream pass. The frame
+/// joins the previous pass before it starts a new one. The new pass then runs
 /// concurrently with draw. The player runs synchronously on the frame thread instead.
 entity_update_is_running: std.atomic.Value(bool) = .init(false),
-entity_drain_future: ?std.Io.Future(@typeInfo(@TypeOf(updateEntities)).@"fn".return_type.?) = null,
+entity_drain_future: TaskFuture(updateEntities) = null,
 
 group: std.Io.Group = .init,
 /// The next frame handles this error and closes the game.
@@ -101,18 +101,18 @@ pub const Options = struct {
 
     save_mode: World.WorldStorage.SaveMode = .only_modified,
 
-    /// Player body extent in blocks. Width spans X and Z; height spans Y.
+    /// Player body extent in blocks. Width spans X and Z. Height spans Y.
     player_width: f32 = 1.0,
     player_height: f32 = 4.0,
-    /// Rise walked over automatically when a horizontal move is blocked.
+    /// Rise the body walks over automatically when a block stops a horizontal move.
     step_height: f32 = 1.0,
     /// Rate the body climbs a step, in blocks per second.
     step_climb_speed: f32 = 20.0,
-    /// Peak jump height in blocks; converted to launch speed against gravity.
+    /// Peak jump height in blocks. The body converts it to a start speed against gravity.
     jump_height: f32 = 1.6,
     /// Ground movement speed in blocks per second.
     move_speed: f32 = 8.0,
-    /// Speed while the sprint key is held, as a multiple of `move_speed`. Clamped
+    /// Speed while the player holds the sprint key, as a multiple of `move_speed`. Clamped
     /// to at least 1 so the key can never slow the player down.
     sprint_multiplier: f32 = 1.6,
     /// Player inventory grid in slots, read when the player spawns. The first row is the hotbar.
@@ -182,6 +182,10 @@ pub const WorldOptions = struct {
 
 const GeneratorSelection = struct { generator: []const u8 = "Terrain" };
 
+fn TaskFuture(comptime function: anytype) type {
+    return ?std.Io.Future(@typeInfo(@TypeOf(function)).@"fn".return_type.?);
+}
+
 pub fn init(
     game: *@This(),
     io: std.Io,
@@ -192,12 +196,11 @@ pub fn init(
     vk_ctx: *VulkanContext,
     generators: *generator_loader.Registry,
 ) !void {
-    const owned_world_path = try allocator.dupe(u8, folder);
     game.* = .{
         .last_frametime = .now(io, .awake),
         .game_arena = .init(allocator),
         .options = game_options,
-        .world_path = owned_world_path,
+        .world_path = try allocator.dupe(u8, folder),
         .options_lock = game_options_lock,
         .allocator = undefined,
         .vulkan_renderer = undefined,
@@ -268,8 +271,8 @@ pub fn init(
     game.options_lock.unlockShared(io);
 
     game.world = .{
-        .chunks = try .init(allocator, chunk_cache_capacity, .{ .name = "chunk cache" }),
-        .grids = try .init(allocator, chunk_grid_capacity, .{ .name = "grid cache" }),
+        .chunks = try .init(allocator, chunk_cache_capacity),
+        .grids = try .init(allocator, chunk_grid_capacity),
         .config = world_options.world_config,
         .chunk_sources = .{ null, null, game.world_storage.getSource(), game.generator.source },
         .edit_callback = .{
@@ -331,7 +334,7 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
     var saw_liquid = false;
     while (y >= bottom) : (y -= 1) {
         const block = try reader.getBlock(io, allocator, .{ bx, y, bz }, World.standard_level);
-        // Only buoyant fluids read as open water; a leaf canopy must not reject a spawn.
+        // Only buoyant fluids read as open water. A leaf canopy must not reject a spawn.
         const liquid = if (block.fluidProperties()) |props| props.buoyancy > 0 else false;
         if (liquid) saw_liquid = true;
         if (!block.isSolid()) {
@@ -375,7 +378,6 @@ fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, cent
     return null;
 }
 
-/// Picks the canonical spawn once, then jitters around it on later joins. The generator proposes columns and the host scan fixes feet Y.
 /// Forgets the found spawn so the next world load searches again, and persists that.
 pub fn resetSpawn(self: *@This(), io: std.Io) !void {
     self.spawn.pos = .{ 0, 0, 0 };
@@ -390,11 +392,12 @@ fn saveSpawn(self: *@This(), io: std.Io) !void {
     try utils.saveZon(io, world_folder, "config/Spawn.zon", self.spawn);
 }
 
+/// Picks the canonical spawn once, then jitters around it on later joins. The generator proposes columns and the host scan fixes feet Y.
 fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !@Vector(3, f64) {
     if (game.spawn.found) {
         // Same radius on retry: growing it would abandon the island.
         if (try game.trySpawnRounds(io, allocator, game.spawn.pos, @floatFromInt(game.spawn.range), spawn_phase2_attempts, 2)) |pos| return pos;
-        // No fallback spawn exists; degrade to the canonical point itself.
+        // No fallback spawn exists, so degrade to the canonical point itself.
         std.log.warn("spawn phase 2 exhausted, degrading to canonical spawn", .{});
         return game.spawn.pos;
     }
@@ -452,7 +455,7 @@ pub fn recreateWorld(
     self.generator.saveConfig(io) catch return error.RecreateConfigSaveFailed;
 
     self.stopBackgroundWork(io);
-    // A full save is required before clear(): a skipped shard would be destroyed unsaved.
+    // clear() needs a full save first, or it destroys a skipped shard unsaved.
     self.world.saveAll(io) catch return error.RecreateChunkSaveFailed;
     self.world_storage.clear() catch return error.RecreateStorageClearFailed;
 
@@ -468,7 +471,7 @@ pub fn recreateWorld(
 fn cancelFuture(io: std.Io, future: anytype) void {
     if (future.*) |*f| {
         // Cancel waits for the task and reports its final result. A task that
-        // stopped because of the cancel reports error.Canceled, which is expected.
+        // stopped because of the cancel reports error.Canceled, which is not a fault.
         _ = f.cancel(io) catch |err| {
             if (@intFromError(err) != @intFromError(error.Canceled)) {
                 std.log.err("background task failed: {any}", .{err});
@@ -483,9 +486,8 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     const frame_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "frame" });
     defer frame_zone.end();
     const now: std.Io.Timestamp = .now(io, .awake);
-    const frame_time = self.last_frametime.durationTo(now);
+    const frame_ns = @max(self.last_frametime.durationTo(now).nanoseconds, 1);
     self.last_frametime = now;
-    const frame_ns = @max(frame_time.nanoseconds, 1);
     const current_fps: f32 = std.time.ns_per_s / @as(f32, @floatFromInt(frame_ns));
     self.debug_menu.fps = std.math.lerp(self.debug_menu.fps, current_fps, 0.01);
 
@@ -495,36 +497,26 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     if (actions) |held| {
         try self.handleButtonActions(io, held, tuning, @intCast(frame_ns));
     } else {
-        // No movement step replaced the velocity this frame; zero the stale drift
-        // (Survival keeps Y so gravity still pulls).
+        // No movement step replaced the velocity this frame, so zero the stale drift.
+        // Survival keeps Y so gravity still pulls.
         const body = &self.player.body;
         body.velocity = if (self.player.game_mode == .Survival) @Vector(3, f64){ 0, body.velocity[1], 0 } else @as(@Vector(3, f64), @splat(0));
     }
 
     const asyncs: tracy.Zone = .begin(.{ .src = @src(), .name = "asyncs" });
 
-    try restartFutures(self, io);
+    try restartFuture(io, &self.save_is_running, &self.last_save, &self.save_future, self.option(io, .save_frequency_ms), saveFuture, .{ self, io });
     try self.startStreamPass(io, allocator);
     try startEntityDrain(self, io, allocator);
-    // The player is updated synchronously every frame so the camera never waits
+    // The frame updates the player synchronously so the camera never waits
     // on the background drain.
     try self.updatePlayer(io, allocator, EntityRegistry.nowNs(io));
     self.publishPlayerBlock(io);
     asyncs.end();
-    const player_pos = self.player.body.pos;
 
-    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, player_pos);
+    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, self.player.body.pos);
 
     try self.handleErrors();
-}
-
-fn restartFutures(self: *@This(), io: std.Io) !void {
-    const z: tracy.Zone = .begin(.{ .src = @src(), .name = "restartFutures" });
-    defer z.end();
-    self.options_lock.lockSharedUncancelable(io);
-    const save_frequency_ms = self.options.save_frequency_ms;
-    self.options_lock.unlockShared(io);
-    try restartFuture(io, &self.save_is_running, &self.last_save, &self.save_future, save_frequency_ms, saveFuture, .{ self, io });
 }
 
 /// How often a pass runs without finished tasks, which bounds how late streaming notices the player moving.
@@ -541,13 +533,11 @@ fn startStreamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !vo
     try spawnTask(io, &self.stream_is_running, &self.stream_future, streamPass, .{ self, io, allocator });
 }
 
-/// The only caller of `streamer.pass`; `stream_is_running` keeps passes from overlapping.
+/// The only caller of `streamer.pass`. `stream_is_running` keeps passes from overlapping.
 fn streamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator) Io.Cancelable!void {
     defer self.stream_is_running.store(false, .seq_cst);
     const host: StreamHost = .{ .game = self, .allocator = allocator };
-    self.options_lock.lockSharedUncancelable(io);
-    const unload_interval_ms = self.options.mesh_unload_frequency_ms;
-    self.options_lock.unlockShared(io);
+    const unload_interval_ms = self.option(io, .mesh_unload_frequency_ms);
     // A canceled pass would drop the completions it took, stranding their loads.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
@@ -603,7 +593,7 @@ fn updateEntities(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
     defer zone.end();
 
     defer self.entity_update_is_running.store(false, .seq_cst);
-    // Cancellation is teardown, not a fault; every other update error is fatal.
+    // Cancellation is teardown, not a fault. Every other update error is fatal.
     self.entity_registry.drain(io, allocator, &self.world, EntityRegistry.nowNs(io)) catch |err| if (err != error.Canceled) return err;
 }
 
@@ -617,7 +607,7 @@ fn startEntityDrain(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !v
 
 /// Runs the player on the frame thread, outside the wheel.
 fn updatePlayer(self: *@This(), io: std.Io, allocator: std.mem.Allocator, now_ns: u64) !void {
-    // Cancellation is teardown, not a fault; every other update error is fatal.
+    // Cancellation is teardown, not a fault. Every other update error is fatal.
     self.entity_registry.updateNow(io, allocator, &self.world, self.player_entity, now_ns) catch |err| if (err != error.Canceled) return err;
 }
 
@@ -627,16 +617,16 @@ fn handleErrors(self: *@This()) !void {
     if (err != error.NoError) return err;
 }
 
-pub fn groupAsync(self: *Game, io: std.Io, function: anytype, args: anytype) void {
+fn groupAsync(self: *Game, io: std.Io, function: anytype, args: anytype) void {
     const wrapper = struct {
-        pub fn handler(game: *Game, fn_args: @TypeOf(args)) Io.Cancelable!void {
+        fn handler(game: *Game, fn_args: @TypeOf(args)) Io.Cancelable!void {
             @call(.always_inline, function, fn_args) catch |err| return game.deferError(err);
         }
     };
     self.group.async(io, wrapper.handler, .{ self, args });
 }
 
-/// Hands a background task's error to the next frame; cancellation passes through.
+/// Hands a background task's error to the next frame. Cancellation passes through.
 fn deferError(self: *Game, err: anyerror) Io.Cancelable!void {
     if (err == error.Canceled) return error.Canceled;
     const existing_error = self.deferred_error.cmpxchgStrong(@intFromError(error.NoError), @intFromError(err), .seq_cst, .seq_cst);
@@ -646,9 +636,7 @@ fn deferError(self: *Game, err: anyerror) Io.Cancelable!void {
 pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.Position) void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleMouseMotion" });
     defer z.end();
-    const sensitivity = self.getMouseSensitivity(io);
-
-    const view_dir_diff: @Vector(2, f32) = @Vector(2, f32){ mouse_motion.y, mouse_motion.x } * @as(@Vector(2, f32), @splat(sensitivity));
+    const view_dir_diff = @Vector(2, f32){ mouse_motion.y, mouse_motion.x } * @as(@Vector(2, f32), @splat(self.option(io, .mouse_sensitivity)));
 
     const small_f32 = 0.00001;
 
@@ -662,11 +650,8 @@ pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.Position)
 pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleScroll" });
     defer z.end();
-    self.options_lock.lockSharedUncancelable(io);
-    const scroll_sensitivity = self.options.scroll_sensitivity;
-    self.options_lock.unlockShared(io);
     switch (self.player.game_mode) {
-        .Creative, .Spectator => self.player.fly_speed_linear -= scroll * scroll_sensitivity,
+        .Creative, .Spectator => self.player.fly_speed_log2 -= scroll * self.option(io, .scroll_sensitivity),
         .Survival => {},
     }
 }
@@ -675,7 +660,7 @@ fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet, t
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleButtonActions" });
     defer z.end();
     switch (self.player.game_mode) {
-        .Creative, .Spectator => self.flyMove(actions),
+        .Creative, .Spectator => self.player.fly(wishDirection(self.getCameraFront(), actions)),
         .Survival => try self.player.walk(io, self.allocator, &self.world, .{
             .wish = wishDirectionHorizontal(self.player.view_direction, actions),
             .sprint = actions.contains(.sprint),
@@ -697,7 +682,7 @@ fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet, t
         .sphere_block = self.options.sphere_block,
     };
     self.options_lock.unlockShared(io);
-    groupAsync(self, io, itemAction, .{ self, io, item, use });
+    self.groupAsync(io, itemAction, .{ self, io, item, use });
 }
 
 fn spawnExplosive(self: *@This(), io: std.Io) !void {
@@ -715,7 +700,7 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
 }
 
 /// Runs the selected hotbar item for one frame's inputs. Item behavior lives in
-/// `Item.use`, so a raw click does nothing unless the matching tool is selected.
+/// `Item.use`, so a raw click does nothing unless the player selects the matching tool.
 fn itemAction(self: *@This(), io: std.Io, item: Item.Item, use: Item.UseContext) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "itemAction" });
     defer z.end();
@@ -727,23 +712,20 @@ fn itemAction(self: *@This(), io: std.Io, item: Item.Item, use: Item.UseContext)
 
 /// Fly wish direction from held keys, one unit per held axis key.
 fn wishDirection(camera_front: @Vector(3, f32), actions: *const Key.ActionSet) @Vector(3, f64) {
+    const front: @Vector(3, f64) = @floatCast(camera_front);
     var vel: @Vector(3, f64) = .{ 0, 0, 0 };
-    if (actions.contains(.forward)) vel += @as(@Vector(3, f64), @floatCast(camera_front));
-    if (actions.contains(.backward)) vel -= @as(@Vector(3, f64), @floatCast(camera_front));
+    if (actions.contains(.forward)) vel += front;
+    if (actions.contains(.backward)) vel -= front;
     if (actions.contains(.up)) vel += .{ 0, 1, 0 };
     if (actions.contains(.down)) vel -= .{ 0, 1, 0 };
     const cross = zm.Vec3f.crossRH(.{ .data = camera_front }, .{ .data = Renderer.cameraUp });
-    // Zero exactly when front is parallel to up, so strafe is undefined.
+    // The cross product is zero exactly when front is parallel to up. Strafe then has no direction.
     if (cross.lenSq() > 0) {
         const r: @Vector(3, f64) = @floatCast(@as(@Vector(3, f32), cross.norm().data));
         if (actions.contains(.right)) vel += r;
         if (actions.contains(.left)) vel -= r;
     }
     return vel;
-}
-
-fn flyMove(self: *@This(), actions: *const Key.ActionSet) void {
-    self.player.fly(wishDirection(self.getCameraFront(), actions));
 }
 
 /// Unit horizontal wish from yaw only, so looking up or down never scales walking.
@@ -786,7 +768,7 @@ fn publishPlayerBlock(self: *@This(), io: std.Io) void {
     self.player_block = @intFromFloat(@floor(self.player.body.pos));
 }
 
-/// The last published player block; safe from any task.
+/// The last published player block. Any task can call this.
 fn playerBlock(self: *@This(), io: std.Io) World.BlockPos {
     self.player_block_mutex.lockUncancelable(io);
     defer self.player_block_mutex.unlock(io);
@@ -805,12 +787,11 @@ fn snapshotView(self: *@This(), io: std.Io) ChunkStreamer.View {
     } };
 }
 
-fn getMouseSensitivity(self: *@This(), io: std.Io) f32 {
-    const z = tracy.Zone.begin(.{ .src = @src(), .name = "getMouseSensitivity" });
-    defer z.end();
+/// Reads one option under the shared options lock.
+fn option(self: *@This(), io: std.Io, comptime field: std.meta.FieldEnum(Options)) @FieldType(Options, @tagName(field)) {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
-    return self.options.mouse_sensitivity;
+    return @field(self.options, @tagName(field));
 }
 
 fn isUniformInvisible(io: std.Io, chunk: *Chunk) !bool {
@@ -828,7 +809,7 @@ fn streamChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, request
     var meshed = false;
     defer self.streamer.completions.push(io, .{ .pos = request.pos, .kind = request.kind, .meshed = meshed });
     switch (request.kind) {
-        // The task may start long after it was queued, so skip a chunk the player has left.
+        // The task may start long after the streamer queued it, so skip a chunk the player has left.
         .load => |settings| {
             const view: ChunkStreamer.View = .{ .settings = settings, .player_block = self.playerBlock(io) };
             if (!view.keeps(request.pos)) return;
@@ -847,21 +828,20 @@ fn meshChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos
     defer chunk.release();
 
     // Uniform invisible chunks produce no faces, so skip extraction unless an old mesh needs clearing. A concurrent edit queues its own pass, so this read cannot strand a mesh.
-    if (!try isUniformInvisible(io, chunk) or self.renderer.hasMesh(io, chunk_pos)) {
-        var neighbor_faces: [6]Chunk.Encoding.Face = undefined;
-        {
-            const zone_faces = tracy.Zone.begin(.{ .src = @src(), .name = "extract_faces" });
-            defer zone_faces.end();
-            inline for (&neighbor_faces, std.enums.values(Chunk.Encoding.FaceRotation)) |*face, rotation|
-                face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert());
-        }
-
-        const chunk_add = tracy.Zone.begin(.{ .src = @src(), .name = "chunk_add" });
-        defer chunk_add.end();
-        try chunk.lockShared(io);
-        defer chunk.unlockShared(io);
-        try self.renderer.addChunk(io, chunk_pos, chunk.encoding, &neighbor_faces);
+    if (try isUniformInvisible(io, chunk) and !self.renderer.hasMesh(io, chunk_pos)) return;
+    var neighbor_faces: [6]Chunk.Encoding.Face = undefined;
+    {
+        const zone_faces = tracy.Zone.begin(.{ .src = @src(), .name = "extract_faces" });
+        defer zone_faces.end();
+        inline for (&neighbor_faces, std.enums.values(Chunk.Encoding.FaceRotation)) |*face, rotation|
+            face.* = try (try self.world.loadChunk(io, allocator, chunk_pos.offset(rotation), false)).extractFace(io, rotation.invert());
     }
+
+    const chunk_add = tracy.Zone.begin(.{ .src = @src(), .name = "chunk_add" });
+    defer chunk_add.end();
+    try chunk.lockShared(io);
+    defer chunk.unlockShared(io);
+    try self.renderer.addChunk(io, chunk_pos, chunk.encoding, &neighbor_faces);
 }
 
 fn remesh(game: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos) !void {
@@ -871,19 +851,16 @@ fn remesh(game: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: W
 
 fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    // Remesh even outside the keep set, or a lingering or detached mesh keeps showing pre-edit blocks; the streamer drops a mesh nothing needs.
+    // Remesh even outside the keep set, or a lingering or detached mesh keeps showing pre-edit blocks. The streamer drops a mesh nothing needs.
     // Levels outside the streamed range hold no meshes, and edits propagate past them.
     const settings = game.snapshotView(io).settings;
     if (chunk_pos.level < settings.lowest_level or chunk_pos.level > settings.highest_level) return;
-    // A transient remesh failure leaves the edited chunk active but unmessed until the
-    // next edit; log it and continue. A storage-level Unrecoverable still aborts.
-    remesh(game, io, allocator, chunk_pos) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        error.Unrecoverable => {
-            std.log.err("remesh after edit failed at {any}: {any}", .{ chunk_pos, err });
-            return error.OnEditFailed;
-        },
-        else => |e| std.log.err("remesh after edit failed at {any}: {any}", .{ chunk_pos, e }),
+    // A transient remesh failure leaves the edited chunk active but unmeshed until the
+    // next edit, so log it and continue. A storage-level Unrecoverable still aborts.
+    remesh(game, io, allocator, chunk_pos) catch |err| {
+        if (err == error.Canceled) return error.Canceled;
+        std.log.err("remesh after edit failed at {any}: {any}", .{ chunk_pos, err });
+        if (err == error.Unrecoverable) return error.OnEditFailed;
     };
 }
 
@@ -904,14 +881,14 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
         .main_inventory = inventory,
     }, .{});
     game.player_entity = player_entity;
-    // The held reference keeps the player resident; the frame lane drives it.
+    // The held reference keeps the player resident. The frame lane drives it.
     game.player = @ptrCast(@alignCast(player_entity.ptr));
     game.publishPlayerBlock(io);
     game.renderer.updateCameraDirection(game.player.view_direction);
 }
 
-/// Placeholder starter row so the hotbar has icons to show; real item grants come
-/// later. Tool items get slots first, so block items are capped to fit the row.
+/// Placeholder starter row so the hotbar has icons to show. Real item grants come
+/// later. Tool items get slots first, so this caps block items to fit the row.
 fn fillStarterRow(inventory: *Item.Inventory) void {
     const tools = Item.extra_item_types[0..@min(Item.extra_item_types.len, inventory.width)];
     const block_slots = @min(Item.block_types.len, inventory.width - tools.len);
@@ -921,4 +898,8 @@ fn fillStarterRow(inventory: *Item.Inventory) void {
     for (tools, block_slots..) |item_type, col| {
         inventory.set(0, @intCast(col), .{ .item_type = item_type, .amount = 1 });
     }
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

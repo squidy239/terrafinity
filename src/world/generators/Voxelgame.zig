@@ -41,7 +41,7 @@ pub const Generator = struct {
     };
 
     pub const Params = struct {
-        /// The host fills a null seed before create; every noise seed derives from it.
+        /// The host fills a null seed before create. Every noise seed derives from it.
         seed: ?u64 = null,
         terrain_noise: Noise.Noise(f32),
         terrain_noise2: Noise.Noise(f32),
@@ -101,7 +101,7 @@ pub const Generator = struct {
             cache_size, cache_size * @sizeOf(ChunkHeightsValue),
         });
         return .{
-            .terrain_height_cache = try .init(allocator, cache_size, .{ .name = "terrain_height_cache" }),
+            .terrain_height_cache = try .init(allocator, cache_size),
             .params = seeded,
             .seed = seed,
         };
@@ -114,110 +114,79 @@ pub const Generator = struct {
         chunk_pos: ChunkPos,
         grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block,
     ) error{ Unrecoverable, OutOfMemory, Canceled }!void {
-        var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = comptime @splat(@splat(@splat(.null)));
+        var block_grid: [ChunkSize][ChunkSize][ChunkSize]Block align(Chunk.Encoding.GridAlignment) = undefined;
         const gen_zone: tracy.Zone = .begin(.{ .src = @src(), .name = "gen" });
         defer gen_zone.end();
 
         const level_scale = World.ChunkPos.toScale(chunk_pos.level);
-
-        const Pos = [3]i32{
-            @intCast(chunk_pos.position[0]),
-            @intCast(chunk_pos.position[1]),
-            @intCast(chunk_pos.position[2]),
-        };
-        const chunk_offset = [3]f32{
-            @floatFromInt(Pos[0] * @as(i32, ChunkSize)),
-            @floatFromInt(Pos[1] * @as(i32, ChunkSize)),
-            @floatFromInt(Pos[2] * @as(i32, ChunkSize)),
-        };
+        const pos = chunk_pos.position;
+        const chunk_offset: @Vector(3, f32) = @floatFromInt(pos * @as(@Vector(3, i32), @splat(ChunkSize)));
 
         // If the entire chunk rests below world zero, it starts as water.
-        const fill_block: Block = if (chunk_offset[1] < 0.0) .water else .air;
-        @memset(&block_grid, @splat(@splat(fill_block)));
-        var has_terrain = chunk_offset[1] < 0.0;
+        var has_terrain = pos[1] < 0;
+        @memset(&block_grid, @splat(@splat(if (has_terrain) .water else .air)));
 
-        const terrain_heights = self.getTerrainHeight(io, .{ Pos[0], Pos[2] }, chunk_pos.level) catch return error.Unrecoverable;
+        const terrain_heights = self.getTerrainHeight(io, .{ pos[0], pos[2] }, chunk_pos.level) catch return error.Unrecoverable;
 
-        var rand_impl = std.Random.DefaultPrng.init(self.seed +% @as(u64, @truncate(@as(u96, @bitCast(chunk_pos.position)))));
+        var rand_impl = std.Random.DefaultPrng.init(self.seed +% @as(u64, @truncate(@as(u96, @bitCast(pos)))));
 
         const scaled_dirt_depth = @as(i32, @intFromFloat(5.0 / @max(1.0, level_scale)));
         const tree_chance: f32 = 0.01 * self.params.scale;
+        const is_above_zero = pos[1] >= 0;
 
-        for (0..ChunkSize) |xx| {
-            const global_x = (chunk_offset[0] + @as(f32, @floatFromInt(xx))) * level_scale;
+        for (&block_grid, terrain_heights, 0..) |*plane, column_heights, xx| {
+            for (column_heights, 0..) |terrain_height, zz| {
+                const chunk_y = @divFloor(terrain_height, @as(i32, ChunkSize));
+                if (chunk_y < pos[1]) continue;
 
-            for (0..ChunkSize) |zz| {
-                const global_z = (chunk_offset[2] + @as(f32, @floatFromInt(zz))) * level_scale;
+                const is_top_chunk = chunk_y > pos[1];
+                const height: i32 = if (is_top_chunk) ChunkSize - 1 else @mod(terrain_height, ChunkSize);
+                const column: Column = .{
+                    .height = height,
+                    .dirt_threshold = @max(0, height - scaled_dirt_depth),
+                    .is_top_chunk = is_top_chunk,
+                    .is_above_zero = is_above_zero,
+                };
 
-                const tn = terrain_heights[xx][zz];
-                const chunk_y = @divFloor(tn, @as(i32, ChunkSize));
-
-                if (chunk_y < Pos[1]) continue;
-
-                const is_top_chunk = chunk_y > Pos[1];
-                const height: i32 = if (is_top_chunk) @as(i32, ChunkSize) - 1 else @mod(tn, @as(i32, ChunkSize));
-                std.debug.assert(height >= 0 and height < ChunkSize);
-
-                const dirt_threshold = @max(0, height - scaled_dirt_depth);
-
-                var yy: usize = 0;
-                while (yy <= @as(usize, @intCast(height))) : (yy += 1) {
-                    const global_y = (chunk_offset[1] + @as(f32, @floatFromInt(yy))) * level_scale;
-
-                    block_grid[xx][yy][zz] = self.genBlock(
-                        &rand_impl,
-                        .{ global_x, global_y, global_z },
-                        @intCast(yy),
-                        height,
-                        dirt_threshold,
-                        is_top_chunk,
-                        Pos[1],
-                    );
-                    if (block_grid[xx][yy][zz] != .air) has_terrain = true;
+                for (plane[0..@intCast(column.height + 1)], 0..) |*row, yy| {
+                    const local: @Vector(3, f32) = @floatFromInt(@Vector(3, usize){ xx, yy, zz });
+                    row[zz] = self.genBlock(&rand_impl, (chunk_offset + local) * @as(@Vector(3, f32), @splat(level_scale)), @intCast(yy), column);
+                    if (row[zz] != .air) has_terrain = true;
                 }
 
-                if (!self.params.trees or is_top_chunk or Pos[1] < 0) continue;
-                if (block_grid[xx][@intCast(height)][zz] != .grass) continue;
+                if (!self.params.trees or is_top_chunk or !is_above_zero) continue;
+                if (plane[@intCast(column.height)][zz] != .grass) continue;
                 if (rand_impl.random().float(f32) >= tree_chance) continue;
-                generateTree(&block_grid, xx, zz, height, self.params.scale, level_scale, &rand_impl);
+                generateTree(&block_grid, xx, zz, column.height, self.params.scale * level_scale, &rand_impl);
             }
         }
 
-        if (!has_terrain) {
-            blocks.merge(.{ .uniform = .air }, grid_buffer);
-            return;
-        }
-
-        if (Chunk.getUniform(&block_grid)) |uniform_block| {
-            blocks.mergeUniform(uniform_block);
-        } else {
-            blocks.mergeGrid(&block_grid, grid_buffer);
-        }
+        if (!has_terrain) return blocks.mergeUniform(.air);
+        if (Chunk.getUniform(&block_grid)) |block| blocks.mergeUniform(block) else blocks.mergeGrid(&block_grid, grid_buffer);
     }
 
-    fn genBlock(
-        self: *const Generator,
-        prng: *std.Random.DefaultPrng,
-        global: [3]f32,
-        yy: i32,
+    /// Per-column inputs for `genBlock`.
+    const Column = struct {
+        /// Local y of the column top in this chunk.
         height: i32,
         dirt_threshold: i32,
+        /// The terrain surface lies in a chunk above this one.
         is_top_chunk: bool,
-        pos_y: i32,
-    ) Block {
-        const cave_density: f32 = if (self.params.caves)
-            self.params.cave_noise.genNoise3D(global[0] * self.params.scale, global[1] * self.params.scale, global[2] * self.params.scale)
-        else
-            0.0;
+        is_above_zero: bool,
+    };
+
+    fn genBlock(self: *const Generator, prng: *std.Random.DefaultPrng, global: @Vector(3, f32), yy: i32, column: Column) Block {
+        const scaled = global * @as(@Vector(3, f32), @splat(self.params.scale));
+        const cave_density: f32 = if (self.params.caves) self.params.cave_noise.genNoise3D(scaled[0], scaled[1], scaled[2]) else 0.0;
         if (cave_density >= self.params.caveness) return .air;
-        if (is_top_chunk) return .stone;
+        if (column.is_top_chunk) return .stone;
 
         // Absolute depth keeps cover stable across detail levels.
-        const gm = @max(1, @as(i32, @intFromFloat(global[1] * self.params.scale)));
+        const gm = @max(1, @as(i32, @intFromFloat(scaled[1])));
 
         const rand = prng.random();
-        if (yy == height and rand.intRangeLessThan(i32, 0, 256) > gm and pos_y >= 0) return .grass;
-        if (yy >= dirt_threshold and rand.intRangeLessThan(i32, 0, 512) > gm) return .dirt;
+        if (yy == column.height and rand.intRangeLessThan(i32, 0, 256) > gm and column.is_above_zero) return .grass;
+        if (yy >= column.dirt_threshold and rand.intRangeLessThan(i32, 0, 512) > gm) return .dirt;
         return .stone;
     }
 
@@ -226,11 +195,9 @@ pub const Generator = struct {
         x: usize,
         z: usize,
         height: i32,
-        scale: f32,
-        level_scale: f32,
+        combined_scale: f32,
         rand: *std.Random.DefaultPrng,
     ) void {
-        const combined_scale = scale * level_scale;
         if (combined_scale > 16.0) return; // Trees stop past very low detail.
 
         const scale_max = @max(1.0, combined_scale);
@@ -239,31 +206,21 @@ pub const Generator = struct {
 
         if (tree_height == 0) return;
 
-        const trunk_height_calc = @as(i32, tree_height) - @as(i32, @intFromFloat(2.0 / scale_max));
-        const trunk_height = @as(u8, @intCast(@max(1, trunk_height_calc)));
+        const trunk_height = @max(1, @as(i32, tree_height) - @as(i32, @intFromFloat(2.0 / scale_max)));
         const canopy_width = @max(1, tree_height / 2);
-        const surface_y = height;
 
-        var yy: usize = 0;
-        while (yy < @as(usize, trunk_height)) : (yy += 1) {
-            const block_y = surface_y + @as(i32, @intCast(yy));
-            if (block_y >= 0 and block_y < ChunkSize) {
-                chunk_blocks[x][@intCast(block_y)][z] = .wood;
-            }
-        }
+        for (@intCast(height)..@intCast(@min(ChunkSize, height + trunk_height))) |y| chunk_blocks[x][y][z] = .wood;
 
-        const trunk_top = surface_y + @as(i32, @intCast(trunk_height));
+        const trunk_top = height + trunk_height;
         switch (tree_type) {
             0 => { // Spherical canopy
-                var layer_width: i8 = @intCast(canopy_width);
-                while (layer_width >= 0) : (layer_width -= 1) {
-                    setLeafLayer(chunk_blocks, x, z, trunk_top + layer_width, layer_width, true);
+                for (0..canopy_width + 1) |layer_width| {
+                    setLeafLayer(chunk_blocks, x, z, trunk_top + @as(i32, @intCast(layer_width)), layer_width, true);
                 }
             },
             1 => { // Conical canopy
-                var layer: u8 = 0;
-                while (layer < canopy_width) : (layer += 1) {
-                    setLeafLayer(chunk_blocks, x, z, trunk_top + @as(i32, layer), @intCast(canopy_width - layer), false);
+                for (0..canopy_width) |layer| {
+                    setLeafLayer(chunk_blocks, x, z, trunk_top + @as(i32, @intCast(layer)), canopy_width - layer, false);
                 }
             },
             else => {},
@@ -274,65 +231,54 @@ pub const Generator = struct {
         chunk_blocks: *[ChunkSize][ChunkSize][ChunkSize]Block,
         x: usize,
         z: usize,
-        layer_y_i: i32,
-        width: i16,
+        y: i32,
+        width: usize,
         round: bool,
     ) void {
-        if (layer_y_i < 0 or layer_y_i >= ChunkSize) return;
-        const layer_y: usize = @intCast(layer_y_i);
-
-        var dx: i16 = -width;
-        while (dx <= width) : (dx += 1) {
-            var dz: i16 = -width;
-            while (dz <= width) : (dz += 1) {
+        if (y < 0 or y >= ChunkSize) return;
+        const z_min = z -| width;
+        for (chunk_blocks[x -| width..@min(ChunkSize, x + width + 1)], x -| width..) |*plane, leaf_x| {
+            for (plane[@intCast(y)][z_min..@min(ChunkSize, z + width + 1)], z_min..) |*block, leaf_z| {
+                const dx = @max(leaf_x, x) - @min(leaf_x, x);
+                const dz = @max(leaf_z, z) - @min(leaf_z, z);
                 if (round and dx * dx + dz * dz > width * width) continue;
-                const leaf_x = @as(i32, @intCast(x)) + dx;
-                const leaf_z = @as(i32, @intCast(z)) + dz;
-                if (leaf_x >= 0 and leaf_x < ChunkSize and leaf_z >= 0 and leaf_z < ChunkSize) {
-                    chunk_blocks[@intCast(leaf_x)][layer_y][@intCast(leaf_z)] = .leaves;
-                }
+                block.* = .leaves;
             }
         }
     }
 
     fn getTerrainHeight(self: *Generator, io: std.Io, chunk_pos: [2]i32, level: i32) ![ChunkSize][ChunkSize]i32 {
-        if (self.terrain_height_cache.get(io, .{ .x = chunk_pos[0], .z = chunk_pos[1], .level = level })) |cached| {
-            return cached.value;
-        }
+        const key: ChunkHeightsKey = .{ .x = chunk_pos[0], .z = chunk_pos[1], .level = level };
+        if (self.terrain_height_cache.get(io, key)) |cached| return cached.value;
         const generated = self.genTerrainHeight(chunk_pos, level);
-        _ = self.terrain_height_cache.upsert(io, &.{
-            .key = .{ .x = chunk_pos[0], .z = chunk_pos[1], .level = level },
-            .value = generated,
-        });
+        _ = self.terrain_height_cache.upsert(io, &.{ .key = key, .value = generated });
         return generated;
     }
 
-    fn genTerrainHeight(self: *Generator, chunk_pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
+    fn genTerrainHeight(self: *const Generator, chunk_pos: [2]i32, level: i32) [ChunkSize][ChunkSize]i32 {
         const zone: tracy.Zone = .begin(.{ .src = @src(), .name = "GenTerrainHeight" });
         defer zone.end();
 
         const level_scale = World.ChunkPos.toScale(level);
-
-        const chunk_offset_x: f32 = @floatFromInt(chunk_pos[0] * @as(i32, ChunkSize));
-        const chunk_offset_z: f32 = @floatFromInt(chunk_pos[1] * @as(i32, ChunkSize));
-
-        const terrain_variance = @as(f32, @floatFromInt(self.params.terrain_max - self.params.terrain_min));
-        const terrain_min_f = @as(f32, @floatFromInt(self.params.terrain_min));
+        const chunk_offset_x: f32 = @floatFromInt(chunk_pos[0] * ChunkSize);
+        const chunk_offset_z: f32 = @floatFromInt(chunk_pos[1] * ChunkSize);
 
         var terrain_heights: [ChunkSize][ChunkSize]i32 = undefined;
-        for (0..ChunkSize) |xx| {
+        for (&terrain_heights, 0..) |*column_heights, xx| {
             const global_x = (chunk_offset_x + @as(f32, @floatFromInt(xx))) * level_scale;
-            for (0..ChunkSize) |zz| {
+            for (column_heights, 0..) |*terrain_height, zz| {
                 const global_z = (chunk_offset_z + @as(f32, @floatFromInt(zz))) * level_scale;
-
-                const noise = self.params.terrain_noise2.genNoise2D(global_x * self.params.scale, global_z * self.params.scale);
-
-                const absolute_world_height = (noise * terrain_variance) + terrain_min_f;
-
-                terrain_heights[xx][zz] = @as(i32, @intFromFloat(absolute_world_height / level_scale));
+                terrain_height.* = @intFromFloat(self.worldHeight(global_x, global_z) / level_scale);
             }
         }
         return terrain_heights;
+    }
+
+    /// Returns the terrain surface height at the world position `x, z`.
+    fn worldHeight(self: *const Generator, x: f32, z: f32) f32 {
+        const variance: f32 = @floatFromInt(self.params.terrain_max - self.params.terrain_min);
+        const min: f32 = @floatFromInt(self.params.terrain_min);
+        return self.params.terrain_noise2.genNoise2D(x * self.params.scale, z * self.params.scale) * variance + min;
     }
 };
 
@@ -424,10 +370,10 @@ const VoxelgameInstance = struct {
 };
 
 pub fn generator_create(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) callconv(.c) ?*anyopaque {
-    return create_instance(opts, config) catch return null;
+    return createInstance(opts, config) catch return null;
 }
 
-fn create_instance(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) !*VoxelgameInstance {
+fn createInstance(opts: *const generator_api.CreateOptions, config: *const generator_api.ConfigTree) !*VoxelgameInstance {
     var params: Generator.Params = .default;
     try generator_api.fromTree(Generator.Params, opts.allocator, config, &params, field_specs);
     const seed = params.seed orelse return error.MissingSeed;
@@ -435,15 +381,14 @@ fn create_instance(opts: *const generator_api.CreateOptions, config: *const gene
     errdefer opts.allocator.destroy(instance);
     instance.* = .{
         .generator = try Generator.init(opts.allocator, opts.max_cache_bytes, params, seed),
-        .source = undefined,
-    };
-    instance.source = .{
-        .data = instance,
-        .getTerrainHeight = null,
-        .getBlocks = generator_api.instanceGenBlocks(VoxelgameInstance),
-        .placeStructures = null, // trees are generated inline during block gen
-        .deinit = generator_api.instanceDeinit(VoxelgameInstance),
-        .save = null,
+        .source = .{
+            .data = instance,
+            .getTerrainHeight = null,
+            .getBlocks = generator_api.instanceGenBlocks(VoxelgameInstance),
+            .placeStructures = null, // genChunk places trees.
+            .deinit = generator_api.instanceDeinit(VoxelgameInstance),
+            .save = null,
+        },
     };
     return instance;
 }
@@ -452,18 +397,10 @@ pub fn generator_get_source(instance: *anyopaque) callconv(.c) *const World.Chun
     return generator_api.getSource(VoxelgameInstance, instance);
 }
 
-/// Single-point height for spawn scoring. Approximate: the host verifies the final point.
-fn columnSpawnHeight(self: *const Generator, x: f32, z: f32) f32 {
-    const variance: f32 = @floatFromInt(self.params.terrain_max - self.params.terrain_min);
-    const min: f32 = @floatFromInt(self.params.terrain_min);
-    const noise = self.params.terrain_noise2.genNoise2D(x * self.params.scale, z * self.params.scale);
-    return noise * variance + min;
-}
-
 pub fn generator_propose_spawn(instance: *anyopaque, center: *const [3]f64, radius: f64, attempts: u32, nonce: u64) callconv(.c) generator_api.Spawnpoint {
     const self: *VoxelgameInstance = @ptrCast(@alignCast(instance));
     // No sea level: water fills below y = 0, handled by the shared margin.
-    return generator_api.proposeSpawnField(self.generator.seed, center.*, radius, attempts, nonce, 0, &self.generator, columnSpawnHeight);
+    return generator_api.proposeSpawnField(self.generator.seed, center.*, radius, attempts, nonce, 0, &self.generator, Generator.worldHeight);
 }
 
 pub const generator_api_vtable: generator_api.GeneratorApi = .{
@@ -486,13 +423,15 @@ comptime {
 test "proposeSpawn is deterministic and plausible" {
     var generator = try Generator.init(std.testing.allocator, 0, .default, 42);
     defer generator.terrain_height_cache.deinit(std.testing.allocator);
-    var instance = VoxelgameInstance{ .generator = generator, .source = undefined };
-    const center = [3]f64{ 0, 0, 0 };
+    var instance: VoxelgameInstance = .{ .generator = generator, .source = undefined };
+    const center: [3]f64 = @splat(0);
     const a = generator_propose_spawn(&instance, &center, 0, 32, 1);
     const b = generator_propose_spawn(&instance, &center, 0, 32, 1);
     try std.testing.expect(a.found);
-    try std.testing.expectEqual(a.pos[0], b.pos[0]);
-    try std.testing.expectEqual(a.pos[1], b.pos[1]);
-    try std.testing.expectEqual(a.pos[2], b.pos[2]);
+    try std.testing.expectEqual(a.pos, b.pos);
     try std.testing.expect(std.math.isFinite(a.pos[1]));
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

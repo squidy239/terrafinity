@@ -16,12 +16,11 @@ pub const Generator = struct {
         self.* = undefined;
     }
 
-    /// Path of the config file this generator's tree is stored under,
-    /// `<lowercased name>_generator.zon` inside the world's config directory.
+    /// Path of the file that holds this generator's config tree:
+    /// `<lowercased name>_generator.zon` in the config directory.
     fn configPath(self: *const Generator, allocator: std.mem.Allocator, config_dir: []const u8) ![]const u8 {
-        const lower_name = try allocator.dupe(u8, self.info.name);
+        const lower_name = try std.ascii.allocLowerString(allocator, self.info.name);
         defer allocator.free(lower_name);
-        for (lower_name) |*c| c.* = std.ascii.toLower(c.*);
         return allocator.print("{s}/{s}_generator.zon", .{ config_dir, lower_name });
     }
 
@@ -77,6 +76,7 @@ pub const Generator = struct {
         defer allocator.free(tmp_path);
 
         {
+            // The temp file closes before the rename replaces the config.
             const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .lock = .exclusive });
             defer file.close(io);
             errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
@@ -85,8 +85,8 @@ pub const Generator = struct {
             var writer = file.writer(io, &buffer);
             try generator_api.emitZon(&writer.interface, tree);
             try writer.end();
-            try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, io);
         }
+        try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, io);
     }
 };
 
@@ -95,8 +95,8 @@ pub const Registry = struct {
     allocator: std.mem.Allocator,
     generators: std.ArrayList(Generator) = .empty,
 
-    /// A missing directory yields an empty registry; individual libraries
-    /// that fail to load are skipped with a logged error.
+    /// A missing directory gives an empty registry. The registry logs and skips
+    /// each library that fails to load.
     pub fn init(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) !Registry {
         var registry: Registry = .{ .allocator = allocator };
         errdefer registry.deinit(io);
@@ -109,8 +109,8 @@ pub const Registry = struct {
 
         var it = dir_handle.iterate();
         while (try it.next(io)) |entry| {
-            // Linux-only: generators are .generator shared libraries; skip anything
-            // else (configs, READMEs) so a stray file doesn't spam load errors.
+            // Generators are .generator shared libraries (Linux only). Skip other
+            // files (configs, READMEs) so that they do not cause load errors.
             if (!std.mem.endsWith(u8, entry.name, ".generator")) continue;
             const path = try std.Io.Dir.path.join(allocator, &.{ dir, entry.name });
             defer allocator.free(path);
@@ -132,17 +132,11 @@ pub const Registry = struct {
             return error.ApiVersionMismatch;
         }
 
-        const generator = Generator{
-            .lib = lib,
-            .info = info,
-            .api = api,
-        };
-        try self.generators.append(self.allocator, generator);
+        try self.generators.append(self.allocator, .{ .lib = lib, .info = info, .api = api });
         std.log.info("loaded generator {s} v{d}", .{ info.name, info.version });
     }
 
-    pub fn deinit(self: *Registry, io: std.Io) void {
-        _ = io;
+    pub fn deinit(self: *Registry, _: std.Io) void {
         for (self.generators.items) |*generator| generator.deinit();
         self.generators.deinit(self.allocator);
         self.* = undefined;
@@ -176,3 +170,7 @@ pub const GeneratorInstance = struct {
         try self.generator.saveConfig(self.allocator, io, self.config_dir, self.config);
     }
 };
+
+test {
+    std.testing.refAllDecls(@This());
+}
