@@ -362,9 +362,8 @@ fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, 
 fn trySpawnRounds(game: *@This(), io: std.Io, allocator: std.mem.Allocator, center: [3]f64, radius: f64, attempts: u32, phase: u8) !?@Vector(3, f64) {
     const generator = game.generator;
     for (0..spawn_rounds) |round| {
-        var nonce: u64 = undefined;
-        io.random(std.mem.asBytes(&nonce));
-        const spot = generator.generator.api.propose_spawn(generator.instance, &center, radius, attempts, nonce);
+        // The round index is the nonce, so a world spawns at the same place every launch while retries still sample new columns.
+        const spot = generator.generator.api.propose_spawn(generator.instance, &center, radius, attempts, round);
         if (!spot.found) {
             std.log.err("spawn phase {d} round {d}: generator abstained", .{ phase, round });
             return error.GeneratorSpawnFailed;
@@ -392,7 +391,7 @@ fn saveSpawn(self: *@This(), io: std.Io) !void {
     try utils.saveZon(io, world_folder, "config/Spawn.zon", self.spawn);
 }
 
-/// Picks the canonical spawn once, then jitters around it on later joins. The generator proposes columns and the host scan fixes feet Y.
+/// Picks the canonical spawn once, then searches deterministically around it on later joins. The generator proposes columns and the host scan fixes feet Y.
 fn resolveSpawnPos(game: *@This(), io: std.Io, allocator: std.mem.Allocator) !@Vector(3, f64) {
     if (game.spawn.found) {
         // Same radius on retry: growing it would abandon the island.
