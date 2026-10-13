@@ -65,9 +65,11 @@ pub const Player = struct {
     const walk_terminal_speed: f64 = 60.0;
     const coyote_window_ns: u64 = 100 * std.time.ns_per_ms;
     const jump_buffer_window_ns: u64 = 150 * std.time.ns_per_ms;
-    /// Fraction of upward speed kept when the jump key is released early.
+    /// Fraction of upward speed that stays when the player releases the jump key early.
     const jump_cut_factor: f64 = 0.5;
     const max_physics_dt: f64 = 0.1;
+    /// Keeps the fly speed inside the i32 range.
+    const max_fly_speed_log2: f32 = 31;
     /// Step settle walks one block per resolve pass, so keep the step within reach.
     const max_step_height: f64 = 4.0;
 
@@ -80,7 +82,7 @@ pub const Player = struct {
 
     /// One frame of walking input.
     pub const WalkInput = struct {
-        /// Unit horizontal direction, or zero when no movement key is held.
+        /// Unit horizontal direction, or zero when the player holds no movement key.
         wish: @Vector(2, f64),
         sprint: bool,
         jump: bool,
@@ -111,8 +113,8 @@ pub const Player = struct {
         self.selected_col = @min(col, hotbar.width - 1);
     }
 
-    /// Resizes one grid and keeps the selection inside the hotbar. Items outside the
-    /// new size are deleted.
+    /// Resizes one grid and keeps the selection inside the hotbar. The resize deletes
+    /// items outside the new size.
     pub fn resizeGrid(self: *@This(), allocator: std.mem.Allocator, grid: Grid, width: u32, rows: u32) !void {
         try self.inventories.getPtr(grid).resize(allocator, width, rows);
         self.selectSlot(self.selected_row, self.selected_col);
@@ -120,33 +122,31 @@ pub const Player = struct {
 
     /// Moves the selection by this frame's hotbar keys, wrapping at the grid edges.
     pub fn navigateHotbar(self: *@This(), actions: *const Key.ActionSet) void {
-        const first_hotbar = @backingInt(Key.Action.hotbar_key_0);
-        const hotbar_key_count = 10;
         const hotbar = self.inventories.getPtrConst(.hotbar);
         const width = hotbar.width;
         // Keys past the row's width do nothing instead of clamping onto the last slot.
-        inline for (0..hotbar_key_count) |slot| {
-            if (slot < width and actions.contains(@fromBackingInt(@intCast(first_hotbar + slot)))) self.selectSlot(self.selected_row, @intCast(slot));
+        for (0..Key.hotbar_slot_count) |slot| {
+            if (slot < width and actions.contains(Key.hotbarSlot(slot))) self.selectSlot(self.selected_row, @intCast(slot));
         }
         const row = self.selected_row;
         const col = self.selected_col;
         const height = hotbar.height();
-        if (actions.contains(.hotbar_left)) self.selectSlot(row, if (col == 0) width - 1 else col - 1);
+        if (actions.contains(.hotbar_left)) self.selectSlot(row, (col + width - 1) % width);
         if (actions.contains(.hotbar_right)) self.selectSlot(row, (col + 1) % width);
-        if (actions.contains(.hotbar_up) or actions.contains(.hotbar_scroll_up)) self.selectSlot(if (row == 0) height - 1 else row - 1, col);
-        if (actions.contains(.hotbar_down) or actions.contains(.hotbar_scroll_down)) self.selectSlot((row + 1) % height, col);
+        if (actions.contains(.hotbar_up)) self.selectSlot((row + height - 1) % height, col);
+        if (actions.contains(.hotbar_down)) self.selectSlot((row + 1) % height, col);
     }
 
     /// Sets the velocity straight from the wish, so fly input is frame-independent.
     pub fn fly(self: *@This(), wish: @Vector(3, f64)) void {
-        const speed: f64 = @min(@as(f32, @floatFromInt(std.math.maxInt(i32))), std.math.pow(f32, 2, self.fly_speed_log2));
+        const speed: f64 = @exp2(@min(self.fly_speed_log2, max_fly_speed_log2));
         self.body.velocity = wish * @as(@Vector(3, f64), @splat(speed));
     }
 
     /// Steers the velocity for one frame.
     pub fn walk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, world: *World, input: WalkInput) !void {
-        const z: tracy.Zone = .begin(.{ .src = @src(), .name = "walkMove" });
-        defer z.end();
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "walkMove" });
+        defer zone.end();
         const dt_s = @min(@as(f64, @floatFromInt(input.elapsed_ns)) / std.time.ns_per_s, max_physics_dt);
 
         var block_reader: World.Reader = .{ .world = world };
@@ -160,14 +160,13 @@ pub const Player = struct {
 
         const base_speed: f64 = @max(input.tuning.walk_speed, 0);
         const sprint: f64 = if (input.sprint) @max(input.tuning.sprint_multiplier, 1.0) else 1.0;
-        const jump_speed = @sqrt(2 * self.body.gravity * @max(input.tuning.jump_height, 0.0));
 
         var velocity = self.body.velocity;
         const moving = input.wish[0] != 0 or input.wish[1] != 0;
 
         // A step in progress counts as ground, so the body can launch off it.
         const buoyant = medium.buoyancy * fluid;
-        const jumped = self.applyJump(&velocity, on_ground or climbing, buoyant, input.jump, jump_speed, input.elapsed_ns);
+        const jumped = self.applyJump(&velocity, on_ground or climbing, buoyant, input);
         if (jumped) mover.climb_target_y = null;
 
         // Sprint scales the target, so it still has to fight the same fluid drag.
@@ -194,14 +193,15 @@ pub const Player = struct {
     /// Jump feel: coyote time, an input buffer, and release-to-shorten. A step in
     /// progress counts as ground, and a jump abandons the step. Returns whether a jump
     /// fired, so the caller can cancel any pending climb.
-    fn applyJump(self: *@This(), velocity: *@Vector(3, f64), grounded: bool, buoyant: f64, jump_pressed: bool, jump_speed: f64, dt_ns: u64) bool {
+    fn applyJump(self: *@This(), velocity: *@Vector(3, f64), grounded: bool, buoyant: f64, input: WalkInput) bool {
         const can_jump = grounded and buoyant < fluid_jump_block;
+        const jump_pressed = input.jump;
         const jump_edge = jump_pressed and !self.jump_held;
         self.jump_held = jump_pressed;
-        self.coyote_ns = if (can_jump) coyote_window_ns else self.coyote_ns -| dt_ns;
-        self.jump_buffer_ns = if (jump_edge) jump_buffer_window_ns else self.jump_buffer_ns -| dt_ns;
+        self.coyote_ns = if (can_jump) coyote_window_ns else self.coyote_ns -| input.elapsed_ns;
+        self.jump_buffer_ns = if (jump_edge) jump_buffer_window_ns else self.jump_buffer_ns -| input.elapsed_ns;
         if (self.jump_buffer_ns > 0 and self.coyote_ns > 0) {
-            velocity[1] = jump_speed;
+            velocity[1] = @sqrt(2 * self.body.gravity * @max(input.tuning.jump_height, 0.0));
             self.jump_buffer_ns = 0;
             self.coyote_ns = 0;
             self.jump_rising = true;
@@ -245,17 +245,15 @@ pub const Player = struct {
 
     /// Clamps and applies tuning to the live body.
     pub fn applyTuning(self: *@This(), tuning: Tuning) void {
-        const z: tracy.Zone = .begin(.{ .src = @src(), .name = "applyTuning" });
-        defer z.end();
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "applyTuning" });
+        defer zone.end();
         const mover = &self.body.mover;
         mover.step_height = std.math.clamp(@as(f64, tuning.step_height), 0, max_step_height);
         mover.step_climb_speed = @max(@as(f64, tuning.step_climb_speed), 1.0);
 
         const height: f64 = tuning.height;
         const new_box = Physics.Mover.boxFor(tuning.width, height);
-        const box_changed = !std.meta.eql(mover.bounding_box.min.data, new_box.min.data) or
-            !std.meta.eql(mover.bounding_box.max.data, new_box.max.data);
-        if (!box_changed) return;
+        if (std.meta.eql(mover.bounding_box, new_box)) return;
 
         // Keep the feet planted when the height changes.
         const old_height = mover.bounding_box.size().data[1];
@@ -295,7 +293,7 @@ pub const Explosive = struct {
     /// Last integration time on the `EntityRegistry.nowNs` clock.
     timestamp_ns: u64,
 
-    /// Normalizes `dir`; a zero direction leaves the explosive in place.
+    /// Normalizes `dir`. A zero direction leaves the explosive in place.
     pub fn init(pos: @Vector(3, f64), dir: @Vector(3, f32), timestamp_ns: u64) @This() {
         const unit = if (std.meta.eql(dir, @Vector(3, f32){ 0, 0, 0 }))
             dir
@@ -339,3 +337,7 @@ pub const Explosive = struct {
         return .{ .unload = unload, .update = update };
     }
 };
+
+test {
+    std.testing.refAllDecls(@This());
+}

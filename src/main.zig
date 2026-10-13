@@ -9,7 +9,6 @@ const vk = @import("vulkan");
 const wio = @import("wio");
 
 pub const Entity = @import("entity/Entity.zig");
-const EntityTypes = @import("entity/EntityTypes.zig");
 const Game = @import("Game.zig");
 const Key = @import("Key.zig");
 pub const SpatialHash = @import("libs/spatial_hash.zig").SpatialHash;
@@ -24,14 +23,16 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
-    const config_path: []const u8 = "Config.zon";
-    const worlds_path: []const u8 = "worlds";
+    const config_path = "Config.zon";
+    const keymap_path = "Keymap.zon";
+    const worlds_path = "worlds";
 
     var config_lock: std.Io.RwLock = .init;
     var config: Config = try .load(gpa, io, config_path);
     defer config.deinit(gpa);
     try config.save(io, config_path, &config_lock);
     defer config.save(io, config_path, &config_lock) catch |err| std.log.err("Saving config on exit failed: {any}", .{err});
+    var keymap: Key.Keymap = try .load(io, gpa, keymap_path);
 
     try writeEmbeddedGenerators(io);
     var generators = try generator_loader.Registry.init(gpa, io, "generators");
@@ -70,45 +71,8 @@ pub fn main(init: std.process.Init) !void {
     });
     defer backend.deinit();
 
-    const dvui_backend = dvui.Backend.init(&backend);
-    var ui_window = try dvui.Window.init(@src(), gpa, dvui_backend, .{});
+    var ui_window = try dvui.Window.init(@src(), gpa, dvui.Backend.init(&backend), .{});
     defer ui_window.deinit();
-
-    inline for (.{
-        .{ .key = .escape, .action = .escape_menu },
-        .{ .key = .left_gui, .action = .escape_menu },
-        .{ .key = .f11, .action = .fullscreen },
-        .{ .key = .f2, .action = .screenshot },
-        .{ .key = .f3, .action = .debug_menu },
-        .{ .key = .e, .action = .inventory },
-        .{ .key = .w, .action = .forward },
-        .{ .key = .s, .action = .backward },
-        .{ .key = .a, .action = .left },
-        .{ .key = .d, .action = .right },
-        .{ .key = .space, .action = .up },
-        .{ .key = .left_shift, .action = .down },
-        .{ .key = .left_control, .action = .sprint },
-        .{ .key = .mouse_left, .action = .use_item_primary },
-        .{ .key = .mouse_right, .action = .use_item_secondary },
-        .{ .key = .f, .action = .use_item_tertiary },
-        .{ .key = .t, .action = .spawn_explosive },
-        .{ .key = .left, .action = .hotbar_left },
-        .{ .key = .right, .action = .hotbar_right },
-        .{ .key = .up, .action = .hotbar_up },
-        .{ .key = .down, .action = .hotbar_down },
-        .{ .key = .@"1", .action = .hotbar_key_0 },
-        .{ .key = .@"2", .action = .hotbar_key_1 },
-        .{ .key = .@"3", .action = .hotbar_key_2 },
-        .{ .key = .@"4", .action = .hotbar_key_3 },
-        .{ .key = .@"5", .action = .hotbar_key_4 },
-        .{ .key = .@"6", .action = .hotbar_key_5 },
-        .{ .key = .@"7", .action = .hotbar_key_6 },
-        .{ .key = .@"8", .action = .hotbar_key_7 },
-        .{ .key = .@"9", .action = .hotbar_key_8 },
-        .{ .key = .@"0", .action = .hotbar_key_9 },
-    }) |bind| {
-        input.key_map.put(bind.key, bind.action);
-    }
 
     var game: Game = undefined;
     var test_play_error: ?anyerror = null;
@@ -132,6 +96,8 @@ pub fn main(init: std.process.Init) !void {
         .menu_state = .{ .ingame = in_game, .page = if (in_game) .game else .main },
         .world_error = test_play_error,
         .config_path = config_path,
+        .keymap = &keymap,
+        .keymap_path = keymap_path,
         .worlds_path = worlds_path,
         .running = &running,
         .config_section_states = .init(gpa),
@@ -143,9 +109,9 @@ pub fn main(init: std.process.Init) !void {
     defer if (ui.menu_state.ingame) game.deinit(io);
 
     const start_time: std.Io.Timestamp = .now(io, .awake);
-    var frame_time: std.Io.Timestamp = start_time;
-    var current_window_mode: wio.WindowMode = .maximized;
-    var pre_fullscreen_window_mode: wio.WindowMode = .maximized;
+    var window_mode: wio.WindowMode = .maximized;
+    // The fullscreen key swaps the two modes.
+    var other_window_mode: wio.WindowMode = .fullscreen;
     var swapchain_recreate_failures: u32 = 0;
 
     var ui_cmd_buffers: [VulkanContext.max_frames_in_flight]vk.CommandBuffer = undefined;
@@ -167,33 +133,30 @@ pub fn main(init: std.process.Init) !void {
         wio.update();
         // Captured before the escape toggle, so gameplay input follows the page the events arrived on.
         const playing = ui.menu_state.isPlayingGame();
-        try handleEvents(io, &input, &backend, &window, &events, &ui, vk_ctx);
-        const action_set = input.actions;
+        try handleEvents(io, &input, &backend, &window, &events, &ui);
+        // The previous frame's text focus still holds here, since dvui resets it in `begin`.
+        const action_set = input.buttons.takeActions(&keymap, ui_window.textInputRequested() != null);
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
         if (action_set.contains(.inventory)) ui.menu_state.toggleInventory();
         if (action_set.contains(.fullscreen)) {
-            if (current_window_mode == .fullscreen) {
-                current_window_mode = pre_fullscreen_window_mode;
-            } else {
-                pre_fullscreen_window_mode = current_window_mode;
-                current_window_mode = .fullscreen;
-            }
-            window.setMode(current_window_mode);
+            std.mem.swap(wio.WindowMode, &window_mode, &other_window_mode);
+            window.setMode(window_mode);
             vk_ctx.requestSwapchainRecreate();
         }
         if (action_set.contains(.screenshot)) {
             const res = config.game_config.render_options.screenshot_resolution;
             vk_ctx.requestScreenshot(res);
-            std.log.info("Screenshot requested via F2 with resolution {s}", .{res.label()});
+            std.log.info("Screenshot requested with resolution {s}", .{res.label()});
         }
         if (action_set.contains(.debug_menu)) {
             ui.menu_state.debug_info = !ui.menu_state.debug_info;
-            std.log.info("Debug menu toggled via F3: {any}", .{ui.menu_state.debug_info});
+            std.log.info("Debug menu toggled: {any}", .{ui.menu_state.debug_info});
         }
-        frame_time = .now(io, .awake);
+        const frame_time: std.Io.Timestamp = .now(io, .awake);
+        const elapsed_s = start_time.untilNow(io, .awake).toSeconds();
 
         if (options.test_play) |timeout| {
-            if (start_time.untilNow(io, .awake).toSeconds() >= timeout) {
+            if (elapsed_s >= timeout) {
                 std.log.info("Test play timeout reached", .{});
                 running.store(false, .unordered);
                 break;
@@ -202,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Take an automatic screenshot once the timeout elapses.
         if (screenshot_after) |screenshot_timeout| {
-            if (start_time.untilNow(io, .awake).toSeconds() >= screenshot_timeout) {
+            if (elapsed_s >= screenshot_timeout) {
                 std.log.info("Screenshot after timeout reached ({d}s), requesting screenshot", .{screenshot_timeout});
                 vk_ctx.requestScreenshot(config.game_config.render_options.screenshot_resolution);
                 screenshot_after = null;
@@ -212,13 +175,13 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (vk_ctx.swapchain_needs_recreate.load(.monotonic)) {
-            try recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options, &swapchain_recreate_failures);
+            try recreateSwapchainOrFail(io, &ui, config.game_config.render_options, &swapchain_recreate_failures);
             continue;
         }
 
         const frame_ctx = vk_ctx.beginFrame() catch |err| switch (err) {
             error.OutOfDate => {
-                try recreateSwapchainOrFail(io, vk_ctx, &ui, &game, config.game_config.render_options, &swapchain_recreate_failures);
+                try recreateSwapchainOrFail(io, &ui, config.game_config.render_options, &swapchain_recreate_failures);
                 continue;
             },
             error.SurfaceLost => {
@@ -245,8 +208,7 @@ pub fn main(init: std.process.Init) !void {
 
         try ui.recordCommandBuffer(io, gpa, &backend, ui_cmd_buffers[frame_ctx.frame_index], frame_ctx, frame_time);
 
-        const prepass_cmd = backend.takePrepass();
-        try vk_ctx.submitFrameWithExtra(io, frame_ctx, prepass_cmd, ui_cmd_buffers[frame_ctx.frame_index], was_ingame);
+        try vk_ctx.submitFrameWithExtra(io, frame_ctx, backend.takePrepass(), ui_cmd_buffers[frame_ctx.frame_index], was_ingame);
 
         vk_ctx.present(io, frame_ctx) catch |err| switch (err) {
             error.OutOfDate => vk_ctx.swapchain_needs_recreate.store(true, .monotonic),
@@ -257,21 +219,8 @@ pub fn main(init: std.process.Init) !void {
             else => std.log.err("present failed: {}", .{err}),
         };
 
-        // Save only after the GPU finishes the frame.
         if (vk_ctx.screenshot_pending_save) {
-            const current_frame_val = vk_ctx.frame_number.load(.acquire);
-            const wait_info: vk.SemaphoreWaitInfo = .{
-                .semaphore_count = 1,
-                .p_semaphores = (&vk_ctx.graphics_timeline_semaphore)[0..1],
-                .p_values = (&current_frame_val)[0..1],
-            };
-            // The save reads the host-coherent staging buffer, so the frame's GPU work must
-            // finish first. After a failed wait the contents are undefined, so do not write them.
-            const saved = if (vk_ctx.dev.waitSemaphores(&wait_info, std.math.maxInt(u64))) |_|
-                vk_ctx.savePendingScreenshot(io, gpa)
-            else |err|
-                err;
-            if (saved) |saved_path| {
+            if (saveFinishedScreenshot(io, gpa, vk_ctx)) |saved_path| {
                 std.log.info("Screenshot saved: {s}", .{saved_path});
                 if (exit_on_screenshot) {
                     std.log.info("Auto screenshot completed, exiting", .{});
@@ -293,24 +242,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (ui.menu_state.pending_world_recreate) {
             ui.menu_state.pending_world_recreate = false;
-            if (vk_ctx.deviceWaitIdleLocked(io)) |_| {
-                game.recreateWorld(io, gpa, vk_ctx, &generators) catch |err| {
-                    std.log.err("terrain world recreation failed: {any}", .{err});
-                    ui.terrain_recreate_error = @errorName(err);
-                    const game_closed = switch (err) {
-                        error.RecreatePathAllocationFailed,
-                        error.RecreateConfigSaveFailed,
-                        error.RecreateChunkSaveFailed,
-                        error.RecreateStorageClearFailed,
-                        => false,
-                        else => true,
-                    };
-                    if (game_closed) ui.menu_state.leaveGame();
-                };
-            } else |err| {
-                std.log.err("could not wait for the GPU before terrain recreation: {any}", .{err});
-                ui.terrain_recreate_error = @errorName(err);
-            }
+            recreateWorld(io, gpa, &ui, &generators);
         }
 
         tracy.frameMark(null);
@@ -333,7 +265,7 @@ pub const Config = struct {
             else => return err,
         };
         defer file.close(io);
-        return try utils.loadZon(Config, io, file, allocator, allocator);
+        return utils.loadZon(Config, io, file, allocator, allocator);
     }
 
     pub fn save(self: *const Config, io: std.Io, path: []const u8, config_lock: ?*std.Io.RwLock) !void {
@@ -381,8 +313,11 @@ fn writeEmbeddedGenerators(io: std.Io) !void {
     }
 }
 
+/// The number of event polls to wait for the first window size before keeping the default.
+const max_initial_size_polls = 100;
+
 fn pollInitialSize(events: *wio.EventQueue, size: *wio.Size) void {
-    for (0..100) |_| {
+    for (0..max_initial_size_polls) |_| {
         wio.update();
         while (events.pop()) |event| {
             if (event == .size_physical) {
@@ -395,15 +330,9 @@ fn pollInitialSize(events: *wio.EventQueue, size: *wio.Size) void {
 
 const max_swapchain_recreate_failures: u32 = 120;
 
-fn recreateSwapchainOrFail(
-    io: std.Io,
-    vk_ctx: *VulkanContext,
-    ui: *Ui,
-    game: *Game,
-    render_options: Renderer.RenderOptions,
-    consecutive_failures: *u32,
-) !void {
-    recreateSwapchainForMenuOrGame(io, vk_ctx, ui, game, render_options) catch |err| {
+/// Recreates the swapchain. Returns an error only after `max_swapchain_recreate_failures` failures in a row.
+fn recreateSwapchainOrFail(io: std.Io, ui: *Ui, render_options: Renderer.RenderOptions, consecutive_failures: *u32) !void {
+    recreateSwapchain(io, ui, render_options) catch |err| {
         consecutive_failures.* += 1;
         if (consecutive_failures.* >= max_swapchain_recreate_failures) {
             std.log.err("swapchain recreation failed {d} consecutive times; last error: {}", .{ consecutive_failures.*, err });
@@ -415,29 +344,60 @@ fn recreateSwapchainOrFail(
     consecutive_failures.* = 0;
 }
 
-fn recreateSwapchainForMenuOrGame(io: std.Io, vk_ctx: *VulkanContext, ui: *Ui, game: *Game, render_options: Renderer.RenderOptions) !void {
-    vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue) catch |err| {
-        std.log.err("queueWaitIdle failed during swapchain recreate: {}", .{err});
-        return err;
-    };
-
+/// Recreates the swapchain through the game renderer while in game, else directly for the menu.
+fn recreateSwapchain(io: std.Io, ui: *Ui, render_options: Renderer.RenderOptions) !void {
+    const vk_ctx = ui.vk_ctx;
+    try vk_ctx.dev.queueWaitIdle(vk_ctx.graphics_queue);
     vk_ctx.present_mode = render_options.present_mode;
     if (ui.menu_state.ingame) {
-        try game.renderer.recreateSwapchain(io);
+        try ui.game.renderer.recreateSwapchain(io);
     } else {
         try vk_ctx.createSwapchainLocked(io, render_options.gamma_correction);
     }
     vk_ctx.swapchain_needs_recreate.store(false, .monotonic);
 }
 
+/// Waits for the GPU to finish the frame, then saves the pending screenshot.
+fn saveFinishedScreenshot(io: std.Io, gpa: std.mem.Allocator, vk_ctx: *VulkanContext) ![]const u8 {
+    // The save reads the host-coherent staging buffer. A failed wait leaves its contents undefined, so the save does not run.
+    const frame_number = vk_ctx.frame_number.load(.acquire);
+    _ = try vk_ctx.dev.waitSemaphores(&.{
+        .semaphore_count = 1,
+        .p_semaphores = (&vk_ctx.graphics_timeline_semaphore)[0..1],
+        .p_values = (&frame_number)[0..1],
+    }, std.math.maxInt(u64));
+    return vk_ctx.savePendingScreenshot(io, gpa);
+}
+
+/// Rebuilds the terrain world. A failure that closes the game also leaves it in the menu.
+fn recreateWorld(io: std.Io, gpa: std.mem.Allocator, ui: *Ui, generators: *generator_loader.Registry) void {
+    ui.vk_ctx.deviceWaitIdleLocked(io) catch |err| {
+        std.log.err("could not wait for the GPU before terrain recreation: {any}", .{err});
+        ui.terrain_recreate_error = @errorName(err);
+        return;
+    };
+    ui.game.recreateWorld(io, gpa, ui.vk_ctx, generators) catch |err| {
+        std.log.err("terrain world recreation failed: {any}", .{err});
+        ui.terrain_recreate_error = @errorName(err);
+        switch (err) {
+            error.RecreatePathAllocationFailed,
+            error.RecreateConfigSaveFailed,
+            error.RecreateChunkSaveFailed,
+            error.RecreateStorageClearFailed,
+            => {},
+            else => ui.menu_state.leaveGame(),
+        }
+    };
+}
+
 /// Loop-thread input state carried between frames.
 const Input = struct {
-    key_map: Key.Map = .{},
-    actions: Key.ActionSet = .empty,
-    /// Single-press actions pressed this frame, applied next frame.
-    latch: Key.ActionSet = .empty,
-    logical_size: wio.Size = .{ .height = 480, .width = 640 },
-    window_size: wio.Size = .{ .height = 480, .width = 640 },
+    buttons: Key.Buttons = .{},
+    logical_size: wio.Size = default_size,
+    window_size: wio.Size = default_size,
+
+    /// The size until the window reports its real size.
+    const default_size: wio.Size = .{ .height = 480, .width = 640 };
 
     /// Applies a physical size, recreating the swapchain only when it changed.
     fn resize(self: *Input, vk_ctx: *VulkanContext, size: wio.Size) void {
@@ -447,7 +407,7 @@ const Input = struct {
     }
 };
 
-fn handleEvents(io: std.Io, input: *Input, backend: *dvui.backend, win: *wio.Window, events: *wio.EventQueue, ui: *Ui, vk_ctx: *VulkanContext) !void {
+fn handleEvents(io: std.Io, input: *Input, backend: *dvui.backend, win: *wio.Window, events: *wio.EventQueue, ui: *Ui) !void {
     const playing = ui.menu_state.isPlayingGame();
     if (playing) {
         win.enableRelativeMouse(.{ .unaccelerated = true });
@@ -455,27 +415,25 @@ fn handleEvents(io: std.Io, input: *Input, backend: *dvui.backend, win: *wio.Win
         win.disableRelativeMouse();
     }
 
-    // Latch single-press actions one frame so a same-batch release cannot cancel them.
-    input.actions = input.actions.differenceWith(Key.single_press).unionWith(input.latch);
-    input.latch = .empty;
-
     while (events.pop()) |event| {
+        // A press bound in the editor reaches neither dvui nor gameplay, so it cannot click or open a menu.
+        if (event == .button_press and ui.captureButton(io, event.button_press)) continue;
         _ = try backend.addEvent(ui.ui_window, event);
         switch (event) {
-            .button_press => |key| if (input.key_map.get(key)) |action| {
-                if (Key.single_press.contains(action)) input.latch.insert(action) else input.actions.insert(action);
-            },
-            .button_release => |key| if (input.key_map.get(key)) |action| {
-                if (!Key.single_press.contains(action)) input.actions.remove(action);
+            .button_press => |button| input.buttons.press(button),
+            .button_release => |button| input.buttons.release(button),
+            .unfocused => {
+                input.buttons.releaseAll();
+                ui.key_capture = null;
             },
             .close => ui.running.store(false, .unordered),
             .scroll_vertical => |scroll| if (playing) try ui.game.handleScroll(io, scroll),
             .mouse_relative => |mouse| if (playing and (mouse.x != 0 or mouse.y != 0)) ui.game.handleMouseMotion(io, mouse),
             .size_logical => |size| input.logical_size = size,
-            .size_physical => |size| input.resize(vk_ctx, size),
+            .size_physical => |size| input.resize(ui.vk_ctx, size),
             .scale => |scale| {
-                input.resize(vk_ctx, input.logical_size.multiply(scale));
-                vk_ctx.requestSwapchainRecreate();
+                input.resize(ui.vk_ctx, input.logical_size.multiply(scale));
+                ui.vk_ctx.requestSwapchainRecreate();
             },
             else => {},
         }

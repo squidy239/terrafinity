@@ -310,7 +310,7 @@ row3: (s·t/r, u·t/r, (f·t - near)/fnf, 1)
 
 ## Config compat
 
-`std.zon.parse` only tolerates missing fields that carry a **declaration default**, so every `Params` field keeps one (`.default` is just `Params{}`) or old saved configs break. Superseded fields stay declared with `.skip = true` in `field_specs` (`erosion_strength`, `erosion_fade_altitude`). `loadConfig` returns `error.InvalidConfig` instead of falling back, so a broken config fails loudly without being overwritten.
+`std.zon.parse` only tolerates missing fields that carry a **declaration default**, so every `Params` field keeps one (`.default` is just `Params{}`) or old saved configs break. Superseded fields stay declared with `.skip = true` in `field_specs` (`erosion_strength`, `erosion_fade_altitude`). `loadConfig` returns `error.InvalidConfig` instead of falling back, so a broken config fails loudly without being overwritten. `Keymap.zon` follows the same rules: `Key.Action` is `FieldEnum(Key.Keymap)`, so an action is added, renamed, or reordered by editing a defaulted `Keymap` field.
 
 ## Clearing RocksDB chunk storage
 
