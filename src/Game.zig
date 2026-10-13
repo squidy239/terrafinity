@@ -853,10 +853,9 @@ fn remesh(game: *@This(), io: std.Io, allocator: std.mem.Allocator, chunk_pos: W
 
 fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.ChunkPos, args: *anyopaque) !void {
     const game: *@This() = @ptrCast(@alignCast(args));
-    // Remesh even outside the keep set, or a lingering or detached mesh keeps showing pre-edit blocks. The streamer drops a mesh nothing needs.
-    // Levels outside the streamed range hold no meshes, and edits propagate past them.
-    const settings = game.snapshotView(io).settings;
-    if (chunk_pos.level < settings.lowest_level or chunk_pos.level > settings.highest_level) return;
+    // Outside the keep set only an existing mesh needs the edit, or a lingering or detached mesh keeps showing pre-edit blocks.
+    // Meshing anything else flashes a coarse chunk until the streamer drops it. `keeps` also rejects levels outside the streamed range.
+    if (!game.snapshotView(io).keeps(chunk_pos) and !game.renderer.hasMesh(io, chunk_pos)) return;
     // A transient remesh failure leaves the edited chunk active but unmeshed until the
     // next edit, so log it and continue. A storage-level Unrecoverable still aborts.
     remesh(game, io, allocator, chunk_pos) catch |err| {

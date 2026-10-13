@@ -36,16 +36,23 @@ const pending_queue_size = 512;
 const mesh_scratch_bytes = 64 * 1024;
 
 const SubmissionBatch = struct {
+    /// Command buffers of the entries that upload faces. Clears record none.
     cmds: [batch_size]vk.CommandBuffer = undefined,
-    pools: [batch_size]vk.CommandPool = undefined,
-    opaque_meshes: [batch_size]?gpu.UploadResult = undefined,
-    transparent_meshes: [batch_size]?gpu.UploadResult = undefined,
-    chunk_positions: [batch_size]ChunkPos = undefined,
+    cmd_count: usize = 0,
+    entries: [batch_size]Entry = undefined,
     count: usize = 0,
     /// Max graphics value the batch's face regions depend on; the transfer submit
     /// waits for this instead of the newest frame so fresh regions drain ungated.
     max_safe_graphics: u64 = 0,
     mutex: std.Io.Mutex = .init,
+
+    /// One mesh replacement. An entry without meshes clears the position and holds no pool.
+    const Entry = struct {
+        chunk_pos: ChunkPos,
+        pool: vk.CommandPool,
+        opaque_mesh: ?gpu.UploadResult,
+        transparent_mesh: ?gpu.UploadResult,
+    };
 };
 
 const PendingMeshUpload = struct {
@@ -199,6 +206,9 @@ pending_uploads_queue: std.Io.Queue(PendingMeshUpload) = undefined,
 pending_uploads_queue_buffer: [pending_queue_size]PendingMeshUpload = undefined,
 peeked_upload: ?PendingMeshUpload = null,
 submission_batch: SubmissionBatch = .{},
+/// Held from taking a batch until its entries are queued, so batches reach the pending
+/// queue in the order they left `submission_batch`.
+submit_order_mutex: std.Io.Mutex = .init,
 retire_mutex: std.Io.Mutex = .init,
 retired_meshes_mutex: std.Io.Mutex = .init,
 retired_meshes: std.ArrayList(RetiredMeshEntry) = undefined,
@@ -365,19 +375,11 @@ pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mes
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "addMesh" });
     defer zone.end();
 
-    // Nothing to upload: skip command resource acquisition entirely. The clear
-    // still flows through the pending queue so it stays ordered after any
-    // earlier upload of this position; timeline_value 0 retires without
-    // waiting on a transfer because it owns no GPU resources.
+    // Nothing to upload: skip command resource acquisition entirely. The clear still
+    // joins the batch, so it cannot overtake an earlier upload of this position that
+    // is waiting there.
     if (opaque_mesh.len == 0 and transparent_mesh.len == 0) {
-        try self.pushPendingUpload(io, .{
-            .chunk_pos = chunk_pos,
-            .timeline_value = 0,
-            .pool = .null_handle,
-            .opaque_mesh = null,
-            .transparent_mesh = null,
-        });
-        return;
+        return self.appendToBatch(io, null, .{ .chunk_pos = chunk_pos, .pool = .null_handle, .opaque_mesh = null, .transparent_mesh = null });
     }
 
     // Acquire every bounded resource up front, all or nothing: past this point the
@@ -410,27 +412,34 @@ pub fn addMesh(self: *ChunkRenderer, io: std.Io, chunk_pos: ChunkPos, opaque_mes
 
     try self.dev.endCommandBuffer(cmd);
 
+    try self.appendToBatch(io, cmd, .{ .chunk_pos = chunk_pos, .pool = pool, .opaque_mesh = opaque_res, .transparent_mesh = transparent_res });
+}
+
+/// Adds `entry` and its command buffer, if it records one, to the submission batch.
+fn appendToBatch(self: *ChunkRenderer, io: std.Io, cmd: ?vk.CommandBuffer, entry: SubmissionBatch.Entry) !void {
+    const batch = &self.submission_batch;
     while (true) {
         const zone_batch = tracy.Zone.begin(.{ .src = @src(), .name = "addMesh_lock_batch" });
-        self.submission_batch.mutex.lockUncancelable(io);
+        batch.mutex.lockUncancelable(io);
         zone_batch.end();
-        if (self.submission_batch.count < batch_size) break;
-        self.submission_batch.mutex.unlock(io);
+        if (batch.count < batch_size) break;
+        batch.mutex.unlock(io);
         // The batch is full: flush it outside the lock. Submit and queue pushes can
         // block on the GPU, which must not stall other addMesh calls.
         try self.submitBatch(io);
     }
-    defer self.submission_batch.mutex.unlock(io);
+    defer batch.mutex.unlock(io);
 
-    const count = self.submission_batch.count;
-    self.submission_batch.cmds[count] = cmd;
-    self.submission_batch.pools[count] = pool;
-    self.submission_batch.opaque_meshes[count] = opaque_res;
-    self.submission_batch.transparent_meshes[count] = transparent_res;
-    self.submission_batch.chunk_positions[count] = chunk_pos;
-    if (opaque_res) |upload| self.submission_batch.max_safe_graphics = @max(self.submission_batch.max_safe_graphics, upload.safe_graphics);
-    if (transparent_res) |upload| self.submission_batch.max_safe_graphics = @max(self.submission_batch.max_safe_graphics, upload.safe_graphics);
-    self.submission_batch.count += 1;
+    if (cmd) |command_buffer| {
+        batch.cmds[batch.cmd_count] = command_buffer;
+        batch.cmd_count += 1;
+    }
+    batch.entries[batch.count] = entry;
+    batch.count += 1;
+    const uploads: [2]?gpu.UploadResult = .{ entry.opaque_mesh, entry.transparent_mesh };
+    for (uploads) |result| {
+        if (result) |upload| batch.max_safe_graphics = @max(batch.max_safe_graphics, upload.safe_graphics);
+    }
 }
 
 /// Fills the pre-reserved staging slice and records the copy into the pre-reserved
@@ -489,6 +498,11 @@ fn submitBatch(self: *ChunkRenderer, io: std.Io) !void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch" });
     defer zone.end();
 
+    // Another flush could otherwise queue a later batch first, and an older upload of a
+    // position would then replace its newer mesh or survive its clear.
+    self.submit_order_mutex.lockUncancelable(io);
+    defer self.submit_order_mutex.unlock(io);
+
     // Swap the batch out under the lock; submit and queue pushes happen outside it
     // because they can block on the GPU and must not hold up other addMesh calls.
     const zone_lock = tracy.Zone.begin(.{ .src = @src(), .name = "submitBatch_lock" });
@@ -500,37 +514,39 @@ fn submitBatch(self: *ChunkRenderer, io: std.Io) !void {
     }
     var batch_copy: SubmissionBatch = self.submission_batch;
     self.submission_batch.count = 0;
+    self.submission_batch.cmd_count = 0;
     self.submission_batch.max_safe_graphics = 0;
     self.submission_batch.mutex.unlock(io);
     zone_lock.end();
-    const count = batch_copy.count;
-    const wait_graphics = batch_copy.max_safe_graphics;
+    const entries = batch_copy.entries[0..batch_copy.count];
 
-    const next_val = self.uploader.submitToTransferQueue(io, batch_copy.cmds[0..count], wait_graphics) catch |err| {
+    // A batch of only clears submits nothing and gets the newest transfer value, so
+    // its clears retire after every upload submitted before them.
+    const next_val = self.uploader.submitToTransferQueue(io, batch_copy.cmds[0..batch_copy.cmd_count], batch_copy.max_safe_graphics) catch |err| {
         // Nothing was submitted, so staging, regions, and pools can be released safely.
-        for (batch_copy.opaque_meshes[0..count], batch_copy.transparent_meshes[0..count]) |opaque_mesh, transparent_mesh| {
-            if (opaque_mesh) |upload| self.cancelUpload(io, upload);
-            if (transparent_mesh) |upload| self.cancelUpload(io, upload);
+        for (entries) |entry| {
+            if (entry.opaque_mesh) |upload| self.cancelUpload(io, upload);
+            if (entry.transparent_mesh) |upload| self.cancelUpload(io, upload);
+            if (entry.pool != .null_handle) self.uploader.returnPool(entry.pool);
         }
-        for (batch_copy.pools[0..count]) |pool| self.uploader.returnPool(pool);
         return err;
     };
 
     // Bind every slice before pushing any item: a push that fails partway through
     // the batch must not leave unbound staging entries behind, or retire stops at
     // the first entry without a timeline value and the ring wedges permanently.
-    for (batch_copy.opaque_meshes[0..count], batch_copy.transparent_meshes[0..count]) |opaque_mesh, transparent_mesh| {
-        if (opaque_mesh) |upload| self.uploader.bindStaging(io, upload.staging_slice, next_val);
-        if (transparent_mesh) |upload| self.uploader.bindStaging(io, upload.staging_slice, next_val);
+    for (entries) |entry| {
+        if (entry.opaque_mesh) |upload| self.uploader.bindStaging(io, upload.staging_slice, next_val);
+        if (entry.transparent_mesh) |upload| self.uploader.bindStaging(io, upload.staging_slice, next_val);
     }
 
-    for (batch_copy.opaque_meshes[0..count], batch_copy.transparent_meshes[0..count], batch_copy.chunk_positions[0..count], batch_copy.pools[0..count]) |opaque_mesh, transparent_mesh, chunk_pos, pool| {
+    for (entries) |entry| {
         try self.pushPendingUpload(io, .{
-            .chunk_pos = chunk_pos,
+            .chunk_pos = entry.chunk_pos,
             .timeline_value = next_val,
-            .pool = pool,
-            .opaque_mesh = if (opaque_mesh) |upload| upload.mesh else null,
-            .transparent_mesh = if (transparent_mesh) |upload| upload.mesh else null,
+            .pool = entry.pool,
+            .opaque_mesh = if (entry.opaque_mesh) |upload| upload.mesh else null,
+            .transparent_mesh = if (entry.transparent_mesh) |upload| upload.mesh else null,
         });
     }
 }
