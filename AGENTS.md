@@ -143,6 +143,7 @@ Anything that can block or introduce nondeterminism takes an `Io` instance.
 
 - The full suite has pre-existing wio/wayland crashes in headless environments; there, use `zig build` plus `-Dtest_filter` for the touched areas. Never substitute a filter for the suite where the suite runs.
 - `-Dtest_filter` substring-matches the fully-qualified name (`module.file.test.name`) and only sees files reachable from `main.zig`'s import graph — a new file's tests are invisible until something reachable references it. Unnamed `test {}` blocks always run; name a test that must be filterable.
+- Tests are slow, so before each run decide whether it is necessary. Run the suite once after all edits are done, not between edits or as an extra filtered pass. ReleaseFast test runs are very slow: run them almost never, only when a change hits a known ReleaseFast-only compiler bug (see Footguns) or after a large optimization is finished.
 - A test that writes to stdout (benchmarks) makes `zig build test` report a failed command on success: ignore a failed-step summary with no `error:` and no failing test.
 
 ## Writing tests

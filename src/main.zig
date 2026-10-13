@@ -80,6 +80,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .key = .f11, .action = .fullscreen },
         .{ .key = .f2, .action = .screenshot },
         .{ .key = .f3, .action = .debug_menu },
+        .{ .key = .e, .action = .inventory },
         .{ .key = .w, .action = .forward },
         .{ .key = .s, .action = .backward },
         .{ .key = .a, .action = .left },
@@ -169,6 +170,7 @@ pub fn main(init: std.process.Init) !void {
         try handleEvents(io, &input, &backend, &window, &events, &ui, vk_ctx);
         const action_set = input.actions;
         if (action_set.contains(.escape_menu)) ui.menu_state.handleEsc();
+        if (action_set.contains(.inventory)) ui.menu_state.toggleInventory();
         if (action_set.contains(.fullscreen)) {
             if (current_window_mode == .fullscreen) {
                 current_window_mode = pre_fullscreen_window_mode;

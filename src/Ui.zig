@@ -85,8 +85,9 @@ config_path: []const u8,
 worlds_path: []const u8,
 menu_background: dvui.Texture,
 /// One icon per item type, null when the pack has no file (draw the missing texture).
-hotbar_item_textures: std.enums.EnumArray(Item.ItemType, ?dvui.Texture) = .initFill(null),
-hotbar_missing_texture: ?dvui.Texture = null,
+item_textures: std.enums.EnumArray(Item.ItemType, ?dvui.Texture) = .initFill(null),
+/// Set by `initAssets`, like `menu_background`.
+missing_item_texture: dvui.Texture = undefined,
 ui_window: *dvui.Window,
 running: *std.atomic.Value(bool),
 config_section_states: std.AutoHashMap(u64, bool),
@@ -105,7 +106,8 @@ config_dirty: bool = false,
 menu_state: struct {
     ingame: bool = false,
     /// The full-screen page drawn over the game view. `.game` shows no page.
-    page: enum { game, main, settings, newgame, esc } = .main,
+    /// The inventory carries the slot the cursor picked up, so closing it drops the pick.
+    page: union(enum) { game, main, settings, newgame, esc, inventory: ?GridSlot } = .main,
     /// Preferences live beside the page so navigation never resets them.
     debug_info: bool = true,
     crosshair: bool = true,
@@ -120,9 +122,23 @@ menu_state: struct {
         return self.ingame and self.page == .game;
     }
 
-    /// Opens the escape menu in a game, or closes it when it is open.
+    /// Opens the escape menu in a game, or closes it or the inventory when one is open.
     pub fn handleEsc(self: *@This()) void {
-        if (self.ingame) self.page = if (self.page == .esc) .game else .esc;
+        if (!self.ingame) return;
+        self.page = switch (self.page) {
+            .esc, .inventory => .game,
+            else => .esc,
+        };
+    }
+
+    /// Opens the inventory during play, or closes it when it is open. Other pages ignore it.
+    pub fn toggleInventory(self: *@This()) void {
+        if (!self.ingame) return;
+        self.page = switch (self.page) {
+            .game => .{ .inventory = null },
+            .inventory => .game,
+            else => return,
+        };
     }
 
     fn enterGame(self: *@This()) void {
@@ -148,7 +164,7 @@ fn createTexture(self: *@This(), pixels: [*]const u8, width: u32, height: u32, i
     });
 }
 
-/// Uploads the menu background and the hotbar item icons.
+/// Uploads the menu background and the item icons.
 pub fn initAssets(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
     var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, menu_background_image);
     defer image.deinit(allocator);
@@ -165,14 +181,14 @@ fn loadItemTextures(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !v
     defer pack.dir.close(io);
 
     const missing_pixels: [4]u8 = .{ 255, 0, 255, 255 };
-    self.hotbar_missing_texture = try self.createTexture(@ptrCast(&missing_pixels), 1, 1, .nearest);
+    self.missing_item_texture = try self.createTexture(@ptrCast(&missing_pixels), 1, 1, .nearest);
 
     const item_info = @typeInfo(Item.ItemType).@"enum";
     inline for (item_info.field_names, item_info.field_values) |name, value| {
         const item_type: Item.ItemType = @fromBackingInt(value);
         const filename = try allocator.print("{s}.png", .{name});
         defer allocator.free(filename);
-        self.hotbar_item_textures.getPtr(item_type).* = try self.loadItemTexture(io, allocator, pack.dir, filename);
+        self.item_textures.getPtr(item_type).* = try self.loadItemTexture(io, allocator, pack.dir, filename);
     }
 }
 
@@ -191,7 +207,7 @@ fn loadItemTexture(self: *@This(), io: std.Io, allocator: std.mem.Allocator, dir
     try reader.interface.readSliceAll(bytes);
 
     var image = zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, bytes) catch |err| {
-        std.log.warn("hotbar: could not decode items/{s}: {any}", .{ filename, err });
+        std.log.warn("could not decode item icon items/{s}: {any}", .{ filename, err });
         return null;
     };
     defer image.deinit(allocator);
@@ -201,10 +217,10 @@ fn loadItemTexture(self: *@This(), io: std.Io, allocator: std.mem.Allocator, dir
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     self.ui_window.backend.textureDestroy(self.menu_background);
-    for (self.hotbar_item_textures.values) |texture| {
+    for (self.item_textures.values) |texture| {
         if (texture) |t| self.ui_window.backend.textureDestroy(t);
     }
-    if (self.hotbar_missing_texture) |t| self.ui_window.backend.textureDestroy(t);
+    self.ui_window.backend.textureDestroy(self.missing_item_texture);
     if (self.new_game.config) |config| generator_api.free(allocator, config);
     if (self.delete_world_name) |name| allocator.free(name);
     self.config_section_states.deinit();
@@ -255,9 +271,10 @@ fn drawFrame(self: *@This(), io: std.Io, gpa: std.mem.Allocator, frame_time: std
             std.log.err("debugInfo failed: {}", .{err});
         };
         if (self.menu_state.crosshair and self.menu_state.ingame) crossHair();
-        if (self.menu_state.ingame) self.hotbar();
+        if (self.menu_state.ingame and self.menu_state.page != .inventory) self.hotbar();
         switch (self.menu_state.page) {
             .game => {},
+            .inventory => |*held| self.inventoryMenu(held),
             .esc => self.escMenu(),
             .main => self.mainPage(io, gpa) catch |err| showWorldError(frame_time, err),
             .settings => self.settingsMenu(io, gpa) catch |err| std.log.err("settingsMenu failed: {}", .{err}),
@@ -496,17 +513,6 @@ fn settingsMenu(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void 
     dvui.labelNoFmt(@src(), "Settings", .{}, .{ .font = .{ .size = 28 }, .gravity_x = 0.5 });
     drawGeneralSettings(self, options);
     drawRenderSettings(self, allocator, options);
-
-    if (self.menu_state.ingame and dvui.button(@src(), "Terrain Developer Settings", .{}, .{
-        .gravity_x = 0.5,
-        .expand = .none,
-        .padding = .{ .x = 6, .w = 6, .y = 4, .h = 4 },
-        .margin = .{ .y = 8 },
-        .font = .{ .size = 10 },
-        .color_fill = .{ .color = .{ .r = 44, .g = 77, .b = 44, .a = 255 } },
-    })) {
-        self.menu_state.terrain_developer_settings = true;
-    }
 
     normalizeSettings(options);
 
@@ -782,6 +788,18 @@ fn drawGeneralSettings(self: *@This(), options: *Game.Options) void {
         _ = configSlider("Sprint Multiplier", &options.sprint_multiplier, .{}, 1, 3, settingsId("player.sprint_multiplier"));
     }
 
+    if (self.settingsSection(@src(), "Admin", settingsId("admin"), false)) |section| {
+        defer section.deinit();
+        dvui.labelNoFmt(@src(), "Shrinking a grid deletes the items that no longer fit.", .{}, .{ .font = .{ .size = 16 }, .color_text = .red, .padding = .{ .x = 8, .w = 8 } });
+        settingsSlider("Hotbar Width", &options.hotbar_width, 1, 16, settingsId("admin.hotbar_width"));
+        settingsSlider("Hotbar Height", &options.hotbar_height, 1, 8, settingsId("admin.hotbar_height"));
+        settingsSlider("Inventory Width", &options.inventory_width, 1, 16, settingsId("admin.inventory_width"));
+        settingsSlider("Inventory Height", &options.inventory_height, 1, 8, settingsId("admin.inventory_height"));
+        if (self.menu_state.ingame and dvui.button(@src(), "Terrain Developer Settings", .{}, .{ .margin = .{ .y = 8 } })) {
+            self.menu_state.terrain_developer_settings = true;
+        }
+    }
+
     if (self.settingsSection(@src(), "World Streaming", settingsId("streaming"), true)) |section| {
         defer section.deinit();
         settingsSlider("Minimum Detail Level", &options.lowest_level, -8, 24, settingsId("streaming.lowest_level"));
@@ -875,53 +893,165 @@ fn crossHair() void {
 }
 
 const selected_slot_color: dvui.Color = .{ .r = 90, .g = 140, .b = 220, .a = 255 };
-const hotbar_border_color: dvui.Color = .{ .r = 150, .g = 150, .b = 150, .a = 160 };
+const slot_border_color: dvui.Color = .{ .r = 150, .g = 150, .b = 150, .a = 160 };
+const item_icon_size: f32 = 36;
+/// Space between the main grid and the hotbar on the inventory page.
+const hotbar_gap: f32 = 12;
 
 /// Hotbar along the bottom. Number keys move the selection. Slots do not take
-/// clicks: play has no cursor, and an open menu is drawn over the bar.
+/// clicks: play has no cursor, and the inventory page hides the bar.
 fn hotbar(self: *@This()) void {
-    const player = self.game.player;
+    const column = bottomColumn();
+    defer column.deinit();
+    self.gridPanel(.hotbar, null);
+}
 
-    const bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+/// The column the hotbar sits in, so the inventory page can draw the hotbar in the same place.
+fn bottomColumn() *dvui.BoxWidget {
+    return dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .gravity_y = 1.0, .margin = .{ .y = 12 } });
+}
+
+/// The main grid right above the hotbar, over a dimmed game view. Clicking a slot
+/// picks it up and clicking another moves it there (see `Item.moveStack`), across
+/// both grids. `held` only names the slot, so closing the page can never lose an item.
+fn inventoryMenu(self: *@This(), held: *?GridSlot) void {
+    {
+        const backdrop = dvui.overlay(@src(), .{ .expand = .both, .background = true, .color_fill = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 120 } } });
+        defer backdrop.deinit();
+        const column = bottomColumn();
+        defer column.deinit();
+        self.gridPanel(.main, held);
+        _ = dvui.spacer(@src(), .{ .min_size_content = .height(hotbar_gap) });
+        self.gridPanel(.hotbar, held);
+    }
+    if (held.*) |slot| self.cursorIcon(self.gridSlot(slot).*.?);
+}
+
+/// One slot in one of the player's grids.
+const GridSlot = struct {
+    grid: EntityTypes.Player.Grid,
+    slot: Item.Inventory.Slot,
+};
+
+/// Draws one grid. With `held`, slots take clicks; without it, the grid only displays.
+fn gridPanel(self: *@This(), grid: EntityTypes.Player.Grid, held: ?*?GridSlot) void {
+    const player = self.game.player;
+    const inventory = player.inventories.getPtr(grid);
+    const panel = dvui.box(@src(), .{}, .{
+        .id_extra = @backingInt(grid),
         .gravity_x = 0.5,
-        .gravity_y = 1.0,
-        .margin = .{ .y = 12 },
+        .background = true,
+        .color_fill = .{ .color = .{ .r = 40, .g = 40, .b = 40, .a = 160 } },
         .padding = .all(2),
         .border = .all(2),
-        .color_border = .{ .color = hotbar_border_color },
+        .color_border = .{ .color = slot_border_color },
     });
-    defer bar.deinit();
+    defer panel.deinit();
 
-    for (player.main_inventory.rowSlots(player.selected_row), 0..) |item, col| {
-        self.hotbarSlot(@intCast(col), item, col == player.selected_col);
+    for (0..inventory.height()) |row| {
+        const bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = row });
+        defer bar.deinit();
+        for (0..inventory.width) |col| {
+            const here: GridSlot = .{ .grid = grid, .slot = .{ .row = @intCast(row), .col = @intCast(col) } };
+            const selected = grid == .hotbar and row == player.selected_row and col == player.selected_col;
+            const slot = itemSlot(col, selected);
+            defer slot.deinit();
+            if (held) |pick| {
+                if (dvui.clicked(slot.data(), .{})) self.clickSlot(pick, here);
+                // The held item follows the cursor instead of drawing in its slot.
+                if (std.meta.eql(pick.*, here)) continue;
+            }
+            const item = self.gridSlot(here).* orelse continue;
+            self.itemIcon(item);
+            // Like Minecraft, names only show on the open page while the cursor is empty.
+            if (held) |pick| if (pick.* == null) itemTooltip(slot.data(), item.item_type);
+        }
     }
 }
 
-fn hotbarSlot(self: *@This(), index: u32, item: ?Item.Item, selected: bool) void {
-    const color_fill: dvui.Color = if (selected) selected_slot_color else .transparent;
-    const slot = dvui.box(@src(), .{}, .{
-        .id_extra = index,
-        .min_size_content = .{ .w = 40, .h = 40 },
+fn gridSlot(self: *@This(), slot: GridSlot) *?Item.Item {
+    return self.game.player.inventories.getPtr(slot.grid).at(slot.slot);
+}
+
+fn itemTooltip(slot: *const dvui.WidgetData, item_type: Item.ItemType) void {
+    const name = switch (item_type) {
+        inline else => |tag| comptime itemName(@tagName(tag)),
+    };
+    dvui.tooltip(@src(), .{ .active_rect = slot.borderRectScale().r, .delay = 0 }, "{s}", .{name}, .{});
+}
+
+/// Display name from an item tag. Each snake_case or PascalCase word starts
+/// uppercase and is separated by a space ("fine_grass" -> "Fine Grass", "PlaceRod" -> "Place Rod").
+fn itemName(comptime tag: []const u8) []const u8 {
+    var name: []const u8 = "";
+    for (tag, 0..) |character, i| {
+        if (character == '_') continue;
+        const word_start = i == 0 or tag[i - 1] == '_' or std.ascii.isUpper(character);
+        const separator = if (word_start and name.len > 0) " " else "";
+        name = name ++ separator ++ .{if (word_start) std.ascii.toUpper(character) else character};
+    }
+    return name;
+}
+
+test itemName {
+    try std.testing.expectEqualStrings("Place Rod", comptime itemName("PlaceRod"));
+    try std.testing.expectEqualStrings("Fine Grass", comptime itemName("fine_grass"));
+}
+
+/// Picks up `slot` when nothing is held, otherwise moves the held item onto it.
+fn clickSlot(self: *@This(), held: *?GridSlot, slot: GridSlot) void {
+    if (held.*) |from| {
+        Item.moveStack(self.gridSlot(from), self.gridSlot(slot));
+        held.* = null;
+    } else if (self.gridSlot(slot).* != null) {
+        held.* = slot;
+    }
+}
+
+/// One slot frame. Its children stack on top of each other, so the amount overlays the icon.
+fn itemSlot(id_extra: usize, selected: bool) *dvui.OverlayWidget {
+    return dvui.overlay(@src(), .{
+        .id_extra = id_extra,
+        .min_size_content = .all(item_icon_size + 4),
         .padding = .all(2),
         .margin = .all(2),
         .border = .all(2),
-        .color_border = .{ .color = hotbar_border_color },
-        .color_fill = .{ .color = color_fill },
+        .color_border = .{ .color = slot_border_color },
+        .color_fill = .{ .color = if (selected) selected_slot_color else .transparent },
         .background = true,
     });
-    defer slot.deinit();
+}
 
-    if (item) |it| {
-        const texture = self.hotbar_item_textures.get(it.item_type) orelse self.hotbar_missing_texture;
-        if (texture) |tex| {
-            _ = dvui.image(@src(), .{ .source = .{ .texture = tex } }, .{
-                .id_extra = index,
-                .gravity_x = 0.5,
-                .gravity_y = 0.5,
-                .min_size_content = .{ .w = 36, .h = 36 },
-            });
-        }
-    }
+/// The item's icon, with its amount in the corner when the stack holds more than one.
+fn itemIcon(self: *@This(), item: Item.Item) void {
+    const texture = self.itemTexture(item.item_type);
+    _ = dvui.image(@src(), .{ .source = .{ .texture = texture } }, .{
+        .gravity_x = 0.5,
+        .gravity_y = 0.5,
+        .min_size_content = .all(item_icon_size),
+    });
+    if (item.amount <= 1) return;
+    dvui.label(@src(), "{d}", .{item.amount}, .{
+        .gravity_x = 1.0,
+        .gravity_y = 1.0,
+        .padding = .all(0),
+        .font = .{ .size = 10 },
+    });
+}
+
+/// Draws the held item centered on the mouse, above the page drawn before it.
+fn cursorIcon(self: *@This(), item: Item.Item) void {
+    const texture = self.itemTexture(item.item_type);
+    const scale = dvui.windowRectScale().s;
+    const size = item_icon_size * scale;
+    const mouse = dvui.currentWindow().mouse_pt;
+    const rect: dvui.Rect.Physical = .{ .x = mouse.x - size / 2, .y = mouse.y - size / 2, .w = size, .h = size };
+    dvui.renderTexture(texture, .{ .r = rect, .s = scale }, .{}) catch |err| std.log.warn("inventory: drawing the held item failed: {any}", .{err});
+}
+
+/// The pack's icon for an item, or the missing texture when the pack has none.
+fn itemTexture(self: *const @This(), item_type: Item.ItemType) dvui.Texture {
+    return self.item_textures.get(item_type) orelse self.missing_item_texture;
 }
 
 fn newGameGenerator(self: *@This()) ?*generator_loader.Generator {

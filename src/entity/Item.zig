@@ -46,11 +46,51 @@ pub const Inventory = struct {
         self.items[self.index(row, col)] = item;
     }
 
+    /// The slot itself, for edits in place such as `moveStack`.
+    pub fn at(self: *Inventory, slot: Slot) *?Item {
+        return &self.items[self.index(slot.row, slot.col)];
+    }
+
+    /// Changes the grid to `width` by `rows`. Items outside the new size are deleted; the
+    /// others keep their row and column. On OutOfMemory the grid stays unchanged.
+    /// TODO: release the `data` handle of each deleted item once items carry data.
+    pub fn resize(self: *Inventory, allocator: std.mem.Allocator, width: u32, rows: u32) !void {
+        if (width == self.width and rows == self.height()) return;
+        var resized: Inventory = try .init(allocator, width, rows);
+        const kept_width = @min(width, self.width);
+        for (0..@min(rows, self.height())) |row| {
+            @memcpy(resized.items[row * width ..][0..kept_width], self.items[row * self.width ..][0..kept_width]);
+        }
+        self.deinit(allocator);
+        self.* = resized;
+    }
+
     fn index(self: *const Inventory, row: u32, col: u32) usize {
         std.debug.assert(row < self.height() and col < self.width);
         return @as(usize, row) * self.width + col;
     }
+
+    /// One grid position.
+    pub const Slot = struct {
+        row: u32,
+        col: u32,
+    };
 };
+
+/// Moves the stack in `source` onto `dest`, which may lie in another inventory. A plain
+/// stack of the same type merges as far as the amount allows; anything else swaps, so
+/// no item is lost.
+pub fn moveStack(source: *?Item, dest: *?Item) void {
+    if (source == dest) return;
+    if (source.*) |*src| if (dest.*) |*dst| if (src.stacksWith(dst.*)) {
+        const moved = @min(src.amount, std.math.maxInt(u32) - dst.amount);
+        dst.amount += moved;
+        src.amount -= moved;
+        if (src.amount == 0) source.* = null;
+        return;
+    };
+    std.mem.swap(?Item, source, dest);
+}
 
 /// Debug cone the place-rod item digs and builds with.
 const rod_length: f32 = 100;
@@ -62,6 +102,11 @@ pub const Item = struct {
     /// Per-instance item data (durability, contents) held by an entity, or null
     /// for a plain stack. A weak handle: the owning container must hold the ref.
     data: ?Entity.Handle = null,
+
+    /// Reports whether `other` can merge into this stack. Items with per-instance data never merge.
+    pub fn stacksWith(self: Item, other: Item) bool {
+        return self.item_type == other.item_type and self.data == null and other.data == null;
+    }
 
     /// Edits `editor` for this frame's inputs. Block items do nothing. The caller flushes `editor`.
     pub fn use(self: Item, editor: *World.Editor, ctx: UseContext) !void {
@@ -158,6 +203,54 @@ test "ItemType covers every visible block" {
         try std.testing.expectEqual(block, toBlock(item_type).?);
     }
     for (extra_item_types) |item_type| try std.testing.expectEqual(@as(?Block, null), toBlock(item_type));
+}
+
+test "moveStack merges plain stacks and swaps the rest" {
+    var a: ?Item = .{ .item_type = .PlaceRod, .amount = 2 };
+    var b: ?Item = .{ .item_type = .PlaceRod, .amount = std.math.maxInt(u32) - 1 };
+    var c: ?Item = .{ .item_type = .PlaceSphere, .amount = 1 };
+
+    // A full destination keeps the remainder in the source.
+    moveStack(&a, &b);
+    try std.testing.expectEqual(std.math.maxInt(u32), b.?.amount);
+    try std.testing.expectEqual(1, a.?.amount);
+
+    moveStack(&c, &a);
+    try std.testing.expectEqual(.PlaceSphere, a.?.item_type);
+    try std.testing.expectEqual(.PlaceRod, c.?.item_type);
+
+    b = .{ .item_type = .PlaceRod, .amount = 1 };
+    moveStack(&b, &c);
+    try std.testing.expectEqual(null, b);
+    try std.testing.expectEqual(2, c.?.amount);
+
+    moveStack(&a, &a);
+    try std.testing.expectEqual(.PlaceSphere, a.?.item_type);
+}
+
+test "Inventory.resize keeps the overlap and deletes the rest" {
+    var inventory: Inventory = try .init(std.testing.allocator, 3, 2);
+    defer inventory.deinit(std.testing.allocator);
+    inventory.set(0, 0, .{ .item_type = .PlaceRod, .amount = 1 });
+    inventory.set(1, 2, .{ .item_type = .PlaceSphere, .amount = 1 });
+
+    try inventory.resize(std.testing.allocator, 2, 3);
+    try std.testing.expectEqual(.PlaceRod, inventory.get(0, 0).?.item_type);
+    for (inventory.items[1..]) |slot| try std.testing.expectEqual(null, slot);
+
+    try inventory.resize(std.testing.allocator, 4, 1);
+    try std.testing.expectEqual(.PlaceRod, inventory.get(0, 0).?.item_type);
+    try std.testing.expectEqual(4, inventory.items.len);
+}
+
+fn inventoryResizeDeinit(allocator: std.mem.Allocator) !void {
+    var inventory: Inventory = try .init(allocator, 3, 2);
+    defer inventory.deinit(allocator);
+    try inventory.resize(allocator, 4, 4);
+}
+
+test "Inventory.resize checkAllAllocationFailures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, inventoryResizeDeinit, .{});
 }
 
 test "refAllDecls" {

@@ -16,8 +16,8 @@ pub const Player = struct {
     game_mode: GameMode,
     /// Base-2 log of the fly speed, so scrolling scales it evenly.
     fly_speed_log2: f32 = 10,
-    main_inventory: Item.Inventory,
-    /// The inventory slot the player holds.
+    inventories: std.enums.EnumArray(Grid, Item.Inventory),
+    /// The hotbar slot the player holds.
     selected_row: u32 = 0,
     selected_col: u32 = 0,
     view_direction: @Vector(3, f32),
@@ -31,16 +31,19 @@ pub const Player = struct {
 
     body: Physics.Body,
 
+    /// The player's item grids. The selected item always comes from the hotbar.
+    pub const Grid = enum { hotbar, main };
+
     pub const GameMode = enum(u8) {
         Survival = 0,
         Creative = 1,
         Spectator = 3,
     };
 
-    /// Frees the player and its inventory when the registry drops it.
+    /// Frees the player and its inventories when the registry drops it.
     pub fn unload(ptr: *Entity.Implementation, _: std.Io, _: *World, _: Entity.Handle, allocator: std.mem.Allocator) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.main_inventory.deinit(allocator);
+        for (&self.inventories.values) |*inventory| inventory.deinit(allocator);
         allocator.destroy(self);
     }
 
@@ -98,26 +101,36 @@ pub const Player = struct {
 
     /// The item in the selected slot, or null when it is empty.
     pub fn selectedItem(self: *const @This()) ?Item.Item {
-        return self.main_inventory.get(self.selected_row, self.selected_col);
+        return self.inventories.get(.hotbar).get(self.selected_row, self.selected_col);
     }
 
-    /// Moves the selection, clamping to the inventory grid.
+    /// Moves the selection, clamping to the hotbar grid.
     pub fn selectSlot(self: *@This(), row: u32, col: u32) void {
-        self.selected_row = @min(row, self.main_inventory.height() - 1);
-        self.selected_col = @min(col, self.main_inventory.width - 1);
+        const hotbar = self.inventories.getPtrConst(.hotbar);
+        self.selected_row = @min(row, hotbar.height() - 1);
+        self.selected_col = @min(col, hotbar.width - 1);
+    }
+
+    /// Resizes one grid and keeps the selection inside the hotbar. Items outside the
+    /// new size are deleted.
+    pub fn resizeGrid(self: *@This(), allocator: std.mem.Allocator, grid: Grid, width: u32, rows: u32) !void {
+        try self.inventories.getPtr(grid).resize(allocator, width, rows);
+        self.selectSlot(self.selected_row, self.selected_col);
     }
 
     /// Moves the selection by this frame's hotbar keys, wrapping at the grid edges.
     pub fn navigateHotbar(self: *@This(), actions: *const Key.ActionSet) void {
         const first_hotbar = @backingInt(Key.Action.hotbar_key_0);
         const hotbar_key_count = 10;
+        const hotbar = self.inventories.getPtrConst(.hotbar);
+        const width = hotbar.width;
+        // Keys past the row's width do nothing instead of clamping onto the last slot.
         inline for (0..hotbar_key_count) |slot| {
-            if (actions.contains(@fromBackingInt(@intCast(first_hotbar + slot)))) self.selectSlot(self.selected_row, @intCast(slot));
+            if (slot < width and actions.contains(@fromBackingInt(@intCast(first_hotbar + slot)))) self.selectSlot(self.selected_row, @intCast(slot));
         }
         const row = self.selected_row;
         const col = self.selected_col;
-        const width = self.main_inventory.width;
-        const height = self.main_inventory.height();
+        const height = hotbar.height();
         if (actions.contains(.hotbar_left)) self.selectSlot(row, if (col == 0) width - 1 else col - 1);
         if (actions.contains(.hotbar_right)) self.selectSlot(row, (col + 1) % width);
         if (actions.contains(.hotbar_up) or actions.contains(.hotbar_scroll_up)) self.selectSlot(if (row == 0) height - 1 else row - 1, col);

@@ -10,6 +10,7 @@ pub const Action = enum {
     down,
     sprint,
     escape_menu,
+    inventory,
     hotbar_key_0,
     hotbar_key_1,
     hotbar_key_2,
@@ -43,7 +44,7 @@ pub const single_press: ActionSet = .initMany(&.{
     .escape_menu,  .fullscreen,   .spawn_explosive, .screenshot,   .debug_menu,
     .hotbar_left,  .hotbar_right, .hotbar_up,       .hotbar_down,  .hotbar_key_0,
     .hotbar_key_1, .hotbar_key_2, .hotbar_key_3,    .hotbar_key_4, .hotbar_key_5,
-    .hotbar_key_6, .hotbar_key_7, .hotbar_key_8,    .hotbar_key_9,
+    .hotbar_key_6, .hotbar_key_7, .hotbar_key_8,    .hotbar_key_9, .inventory,
 });
 
 /// The action each button triggers. Only the loop thread reads it. To rebind a button, `put` a new action.

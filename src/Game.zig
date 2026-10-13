@@ -115,9 +115,12 @@ pub const Options = struct {
     /// Speed while the player holds the sprint key, as a multiple of `move_speed`. Clamped
     /// to at least 1 so the key can never slow the player down.
     sprint_multiplier: f32 = 1.6,
-    /// Player inventory grid in slots, read when the player spawns. The first row is the hotbar.
-    inventory_width: u32 = 10,
-    inventory_height: u32 = 16,
+    /// Admin sizes of the player's grids in slots. A change resizes the live grids and
+    /// deletes the items that no longer fit.
+    hotbar_width: u32 = 9,
+    hotbar_height: u32 = 1,
+    inventory_width: u32 = 9,
+    inventory_height: u32 = 3,
 
     render_options: Renderer.RenderOptions = .{},
 
@@ -434,7 +437,8 @@ pub fn deinit(self: *@This(), io: std.Io) void {
     self.* = undefined;
 }
 
-/// Discards chunks and reopens the world with the current generator configuration.
+/// Discards chunks and reopens the world with the current generator configuration,
+/// spawning the player at a freshly searched spawn because the old one may now be ocean.
 /// The caller waits for the GPU first because the renderer is fully recreated.
 pub fn recreateWorld(
     self: *@This(),
@@ -445,13 +449,13 @@ pub fn recreateWorld(
 ) !void {
     const game_options = self.options;
     const options_lock = self.options_lock;
-    const player_pos = self.player.body.pos;
     const view_direction = self.player.view_direction;
     const world_path = allocator.dupe(u8, self.world_path) catch return error.RecreatePathAllocationFailed;
     defer allocator.free(world_path);
 
     self.generator.generator.api.config_set_seeds(&io, self.generator.config);
     self.generator.saveConfig(io) catch return error.RecreateConfigSaveFailed;
+    self.resetSpawn(io) catch return error.RecreateConfigSaveFailed;
 
     self.stopBackgroundWork(io);
     // clear() needs a full save first, or it destroys a skipped shard unsaved.
@@ -461,9 +465,7 @@ pub fn recreateWorld(
     self.deinit(io);
     try self.init(io, allocator, game_options, options_lock, world_path, vk_ctx, generators);
 
-    self.player.body.pos = player_pos;
     self.player.view_direction = view_direction;
-    self.publishPlayerBlock(io);
     self.renderer.updateCameraDirection(view_direction);
 }
 
@@ -493,6 +495,7 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     // Apply any tuning edits before the body integrates this frame.
     const tuning = self.playerTuning(io);
     self.player.applyTuning(tuning);
+    try self.applyInventorySizes(io);
     if (actions) |held| {
         try self.handleButtonActions(io, held, tuning, @intCast(frame_ns));
     } else {
@@ -863,12 +866,37 @@ fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.Chu
     };
 }
 
+const GridSize = struct { width: u32, rows: u32 };
+
+/// One grid's size from the options, at least one slot each way.
+fn gridSize(self: *@This(), io: std.Io, grid: EntityTypes.Player.Grid) GridSize {
+    self.options_lock.lockSharedUncancelable(io);
+    defer self.options_lock.unlockShared(io);
+    const width, const rows = switch (grid) {
+        .hotbar => .{ self.options.hotbar_width, self.options.hotbar_height },
+        .main => .{ self.options.inventory_width, self.options.inventory_height },
+    };
+    return .{ .width = @max(width, 1), .rows = @max(rows, 1) };
+}
+
+/// Resizes the player's grids to the current options. Resizing deletes the items that no longer fit.
+fn applyInventorySizes(self: *@This(), io: std.Io) !void {
+    for (std.enums.values(EntityTypes.Player.Grid)) |grid| {
+        const size = self.gridSize(io, grid);
+        try self.player.resizeGrid(self.allocator, grid, size.width, size.rows);
+    }
+}
+
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_pos: @Vector(3, f64)) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnPlayer" });
     defer z.end();
-    var inventory: Item.Inventory = try .init(allocator, @max(game.options.inventory_width, 1), @max(game.options.inventory_height, 1));
-    errdefer inventory.deinit(allocator);
-    fillStarterRow(&inventory);
+    const hotbar_size = game.gridSize(io, .hotbar);
+    var hotbar: Item.Inventory = try .init(allocator, hotbar_size.width, hotbar_size.rows);
+    errdefer hotbar.deinit(allocator);
+    const main_size = game.gridSize(io, .main);
+    var main: Item.Inventory = try .init(allocator, main_size.width, main_size.rows);
+    errdefer main.deinit(allocator);
+    fillStarterRow(&hotbar);
     const player_entity = try game.entity_registry.spawn(io, allocator, &game.world, EntityTypes.Player{
         .body = .{
             .pos = spawn_pos,
@@ -877,7 +905,7 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
         },
         .game_mode = game.spawn.mode,
         .view_direction = .{ 0.0001, -0.4, 0.001 },
-        .main_inventory = inventory,
+        .inventories = .init(.{ .hotbar = hotbar, .main = main }),
     }, .{});
     game.player_entity = player_entity;
     // The held reference keeps the player resident. The frame lane drives it.
@@ -886,15 +914,11 @@ fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_p
     game.renderer.updateCameraDirection(game.player.view_direction);
 }
 
-/// Placeholder starter row so the hotbar has icons to show. Real item grants come
-/// later. Tool items get slots first, so this caps block items to fit the row.
+/// Placeholder starter hotbar row with the tools `Item.use` implements; every other
+/// slot starts empty. Real item grants come later.
 fn fillStarterRow(inventory: *Item.Inventory) void {
-    const tools = Item.extra_item_types[0..@min(Item.extra_item_types.len, inventory.width)];
-    const block_slots = @min(Item.block_types.len, inventory.width - tools.len);
-    for (Item.block_types[0..block_slots], 0..) |block, col| {
-        inventory.set(0, @intCast(col), .{ .item_type = Item.fromBlock(block).?, .amount = 1 });
-    }
-    for (tools, block_slots..) |item_type, col| {
+    const starter_items: [2]Item.ItemType = .{ .PlaceRod, .PlaceSphere };
+    for (starter_items[0..@min(starter_items.len, inventory.width)], 0..) |item_type, col| {
         inventory.set(0, @intCast(col), .{ .item_type = item_type, .amount = 1 });
     }
 }
