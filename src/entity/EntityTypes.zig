@@ -18,8 +18,7 @@ pub const Player = struct {
     fly_speed_log2: f32 = 10,
     inventories: std.enums.EnumArray(Grid, Item.Inventory),
     /// The hotbar slot the player holds.
-    selected_row: u32 = 0,
-    selected_col: u32 = 0,
+    selected: Item.Inventory.Slot = .{},
     view_direction: @Vector(3, f32),
 
     jump_held: bool = false,
@@ -103,21 +102,20 @@ pub const Player = struct {
 
     /// The item in the selected slot, or null when it is empty.
     pub fn selectedItem(self: *const @This()) ?Item.Item {
-        return self.inventories.get(.hotbar).get(self.selected_row, self.selected_col);
+        return self.inventories.getPtrConst(.hotbar).get(self.selected);
     }
 
     /// Moves the selection, clamping to the hotbar grid.
-    pub fn selectSlot(self: *@This(), row: u32, col: u32) void {
+    fn selectSlot(self: *@This(), row: u32, col: u32) void {
         const hotbar = self.inventories.getPtrConst(.hotbar);
-        self.selected_row = @min(row, hotbar.height() - 1);
-        self.selected_col = @min(col, hotbar.width - 1);
+        self.selected = .{ .row = @min(row, hotbar.height() - 1), .col = @min(col, hotbar.width - 1) };
     }
 
     /// Resizes one grid and keeps the selection inside the hotbar. The resize deletes
     /// items outside the new size.
     pub fn resizeGrid(self: *@This(), allocator: std.mem.Allocator, grid: Grid, width: u32, rows: u32) !void {
         try self.inventories.getPtr(grid).resize(allocator, width, rows);
-        self.selectSlot(self.selected_row, self.selected_col);
+        self.selectSlot(self.selected.row, self.selected.col);
     }
 
     /// Moves the selection by this frame's hotbar keys, wrapping at the grid edges.
@@ -126,10 +124,10 @@ pub const Player = struct {
         const width = hotbar.width;
         // Keys past the row's width do nothing instead of clamping onto the last slot.
         for (0..Key.hotbar_slot_count) |slot| {
-            if (slot < width and actions.contains(Key.hotbarSlot(slot))) self.selectSlot(self.selected_row, @intCast(slot));
+            if (slot < width and actions.contains(Key.hotbarSlot(slot))) self.selected.col = @intCast(slot);
         }
-        const row = self.selected_row;
-        const col = self.selected_col;
+        const row = self.selected.row;
+        const col = self.selected.col;
         const height = hotbar.height();
         if (actions.contains(.hotbar_left)) self.selectSlot(row, (col + width - 1) % width);
         if (actions.contains(.hotbar_right)) self.selectSlot(row, (col + 1) % width);
@@ -170,7 +168,7 @@ pub const Player = struct {
         if (jumped) mover.climb_target_y = null;
 
         // Sprint scales the target, so it still has to fight the same fluid drag.
-        const speed = targetSpeed(base_speed, sprint, fluid, medium.resistance);
+        const speed = sprint * base_speed / (1 + fluid_speed_loss * fluid * medium.resistance);
         const control = if (fluid > 0) walk_accel_water else if (on_ground) walk_accel_ground else walk_accel_air;
         const decel = base_speed * @as(f64, if (fluid > 0) walk_decel_water else walk_decel_ground);
         const steers = on_ground or fluid > 0;
@@ -211,13 +209,6 @@ pub const Player = struct {
         if (!jump_pressed and velocity[1] > 0) velocity[1] *= jump_cut_factor;
         if (!jump_pressed or velocity[1] <= 0) self.jump_rising = false;
         return false;
-    }
-
-    /// Target horizontal speed in blocks per second. Sprint scales the base speed and
-    /// fluid divides it back down by how much of the body it covers and how hard it
-    /// resists, so sprinting in water is still slower than sprinting on land.
-    fn targetSpeed(base_speed: f64, sprint: f64, fluid: f64, resistance: f64) f64 {
-        return sprint * base_speed / (1 + fluid_speed_loss * fluid * resistance);
     }
 
     /// Buoyancy lifts with the submerged fraction and drag drains every axis, scaled by

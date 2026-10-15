@@ -3,7 +3,6 @@ const std = @import("std");
 const tracy = @import("tracy");
 const vk = @import("vulkan");
 const DeviceProxy = vk.DeviceProxy;
-const zm = @import("zm");
 
 const Renderer = @import("../../Renderer.zig");
 const FrameDrawContext = Renderer.FrameDrawContext;
@@ -24,7 +23,7 @@ const SkyRenderer = @import("sky/SkyRenderer.zig").SkyRenderer;
 /// demand, so these only set how many chunks fit before the first reallocation.
 const initial_scene_candidates: u32 = 32768;
 const initial_draw_capacity: u32 = 32768;
-const initial_staging_bytes = 64 * 1024 * 1024;
+const initial_face_buffer_bytes = 256 * 1024 * 1024;
 const uploader_face_quota = 64;
 
 const FrameDebugStats = struct {
@@ -82,7 +81,6 @@ depth_resolve_mode: vk.ResolveModeFlags = .{},
 depth_resolve_conservative: bool = false,
 depth_format: vk.Format = .undefined,
 
-camera: core.Camera = .{},
 memory: gpu.GpuMemory = undefined,
 single_time: core.SingleTime = undefined,
 uploader: gpu.MeshUploader = undefined,
@@ -125,16 +123,10 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     try self.memory.init(io, allocator, vk_ctx);
     errdefer self.memory.deinit();
 
-    self.single_time = .{
-        .dev = vk_ctx.dev,
-        .pool = vk_ctx.upload_command_pool,
-        .queue = vk_ctx.graphics_queue,
-        .queue_mutex = &vk_ctx.queue_mutex,
-        .io = io,
-        .vkalloc = vk_ctx.vkalloc,
-    };
+    self.single_time = try .init(vk_ctx, io);
+    errdefer self.single_time.deinit();
 
-    self.uploader = try gpu.MeshUploader.init(allocator, vk_ctx, &self.memory, &self.single_time, initial_staging_bytes, Mesher.max_face_bytes * uploader_face_quota);
+    self.uploader = try gpu.MeshUploader.init(allocator, vk_ctx, &self.memory, &self.single_time, initial_face_buffer_bytes, Mesher.max_face_bytes * uploader_face_quota);
     errdefer self.uploader.deinit();
 
     try self.scene.init(allocator, vk_ctx, &self.memory, initial_scene_candidates, initial_draw_capacity);
@@ -143,7 +135,7 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
     self.pyramid = try DepthPyramid.init(allocator, vk_ctx, &self.memory, &self.single_time);
     errdefer self.pyramid.deinit();
 
-    self.shadow = try ShadowRenderer.init(allocator, vk_ctx, &self.memory, &self.single_time, &self.scene, render_options, render_options_lock);
+    self.shadow = try ShadowRenderer.init(vk_ctx, &self.memory, &self.single_time, &self.scene);
     errdefer self.shadow.deinit();
 
     self.render_options_lock.lockSharedUncancelable(io);
@@ -170,7 +162,6 @@ pub fn init(self: *VulkanRenderer, io: std.Io, allocator: std.mem.Allocator, vk_
             .hasMesh = vtableHasMesh,
             .draw = vtableDraw,
             .recreateSwapchain = vtableRecreateSwapchain,
-            .updateCameraDirection = vtableUpdateCameraDirection,
         },
     };
 }
@@ -196,7 +187,7 @@ pub fn deinit(self: *VulkanRenderer, io: std.Io) void {
         // deinit runs from a failed openGame inside the UI record path;
         // resetting it yanks the buffer under the recorder and the next
         // drawClippedTriangles faults on a non-recording command buffer.
-        self.single_time.destroyFence();
+        self.single_time.deinit();
     }
 
     self.chunk.deinit(io);
@@ -218,13 +209,12 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
     const present_mode = self.render_options.present_mode;
     const anti_aliasing = self.render_options.anti_aliasing;
     self.render_options_lock.unlockShared(io);
-    self.vk_ctx.present_mode = present_mode;
 
-    try self.uploader.drainInFlightFrames();
+    try self.vk_ctx.waitSubmittedFrames();
     try self.dev.resetCommandPool(self.vk_ctx.command_pool, .{});
 
     const old_swapchain = self.vk_ctx.swapchain;
-    try self.vk_ctx.createSwapchainLocked(io, gamma_correction);
+    try self.vk_ctx.createSwapchainLocked(io, gamma_correction, present_mode);
 
     if (self.vk_ctx.swapchain == old_swapchain and self.render_color.image != .null_handle) return;
 
@@ -240,11 +230,11 @@ fn recreateSwapchainResourcesLocked(self: *VulkanRenderer, io: std.Io) !void {
 }
 
 fn destroyRendererSwapchainResources(self: *VulkanRenderer) void {
-    core.destroyRenderTarget(self.dev, &self.render_color, &self.vk_ctx.vkalloc);
-    core.destroyRenderTarget(self.dev, &self.render_depth, &self.vk_ctx.vkalloc);
+    core.destroyRenderTarget(self.vk_ctx, &self.render_color);
+    core.destroyRenderTarget(self.vk_ctx, &self.render_depth);
     core.destroyIfValid(self.dev, &self.render_depth_sampled_view, &self.vk_ctx.vkalloc);
-    core.destroyRenderTarget(self.dev, &self.msaa_color, &self.vk_ctx.vkalloc);
-    core.destroyRenderTarget(self.dev, &self.msaa_depth, &self.vk_ctx.vkalloc);
+    core.destroyRenderTarget(self.vk_ctx, &self.msaa_color);
+    core.destroyRenderTarget(self.vk_ctx, &self.msaa_depth);
 }
 
 fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D, anti_aliasing: Renderer.AntiAliasing) !void {
@@ -258,7 +248,7 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D, a
     self.msaa_samples = core.sampleCountToFlags(resolved);
     const use_msaa = resolved > 1;
 
-    self.render_color = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment = true, .sampled = true }, .{ .color = true });
+    self.render_color = try core.createImageWithMemory(self.vk_ctx, extent, self.vk_ctx.swapchain_format, .{ .color_attachment = true, .sampled = true }, .{ .color = true }, .{ .@"1" = true });
 
     const depth_formats: [3]vk.Format = .{ .d32_sfloat_s8_uint, .d24_unorm_s8_uint, .d32_sfloat };
     self.depth_format = for (depth_formats) |format| {
@@ -267,12 +257,12 @@ fn createRenderTargets(self: *VulkanRenderer, io: std.Io, extent: vk.Extent2D, a
         if (features.depth_stencil_attachment and features.sampled_image) break format;
     } else return error.DepthFormatNotSupported;
 
-    self.render_depth = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment = true, .sampled = true }, self.depthAspectMask());
+    self.render_depth = try core.createImageWithMemory(self.vk_ctx, extent, self.depth_format, .{ .depth_stencil_attachment = true, .sampled = true }, self.depthAspectMask(), .{ .@"1" = true });
     self.render_depth_sampled_view = try self.dev.createImageView(&core.imageViewCreateInfo(self.render_depth.image, self.depth_format, .{ .depth = true }), &self.vk_ctx.vkalloc);
 
     if (use_msaa) {
-        self.msaa_color = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.vk_ctx.swapchain_format, .{ .color_attachment = true }, .{ .color = true }, self.msaa_samples);
-        self.msaa_depth = try core.createImageWithMemorySamples(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, self.depth_format, .{ .depth_stencil_attachment = true }, self.depthAspectMask(), self.msaa_samples);
+        self.msaa_color = try core.createImageWithMemory(self.vk_ctx, extent, self.vk_ctx.swapchain_format, .{ .color_attachment = true }, .{ .color = true }, self.msaa_samples);
+        self.msaa_depth = try core.createImageWithMemory(self.vk_ctx, extent, self.depth_format, .{ .depth_stencil_attachment = true }, self.depthAspectMask(), self.msaa_samples);
         self.depth_resolve_mode = self.getDepthResolveMode();
         self.depth_resolve_conservative = self.depth_resolve_mode.min;
         std.log.info("VulkanRenderer: MSAA enabled {d}x (samples={any}) depth_resolve={any}", .{ resolved, self.msaa_samples, self.depth_resolve_mode });
@@ -312,21 +302,10 @@ fn sampleCountFromAA(aa: Renderer.AntiAliasing) u32 {
 fn resolveSampleCount(self: *const VulkanRenderer, desired: u32) u32 {
     // Walk down from the desired count until the device supports it; every intermediate
     // power of two is visited exactly once, so overshooting the device max lands on it.
+    // Sample count 2^N is flag bit 2^N, so the supported test is a plain bitmask.
     const counts = self.vk_ctx.instance.getPhysicalDeviceProperties(self.vk_ctx.pdev).limits.framebuffer_color_sample_counts;
     var target = desired;
-    while (target > 1) {
-        const supported = switch (target) {
-            2 => counts.@"2",
-            4 => counts.@"4",
-            8 => counts.@"8",
-            16 => counts.@"16",
-            32 => counts.@"32",
-            64 => counts.@"64",
-            else => false,
-        };
-        if (supported) break;
-        target /= 2;
-    }
+    while (target > 1 and (counts.toInt() & target) == 0) target /= 2;
     return target;
 }
 
@@ -346,28 +325,12 @@ fn getDepthResolveMode(self: *const VulkanRenderer) vk.ResolveModeFlags {
     // The Hi-Z pyramid MIN-reduces the depth, so only a min resolve is conservative.
     // Average/sample-zero can be nearer than the closest sample; the caller gates
     // occlusion culling off in that case rather than culling visible silhouettes.
-    if (modes.min) {
-        return .{ .min = true };
-    } else if (modes.average) {
-        return .{ .average = true };
-    } else {
-        return .{ .sample_zero = true };
-    }
+    if (modes.min) return .{ .min = true };
+    if (modes.average) return .{ .average = true };
+    return .{ .sample_zero = true };
 }
 
-pub fn addChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) !void {
-    try self.chunk.addChunk(io, chunk_pos, encoding, neighbor_faces);
-}
-
-pub fn removeChunk(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos) !void {
-    try self.chunk.removeChunk(io, chunk_pos);
-}
-
-pub fn hasMesh(self: *VulkanRenderer, io: std.Io, chunk_pos: ChunkPos) bool {
-    return self.chunk.hasMesh(io, chunk_pos);
-}
-
-fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) !void {
+fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64), view_front: @Vector(3, f32)) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
 
@@ -391,14 +354,14 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const sky_config = self.render_options.sky;
     const shadow_config = self.render_options.shadow;
     self.render_options_lock.unlockShared(io);
-    const vp = self.camera.computeViewProjection(aspect, fov);
+    const vp = core.computeViewProjection(view_front, aspect, fov);
 
     // No-op when unchanged; must run before any command buffer records.
     self.shadow.recreate(io, shadow_config) catch |err| {
         std.log.err("VulkanRenderer: shadow recreate failed: {any}", .{err});
     };
 
-    const total_candidates = self.scene.max_allocated_index.load(.monotonic);
+    const total_candidates = self.scene.max_allocated_index;
     try self.scene.ensureCapacity(total_candidates);
 
     try self.dev.resetCommandBuffer(frame_ctx.cmd_buffer, .{});
@@ -410,18 +373,10 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     const frame_start_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
     const elapsed_sec = @as(f32, @floatFromInt(frame_start_ns -| self.init_time_ns)) / std.time.ns_per_s;
 
-    const frame_sky = SkyRenderer.assembleParams(io, sky_config, self.camera.front(), aspect, fov, day_length_sec);
+    const frame_sky = SkyRenderer.assembleParams(io, sky_config, view_front, aspect, fov, day_length_sec);
 
     const scene_aabb = self.scene.getSceneAABB(current_frame);
-    self.shadow.prepareFrame(
-        current_frame,
-        view_pos,
-        frame_sky.sun_dir,
-        scene_aabb.min,
-        scene_aabb.max,
-    ) catch |err| {
-        std.log.err("VulkanRenderer: shadow prepare failed: {any}", .{err});
-    };
+    self.shadow.prepareFrame(current_frame, shadow_config, view_pos, frame_sky.sun_dir, scene_aabb.min, scene_aabb.max);
 
     const msaa_enabled = self.msaa_sample_count > 1 and self.msaa_color.image != .null_handle;
     const msaa_color_image: ?vk.Image = if (msaa_enabled) self.msaa_color.image else null;
@@ -453,6 +408,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
         .depth_sampled_view = self.render_depth_sampled_view,
         .depth_aspect_mask = depth_aspect_mask,
         .frame_sequence = self.frame_sequence,
+        .face = self.uploader.faceBinding(),
         .shadow = &self.shadow,
         .msaa_color_view = msaa_color_view,
         .color_resolve_view = color_resolve_view,
@@ -486,7 +442,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
     self.chunk.recordPasses(&pass_ctx);
 
     const frame_end_ns: u64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
-    self.publishFrameStats(io, view_pos, frame_end_ns, frame_end_ns -| frame_start_ns);
+    self.publishFrameStats(io, view_pos, view_front, frame_end_ns, frame_end_ns -| frame_start_ns);
 
     try self.dev.endCommandBuffer(frame_ctx.cmd_buffer);
     self.frame_sequence +%= 1;
@@ -495,8 +451,7 @@ fn draw(self: *VulkanRenderer, io: std.Io, target: Renderer.DrawTarget, frame_ct
 /// Copies the previous frame's GPU cull counters, which the compute pass wrote into the
 /// host-visible stats buffer, into the debug stats shown by the UI.
 fn readCullStats(self: *VulkanRenderer, current_frame: u32) void {
-    const counts = self.scene.frame_buffers.items[current_frame].stats_mapped orelse return;
-    const stats = counts[0];
+    const stats = self.scene.frame_buffers[current_frame].slices.stats[0];
     self.frame_stats.opaque_drawn = stats.opaque_count + stats.opaque_late_count;
     self.frame_stats.opaque_late_drawn = stats.opaque_late_count;
     self.frame_stats.transparent_drawn = stats.transparent_count;
@@ -510,11 +465,11 @@ fn readCullStats(self: *VulkanRenderer, current_frame: u32) void {
     self.frame_stats.shadow_cascade = self.shadow.frameInnermostCascade();
 }
 
-fn publishFrameStats(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64), frame_end_ns: u64, elapsed_ns: u64) void {
+fn publishFrameStats(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64), view_front: @Vector(3, f32), frame_end_ns: u64, elapsed_ns: u64) void {
     self.frame_stats.frame_number = self.vk_ctx.frame_number.load(.acquire) + 1;
     self.frame_stats.total_meshes = @intCast(self.chunk.meshes.count(io));
     self.frame_stats.player_pos = view_pos;
-    self.frame_stats.camera_front = self.camera.front();
+    self.frame_stats.camera_front = view_front;
     self.frame_stats.elapsed_ns = elapsed_ns;
 
     if (frame_end_ns -| self.last_stat_log_ns < std.time.ns_per_s) return;
@@ -524,7 +479,7 @@ fn publishFrameStats(self: *VulkanRenderer, io: std.Io, view_pos: @Vector(3, f64
 
 fn vtableAddChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos, encoding: Chunk.Encoding, neighbor_faces: *const [6]Chunk.Encoding.Face) (std.Io.Cancelable || error{AddChunkFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.addChunk(io, chunk_pos, encoding, neighbor_faces) catch |err| switch (err) {
+    self.chunk.addChunk(io, chunk_pos, encoding, neighbor_faces) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.AddChunkFailed,
     };
@@ -532,7 +487,7 @@ fn vtableAddChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: Ch
 
 fn vtableRemoveChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos) (std.Io.Cancelable || error{RemoveChunkFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.removeChunk(io, chunk_pos) catch |err| switch (err) {
+    self.chunk.removeChunk(io, chunk_pos) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.RemoveChunkFailed,
     };
@@ -540,12 +495,12 @@ fn vtableRemoveChunk(user_data: *Renderer.Implementation, io: std.Io, chunk_pos:
 
 fn vtableHasMesh(user_data: *Renderer.Implementation, io: std.Io, chunk_pos: ChunkPos) bool {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    return self.hasMesh(io, chunk_pos);
+    return self.chunk.hasMesh(io, chunk_pos);
 }
 
-fn vtableDraw(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
+fn vtableDraw(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.DrawTarget, frame_ctx: FrameDrawContext, view_pos: @Vector(3, f64), view_front: @Vector(3, f32)) (std.Io.Cancelable || error{DrawFailed})!void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    self.draw(io, target, frame_ctx, view_pos) catch |err| switch (err) {
+    self.draw(io, target, frame_ctx, view_pos, view_front) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return error.DrawFailed,
     };
@@ -554,11 +509,4 @@ fn vtableDraw(user_data: *Renderer.Implementation, io: std.Io, target: Renderer.
 fn vtableRecreateSwapchain(user_data: *Renderer.Implementation, io: std.Io) !void {
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
     try self.recreateSwapchainResourcesLocked(io);
-}
-
-fn vtableUpdateCameraDirection(user_data: *Renderer.Implementation, view_dir: @Vector(3, f32)) void {
-    const self: *VulkanRenderer = @ptrCast(@alignCast(user_data));
-    const front = Renderer.cameraFrontFromViewDirection(view_dir);
-    const norm = zm.Vec3f.norm(.{ .data = front }).data;
-    self.camera.updateFront(norm);
 }

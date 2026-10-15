@@ -46,9 +46,8 @@ pub const VTable = struct {
     /// Returns true when any mesh currently exists for the given position.
     /// May be called from any thread.
     hasMesh: *const fn (*Implementation, std.Io, ChunkPos) bool,
-    draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void,
+    draw: *const fn (*Implementation, io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, @Vector(3, f64), @Vector(3, f32)) (std.Io.Cancelable || error{DrawFailed})!void,
     recreateSwapchain: *const fn (*Implementation, io: std.Io) anyerror!void,
-    updateCameraDirection: *const fn (*Implementation, @Vector(3, f32)) void,
 };
 
 /// Adds a chunk mesh to the renderer, this function may be called on any thread.
@@ -67,18 +66,15 @@ pub fn hasMesh(self: *@This(), io: std.Io, chunk_pos: ChunkPos) bool {
     return self.vtable.hasMesh(self.userdata, io, chunk_pos);
 }
 
-/// Draws all loaded chunk meshes to the screen. Only call on the main thread.
-pub fn draw(self: *@This(), io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, viewpos: @Vector(3, f64)) (std.Io.Cancelable || error{DrawFailed})!void {
-    return self.vtable.draw(self.userdata, io, target, frame_ctx, viewpos);
+/// Draws all loaded chunk meshes to the screen from `viewpos`, looking along the unit
+/// vector `view_front`. Only call on the main thread.
+pub fn draw(self: *@This(), io: std.Io, target: DrawTarget, frame_ctx: FrameDrawContext, viewpos: @Vector(3, f64), view_front: @Vector(3, f32)) (std.Io.Cancelable || error{DrawFailed})!void {
+    return self.vtable.draw(self.userdata, io, target, frame_ctx, viewpos, view_front);
 }
 
 /// Notifies the renderer that the swapchain has been resized/changed and resources must be recreated.
 pub fn recreateSwapchain(self: *@This(), io: std.Io) !void {
     return self.vtable.recreateSwapchain(self.userdata, io);
-}
-
-pub fn updateCameraDirection(self: *@This(), view_dir: @Vector(3, f32)) void {
-    return self.vtable.updateCameraDirection(self.userdata, view_dir);
 }
 
 pub const AntiAliasing = enum {

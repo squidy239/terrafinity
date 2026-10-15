@@ -22,11 +22,6 @@ const CompositionPushConstants = extern struct {
     scatter_light: f32,
 };
 
-fn smoothstep(e0: f32, e1: f32, x: f32) f32 {
-    const t = std.math.clamp((x - e0) / (e1 - e0), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
-
 /// Weighted-blended order-independent transparency (accumulate / reveal / volume weight)
 /// render targets plus the fullscreen composition pass that blends them with the opaque
 /// color target and writes to the swapchain. Reusable by any renderer needing transparency.
@@ -51,7 +46,7 @@ pub const OitCompositor = struct {
             .dev = vk_ctx.dev,
             .vk_ctx = vk_ctx,
         };
-        self.sampler = try core.createSampler(self.dev, &self.vk_ctx.vkalloc, .{});
+        self.sampler = try core.createSampler(self.vk_ctx, .{});
         errdefer self.dev.destroySampler(self.sampler, &self.vk_ctx.vkalloc);
         return self;
     }
@@ -66,9 +61,9 @@ pub const OitCompositor = struct {
         core.destroyIfValid(self.dev, &self.composition_layout, &self.vk_ctx.vkalloc);
         core.destroyIfValid(self.dev, &self.descriptor_set_layout, &self.vk_ctx.vkalloc);
         core.destroyFrameDescriptorResources(self.dev, self.allocator, &self.vk_ctx.vkalloc, &self.descriptor_pool, &self.descriptor_sets_per_frame);
-        core.destroyRenderTarget(self.dev, &self.accum, &self.vk_ctx.vkalloc);
-        core.destroyRenderTarget(self.dev, &self.reveal, &self.vk_ctx.vkalloc);
-        core.destroyRenderTarget(self.dev, &self.volume_weight, &self.vk_ctx.vkalloc);
+        core.destroyRenderTarget(self.vk_ctx, &self.accum);
+        core.destroyRenderTarget(self.vk_ctx, &self.reveal);
+        core.destroyRenderTarget(self.vk_ctx, &self.volume_weight);
     }
 
     /// Recreates everything except the sampler: composition pipeline/layout, descriptor
@@ -82,7 +77,7 @@ pub const OitCompositor = struct {
         const oit_formats: [3]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat, .r16_sfloat };
         errdefer self.destroyTransientResources();
         for (oit_targets, oit_formats) |target, format| {
-            target.* = try core.createImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, extent, format, oit_usage, oit_aspect);
+            target.* = try core.createImageWithMemory(self.vk_ctx, extent, format, oit_usage, oit_aspect, .{ .@"1" = true });
         }
 
         const bindings: [4]vk.DescriptorSetLayoutBinding = .{
@@ -102,12 +97,18 @@ pub const OitCompositor = struct {
             .p_push_constant_ranges = (&pc_range)[0..1],
         }, &self.vk_ctx.vkalloc);
 
-        const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, composite_vert_spv);
+        const vert_module = try core.createShaderModule(self.vk_ctx, composite_vert_spv);
         defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
-        const frag_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, composite_frag_spv);
+        const frag_module = try core.createShaderModule(self.vk_ctx, composite_frag_spv);
         defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
-        self.composition_pipeline = try core.buildGraphicsPipeline(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, &.{self.vk_ctx.swapchain_format}, .undefined, null, &.{core.opaqueBlendAttachment()}, self.composition_layout, core.emptyVertexInput());
+        self.composition_pipeline = try core.buildGraphicsPipeline(self.vk_ctx, .{
+            .vert_module = vert_module,
+            .frag_module = frag_module,
+            .color_formats = &.{self.vk_ctx.swapchain_format},
+            .blend_attachments = &.{core.opaque_blend_attachment},
+            .layout = self.composition_layout,
+        });
 
         const pool_size: vk.DescriptorPoolSize = .{ .type = .combined_image_sampler, .descriptor_count = @intCast(VulkanContext.max_frames_in_flight * 4) };
         try core.createFrameDescriptorPool(self.dev, self.allocator, &self.vk_ctx.vkalloc, &self.descriptor_pool, self.descriptor_set_layout, &self.descriptor_sets_per_frame, (&pool_size)[0..1]);
@@ -132,7 +133,8 @@ pub const OitCompositor = struct {
     /// Day/night light for the volume scatter term; constants must match transparent_frag.frag.
     /// Absorption stays position-independent so entry/exit pairs cancel; day/night enters here.
     pub fn volumeScatterLight(sun_dir: @Vector(3, f32)) f32 {
-        const sun_day = smoothstep(-0.1, 0.25, sun_dir[1]);
+        const t = std.math.clamp((sun_dir[1] + 0.1) / 0.35, 0.0, 1.0);
+        const sun_day = t * t * (3.0 - 2.0 * t);
         const ndl_top = @max(sun_dir[1], 0);
         return scatter_ambient_min + (scatter_ambient_max - scatter_ambient_min) * sun_day + ndl_top * sun_day;
     }
@@ -187,7 +189,7 @@ pub const OitCompositor = struct {
         self.dev.cmdBeginRendering(ctx.cmd_buffer, &core.renderingInfo(ctx.extent, &.{swapchain_attachment}, null));
 
         self.dev.cmdBindPipeline(ctx.cmd_buffer, .graphics, self.composition_pipeline);
-        core.setViewportAndScissor(self.dev, ctx.cmd_buffer, ctx.extent);
+        core.setDynamicState(self.dev, ctx.cmd_buffer, ctx.extent, .{}, null);
 
         const push: CompositionPushConstants = .{ .scatter_enabled = ctx.scatter_enabled, .scatter_light = ctx.scatter_light };
         self.dev.cmdPushConstants(ctx.cmd_buffer, self.composition_layout, .{ .fragment = true }, 0, @sizeOf(CompositionPushConstants), &push);

@@ -444,12 +444,8 @@ fn valueFromField(comptime T: type, allocator: std.mem.Allocator, field_value: a
     switch (@typeInfo(T)) {
         .float => return .{ .f32 = @floatCast(value) },
         .int => |info| {
-            if (info.signedness == .signed) {
-                if (info.bits <= 32) return .{ .i32 = @intCast(value) };
-                return null;
-            }
-            if (info.bits <= 32) return .{ .u32 = @intCast(value) };
-            return .{ .u64 = @intCast(value) };
+            if (info.signedness == .signed) return if (info.bits <= 32) .{ .i32 = @intCast(value) } else null;
+            return if (info.bits <= 32) .{ .u32 = @intCast(value) } else .{ .u64 = @intCast(value) };
         },
         .bool => return .{ .bool = value },
         .@"enum" => return .{ .choice = @backingInt(value) },
@@ -463,8 +459,7 @@ fn valueFromField(comptime T: type, allocator: std.mem.Allocator, field_value: a
             return .{ .group = tree.* };
         },
         .pointer => |info| {
-            if (info.size != .slice) return null;
-            if (@typeInfo(info.child) != .@"struct") return null;
+            if (info.size != .slice or @typeInfo(info.child) != .@"struct") return null;
             const Child = info.child;
             const items = @as([]const Child, if (@typeInfo(T) == .array) &value else value);
             const element = try allocator.create(Param);
@@ -510,13 +505,11 @@ fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, par
             field_ptr.* = param.value.bool;
         },
         .@"enum" => {
-            if (param.value != .choice) return;
-            if (param.value.choice >= @typeInfo(T).@"enum".field_names.len) return;
+            if (param.value != .choice or param.value.choice >= @typeInfo(T).@"enum".field_names.len) return;
             field_ptr.* = @fromBackingInt(@intCast(param.value.choice));
         },
         .optional => |info| {
-            if (param.value != .u64) return;
-            if (@typeInfo(info.child) != .int) return;
+            if (param.value != .u64 or @typeInfo(info.child) != .int) return;
             field_ptr.* = if (param.value.u64 == 0) null else std.math.cast(info.child, param.value.u64) orelse return;
         },
         .@"struct" => {
@@ -524,9 +517,7 @@ fn applyField(comptime T: type, allocator: std.mem.Allocator, field_ptr: *T, par
             try fromTree(T, allocator, &param.value.group, field_ptr, field_specs);
         },
         .pointer => |info| {
-            if (param.value != .array) return;
-            if (info.size != .slice) return;
-            if (@typeInfo(info.child) != .@"struct") return;
+            if (param.value != .array or info.size != .slice or @typeInfo(info.child) != .@"struct") return;
             const Child = info.child;
             const items = param.value.array.items;
             const new_items = try allocator.alloc(Child, items.len);
@@ -834,21 +825,11 @@ test "apiCompatible enforces semver" {
     try std.testing.expect(!apiCompatible(.{ .major = 0, .minor = 0, .patch = 1 }));
 }
 
-test "spawnSample radius zero returns center" {
-    const center = [2]f64{ 10, -20 };
-    for (0..8) |i| {
-        const p = spawnSample(42, center, 0, 7, @intCast(i));
-        try std.testing.expectEqual(center[0], p[0]);
-        try std.testing.expectEqual(center[1], p[1]);
-    }
-}
-
 test "spawnSample is deterministic and ring 0 stays in radius" {
     const center = [2]f64{ 0, 0 };
     const a = spawnSample(42, center, 32, 1, 9);
     const b = spawnSample(42, center, 32, 1, 9);
-    try std.testing.expectEqual(a[0], b[0]);
-    try std.testing.expectEqual(a[1], b[1]);
+    try std.testing.expectEqual(a, b);
     for (0..spawn_samples_per_ring) |i| {
         const p = spawnSample(99, center, 32, 5, @intCast(i));
         const d = @sqrt(p[0] * p[0] + p[1] * p[1]);

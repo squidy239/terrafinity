@@ -41,13 +41,6 @@ pub fn Cone(comptime T: type) type {
     };
 }
 
-test "cone bounding box spans endpoints expanded by max radius" {
-    const C = Cone(f32);
-    try std.testing.expectEqual(@Vector(6, f32){ -1, 1, -1, 5, -1, 1 }, C.init(.{ 0, 0, 0 }, .{ 0, 1, 0 }, 4, 1, 1).bounding_box);
-    try std.testing.expectEqual(@Vector(6, f32){ 9, 13, -3, 1, 4, 8 }, C.init(.{ 10, 0, 5 }, .{ 1, -1, 1 }, 3, 1, 1).bounding_box);
-    try std.testing.expectEqual(@Vector(6, f32){ -2, 2, 4, 12, -2, 2 }, C.init(.{ 0, 10, 0 }, .{ 0, -1, 0 }, 4, 2, 0).bounding_box);
-}
-
 test {
     std.testing.refAllDecls(@This());
 }

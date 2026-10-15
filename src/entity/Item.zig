@@ -32,23 +32,13 @@ pub const Inventory = struct {
     }
 
     /// The item in a slot, or null when it is empty.
-    pub fn get(self: *const Inventory, row: u32, col: u32) ?Item {
-        return self.items[self.index(row, col)];
-    }
-
-    /// The slots of one row, left to right.
-    pub fn rowSlots(self: *const Inventory, row: u32) []const ?Item {
-        return self.items[self.index(row, 0)..][0..self.width];
-    }
-
-    /// Replaces the item in a slot; null empties it.
-    pub fn set(self: *Inventory, row: u32, col: u32, item: ?Item) void {
-        self.items[self.index(row, col)] = item;
+    pub fn get(self: *const Inventory, slot: Slot) ?Item {
+        return self.items[self.index(slot)];
     }
 
     /// The slot itself, for edits in place such as `moveStack`.
     pub fn at(self: *Inventory, slot: Slot) *?Item {
-        return &self.items[self.index(slot.row, slot.col)];
+        return &self.items[self.index(slot)];
     }
 
     /// Changes the grid to `width` by `rows`. Items outside the new size are deleted; the
@@ -65,15 +55,15 @@ pub const Inventory = struct {
         self.* = resized;
     }
 
-    fn index(self: *const Inventory, row: u32, col: u32) usize {
-        std.debug.assert(row < self.height() and col < self.width);
-        return @as(usize, row) * self.width + col;
+    fn index(self: *const Inventory, slot: Slot) usize {
+        std.debug.assert(slot.row < self.height() and slot.col < self.width);
+        return @as(usize, slot.row) * self.width + slot.col;
     }
 
     /// One grid position.
     pub const Slot = struct {
-        row: u32,
-        col: u32,
+        row: u32 = 0,
+        col: u32 = 0,
     };
 };
 
@@ -231,15 +221,15 @@ test "moveStack merges plain stacks and swaps the rest" {
 test "Inventory.resize keeps the overlap and deletes the rest" {
     var inventory: Inventory = try .init(std.testing.allocator, 3, 2);
     defer inventory.deinit(std.testing.allocator);
-    inventory.set(0, 0, .{ .item_type = .PlaceRod, .amount = 1 });
-    inventory.set(1, 2, .{ .item_type = .PlaceSphere, .amount = 1 });
+    inventory.at(.{}).* = .{ .item_type = .PlaceRod, .amount = 1 };
+    inventory.at(.{ .row = 1, .col = 2 }).* = .{ .item_type = .PlaceSphere, .amount = 1 };
 
     try inventory.resize(std.testing.allocator, 2, 3);
-    try std.testing.expectEqual(.PlaceRod, inventory.get(0, 0).?.item_type);
+    try std.testing.expectEqual(.PlaceRod, inventory.get(.{}).?.item_type);
     for (inventory.items[1..]) |slot| try std.testing.expectEqual(null, slot);
 
     try inventory.resize(std.testing.allocator, 4, 1);
-    try std.testing.expectEqual(.PlaceRod, inventory.get(0, 0).?.item_type);
+    try std.testing.expectEqual(.PlaceRod, inventory.get(.{}).?.item_type);
     try std.testing.expectEqual(4, inventory.items.len);
 }
 

@@ -27,9 +27,6 @@ allocator: std.mem.Allocator,
 /// Path to this world's directory, retained so the world can be recreated in place.
 world_path: []const u8,
 world: World,
-/// View into the player implementation. Only valid while player_entity holds
-/// its reference.
-player: *EntityTypes.Player,
 /// Holds the reference that keeps the player entity resident in the cache.
 player_entity: *Entity,
 vulkan_renderer: Renderer.Vulkan,
@@ -131,6 +128,37 @@ pub const Options = struct {
         .mouse_sensitivity = .{ .number = .{ .min = 0, .max = 5, .widget_type = .slider } },
         .render_distance_y = .{ .number = .{ .min = 6, .max = 32, .widget_type = .slider } },
     }, null);
+
+    /// The tunable body size, movement, step, and jump.
+    fn playerTuning(self: Options) EntityTypes.Player.Tuning {
+        return .{
+            .width = self.player_width,
+            .height = self.player_height,
+            .step_height = self.step_height,
+            .step_climb_speed = self.step_climb_speed,
+            .jump_height = self.jump_height,
+            .walk_speed = self.move_speed,
+            .sprint_multiplier = self.sprint_multiplier,
+        };
+    }
+
+    /// One grid's size, at least one slot each way.
+    fn gridSize(self: Options, grid: EntityTypes.Player.Grid) [2]u32 {
+        const width, const rows = switch (grid) {
+            .hotbar => .{ self.hotbar_width, self.hotbar_height },
+            .main => .{ self.inventory_width, self.inventory_height },
+        };
+        return .{ @max(width, 1), @max(rows, 1) };
+    }
+
+    fn streamSettings(self: Options) ChunkStreamer.Settings {
+        return .{
+            .lowest_level = self.lowest_level,
+            .highest_level = self.highest_level,
+            .render_distance = .{ self.render_distance_x, self.render_distance_y },
+            .lod_overlap = self.lod_overlap,
+        };
+    }
 };
 
 pub const WorldOptions = struct {
@@ -205,14 +233,13 @@ pub fn init(
         .options = game_options,
         .world_path = try allocator.dupe(u8, folder),
         .options_lock = game_options_lock,
-        .allocator = undefined,
+        .allocator = allocator,
         .vulkan_renderer = undefined,
         .renderer = undefined,
         .generator = undefined,
         .world_storage = undefined,
         .spawn = undefined,
         .world = undefined,
-        .player = undefined,
         .player_entity = undefined,
         .entity_registry = undefined,
     };
@@ -222,7 +249,6 @@ pub fn init(
     errdefer game.vulkan_renderer.deinit(io);
 
     game.renderer = game.vulkan_renderer.interface;
-    game.allocator = allocator;
 
     const arena = game.game_arena.allocator();
     errdefer game.game_arena.deinit();
@@ -267,11 +293,10 @@ pub fn init(
         game.world_storage = try .init(storage_path, game.allocator, &game.options.save_mode, game_options_lock);
     }
 
-    game.options_lock.lockSharedUncancelable(io);
-    const chunk_cache_capacity = cacheCapacity(World.ChunkValue, @TypeOf(game.world.chunks).value_count_min, game.options.chunk_cache_bytes, "chunk");
-    const chunk_grid_capacity = cacheCapacity(World.GridValue, @TypeOf(game.world.grids).value_count_min, game.options.grid_cache_bytes, "grid");
-    const entity_cache_capacity = cacheCapacity(EntityRegistry.Entity, @TypeOf(game.entity_registry.map).value_count_min, game.options.entity_cache_bytes, "entity");
-    game.options_lock.unlockShared(io);
+    const options = game.snapshotOptions(io);
+    const chunk_cache_capacity = cacheCapacity(World.ChunkValue, @TypeOf(game.world.chunks).value_count_min, options.chunk_cache_bytes, "chunk");
+    const chunk_grid_capacity = cacheCapacity(World.GridValue, @TypeOf(game.world.grids).value_count_min, options.grid_cache_bytes, "grid");
+    const entity_cache_capacity = cacheCapacity(EntityRegistry.Entity, @TypeOf(game.entity_registry.map).value_count_min, options.entity_cache_bytes, "entity");
 
     game.world = .{
         .chunks = try .init(allocator, chunk_cache_capacity),
@@ -311,19 +336,14 @@ const spawn_rounds: u32 = 64;
 const spawn_phase1_attempts: u32 = 128;
 const spawn_phase2_attempts: u32 = 64;
 
-/// Clear vertical blocks a spawn column needs for a body of this height. The clamp
-/// keeps the float-to-int cast defined for a config that names a negative height.
-fn spawnRequiredAir(height: f32) u32 {
-    return @max(1, @as(u32, @intFromFloat(@ceil(@max(height, 1.0)))));
-}
-
 const SpawnResolution = union(enum) { ok: @Vector(3, f64), ocean, no_ground, blocked };
 
 /// Resolves one generator-proposed column to feet. The hint Y ignores erosion and structures, so scan down for solid ground with clear air above it.
 fn resolveSpawnColumn(game: *@This(), io: std.Io, allocator: std.mem.Allocator, x: f64, z: f64, y_hint: f64) !SpawnResolution {
     const height: f64 = @floatCast(game.options.player_height);
     const half_height = height / 2;
-    const required_air = spawnRequiredAir(game.options.player_height);
+    // The clamp keeps the float-to-int cast defined for a config that names a negative height.
+    const required_air: u32 = @max(1, @as(u32, @intFromFloat(@ceil(@max(game.options.player_height, 1.0)))));
     const mover = Physics.Mover{ .bounding_box = Physics.Mover.boxFor(@floatCast(game.options.player_width), height) };
     var reader = World.Reader{ .world = &game.world };
     defer reader.clear(io);
@@ -449,7 +469,7 @@ pub fn recreateWorld(
 ) !void {
     const game_options = self.options;
     const options_lock = self.options_lock;
-    const view_direction = self.player.view_direction;
+    const view_direction = self.player().view_direction;
     const world_path = allocator.dupe(u8, self.world_path) catch return error.RecreatePathAllocationFailed;
     defer allocator.free(world_path);
 
@@ -465,8 +485,7 @@ pub fn recreateWorld(
     self.deinit(io);
     try self.init(io, allocator, game_options, options_lock, world_path, vk_ctx, generators);
 
-    self.player.view_direction = view_direction;
-    self.renderer.updateCameraDirection(view_direction);
+    self.player().view_direction = view_direction;
 }
 
 fn cancelFuture(io: std.Io, future: anytype) void {
@@ -493,30 +512,32 @@ pub fn frame(self: *@This(), io: std.Io, allocator: std.mem.Allocator, frame_ctx
     self.debug_menu.fps = std.math.lerp(self.debug_menu.fps, current_fps, 0.01);
 
     // Apply any tuning edits before the body integrates this frame.
-    const tuning = self.playerTuning(io);
-    self.player.applyTuning(tuning);
-    try self.applyInventorySizes(io);
+    const options = self.snapshotOptions(io);
+    self.player().applyTuning(options.playerTuning());
+    try self.applyInventorySizes(options);
     if (actions) |held| {
-        try self.handleButtonActions(io, held, tuning, @intCast(frame_ns));
+        try self.handleButtonActions(io, held, options, @intCast(frame_ns));
     } else {
         // No movement step replaced the velocity this frame, so zero the stale drift.
         // Survival keeps Y so gravity still pulls.
-        const body = &self.player.body;
-        body.velocity = if (self.player.game_mode == .Survival) @Vector(3, f64){ 0, body.velocity[1], 0 } else @as(@Vector(3, f64), @splat(0));
+        const body = &self.player().body;
+        body.velocity = if (self.player().game_mode == .Survival) @Vector(3, f64){ 0, body.velocity[1], 0 } else @as(@Vector(3, f64), @splat(0));
     }
 
     const asyncs: tracy.Zone = .begin(.{ .src = @src(), .name = "asyncs" });
 
-    try restartFuture(io, &self.save_is_running, &self.last_save, &self.save_future, self.option(io, .save_frequency_ms), saveFuture, .{ self, io });
+    try self.startSave(io, options.save_frequency_ms);
     try self.startStreamPass(io, allocator);
-    try startEntityDrain(self, io, allocator);
-    // The frame updates the player synchronously so the camera never waits
-    // on the background drain.
-    try self.updatePlayer(io, allocator, EntityRegistry.nowNs(io));
+    // At most one drain runs. A slow drain skips frames instead of overlapping.
+    if (!self.entity_update_is_running.load(.seq_cst))
+        try spawnTask(io, &self.entity_update_is_running, &self.entity_drain_future, updateEntities, .{ self, io, allocator });
+    // The frame updates the player synchronously so the camera never waits on the
+    // background drain. Cancellation is teardown, not a fault. Every other update error is fatal.
+    self.entity_registry.updateNow(io, allocator, &self.world, self.player_entity, EntityRegistry.nowNs(io)) catch |err| if (err != error.Canceled) return err;
     self.publishPlayerBlock(io);
     asyncs.end();
 
-    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, self.player.body.pos);
+    try self.renderer.draw(io, .{ .width = viewport[0], .height = viewport[1] }, frame_ctx, self.player().body.pos, self.getCameraFront());
 
     try self.handleErrors();
 }
@@ -539,7 +560,7 @@ fn startStreamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !vo
 fn streamPass(self: *@This(), io: std.Io, allocator: std.mem.Allocator) Io.Cancelable!void {
     defer self.stream_is_running.store(false, .seq_cst);
     const host: StreamHost = .{ .game = self, .allocator = allocator };
-    const unload_interval_ms = self.option(io, .mesh_unload_frequency_ms);
+    const unload_interval_ms = self.snapshotOptions(io).mesh_unload_frequency_ms;
     // A canceled pass would drop the completions it took, stranding their loads.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
@@ -561,19 +582,13 @@ const StreamHost = struct {
     }
 };
 
-fn restartFuture(
-    io: std.Io,
-    running: *std.atomic.Value(bool),
-    last: *std.Io.Timestamp,
-    future: anytype,
-    frequency_ms: u64,
-    comptime function: anytype,
-    args: anytype,
-) !void {
-    if (running.load(.seq_cst)) return;
-    if (last.durationTo(.now(io, .awake)).toMilliseconds() <= frequency_ms) return;
-    last.* = .now(io, .awake);
-    try spawnTask(io, running, future, function, args);
+/// Starts a save when none runs and more than `frequency_ms` passed since the last one.
+fn startSave(self: *@This(), io: std.Io, frequency_ms: u64) !void {
+    if (self.save_is_running.load(.seq_cst)) return;
+    const now: std.Io.Timestamp = .now(io, .awake);
+    if (self.last_save.durationTo(now).toMilliseconds() <= frequency_ms) return;
+    self.last_save = now;
+    try spawnTask(io, &self.save_is_running, &self.save_future, saveFuture, .{ self, io });
 }
 
 /// Reaps the finished previous pass and starts the next one with `running` set.
@@ -597,20 +612,6 @@ fn updateEntities(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !voi
     defer self.entity_update_is_running.store(false, .seq_cst);
     // Cancellation is teardown, not a fault. Every other update error is fatal.
     self.entity_registry.drain(io, allocator, &self.world, EntityRegistry.nowNs(io)) catch |err| if (err != error.Canceled) return err;
-}
-
-/// Starts the drain when the previous pass finished, mirroring restartFuture
-/// without a frequency gate: at most one drain runs, and a slow drain simply
-/// skips frames instead of overlapping.
-fn startEntityDrain(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
-    if (self.entity_update_is_running.load(.seq_cst)) return;
-    try spawnTask(io, &self.entity_update_is_running, &self.entity_drain_future, updateEntities, .{ self, io, allocator });
-}
-
-/// Runs the player on the frame thread, outside the wheel.
-fn updatePlayer(self: *@This(), io: std.Io, allocator: std.mem.Allocator, now_ns: u64) !void {
-    // Cancellation is teardown, not a fault. Every other update error is fatal.
-    self.entity_registry.updateNow(io, allocator, &self.world, self.player_entity, now_ns) catch |err| if (err != error.Canceled) return err;
 }
 
 fn handleErrors(self: *@This()) !void {
@@ -638,52 +639,45 @@ fn deferError(self: *Game, err: anyerror) Io.Cancelable!void {
 pub fn handleMouseMotion(self: *@This(), io: std.Io, mouse_motion: wio.Position) void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleMouseMotion" });
     defer z.end();
-    const view_dir_diff = @Vector(2, f32){ mouse_motion.y, mouse_motion.x } * @as(@Vector(2, f32), @splat(self.option(io, .mouse_sensitivity)));
+    const view_dir_diff = @Vector(2, f32){ mouse_motion.y, mouse_motion.x } * @as(@Vector(2, f32), @splat(self.snapshotOptions(io).mouse_sensitivity));
 
     const small_f32 = 0.00001;
 
-    const view_direction = &self.player.view_direction;
+    const view_direction = &self.player().view_direction;
     view_direction.* -= @Vector(3, f32){ view_dir_diff[0], view_dir_diff[1], 0 };
     view_direction[0] = std.math.clamp(view_direction[0], -90 + small_f32, 90 - small_f32);
-
-    self.renderer.updateCameraDirection(view_direction.*);
 }
 
 pub fn handleScroll(self: *@This(), io: std.Io, scroll: f32) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleScroll" });
     defer z.end();
-    switch (self.player.game_mode) {
-        .Creative, .Spectator => self.player.fly_speed_log2 -= scroll * self.option(io, .scroll_sensitivity),
-        .Survival => {},
-    }
+    if (self.player().game_mode != .Survival) self.player().fly_speed_log2 -= scroll * self.snapshotOptions(io).scroll_sensitivity;
 }
 
-fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet, tuning: EntityTypes.Player.Tuning, elapsed_ns: u64) !void {
+fn handleButtonActions(self: *Game, io: std.Io, actions: *const Key.ActionSet, options: Options, elapsed_ns: u64) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "handleButtonActions" });
     defer z.end();
-    switch (self.player.game_mode) {
-        .Creative, .Spectator => self.player.fly(wishDirection(self.getCameraFront(), actions)),
-        .Survival => try self.player.walk(io, self.allocator, &self.world, .{
-            .wish = wishDirectionHorizontal(self.player.view_direction, actions),
+    switch (self.player().game_mode) {
+        .Creative, .Spectator => self.player().fly(wishDirection(self.getCameraFront(), actions)),
+        .Survival => try self.player().walk(io, self.allocator, &self.world, .{
+            .wish = wishDirectionHorizontal(self.player().view_direction, actions),
             .sprint = actions.contains(.sprint),
             .jump = actions.contains(.up),
             .elapsed_ns = elapsed_ns,
-            .tuning = tuning,
+            .tuning = options.playerTuning(),
         }),
     }
-    self.player.navigateHotbar(actions);
+    self.player().navigateHotbar(actions);
     if (actions.contains(.spawn_explosive)) self.spawnExplosive(io) catch |err|
         std.log.err("error spawning explosive: {any}", .{err});
-    const item = self.player.selectedItem() orelse return;
-    self.options_lock.lockSharedUncancelable(io);
+    const item = self.player().selectedItem() orelse return;
     const use: Item.UseContext = .{
         .actions = actions.*,
-        .player_pos = self.player.body.pos,
+        .player_pos = self.player().body.pos,
         .looking = self.getCameraFront(),
-        .sphere_size = self.options.sphere_size,
-        .sphere_block = self.options.sphere_block,
+        .sphere_size = options.sphere_size,
+        .sphere_block = options.sphere_block,
     };
-    self.options_lock.unlockShared(io);
     self.groupAsync(io, itemAction, .{ self, io, item, use });
 }
 
@@ -692,7 +686,7 @@ fn spawnExplosive(self: *@This(), io: std.Io) !void {
     defer z.end();
     const looking = self.getCameraFront();
     const spawn_distance: f64 = 2;
-    const pos = self.player.body.pos + @as(@Vector(3, f64), @floatCast(looking)) * @as(@Vector(3, f64), @splat(spawn_distance));
+    const pos = self.player().body.pos + @as(@Vector(3, f64), @floatCast(looking)) * @as(@Vector(3, f64), @splat(spawn_distance));
     const entity = try self.entity_registry.spawn(io, self.allocator, &self.world, EntityTypes.Explosive.init(
         pos,
         looking,
@@ -744,30 +738,15 @@ fn wishDirectionHorizontal(view_direction: @Vector(3, f32), actions: *const Key.
     return if (length > 0) wish / @as(@Vector(2, f64), @splat(length)) else wish;
 }
 
-/// The tunable body size, movement, step, and jump from the options.
-fn playerTuning(self: *@This(), io: std.Io) EntityTypes.Player.Tuning {
-    self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
-    return .{
-        .width = self.options.player_width,
-        .height = self.options.player_height,
-        .step_height = self.options.step_height,
-        .step_climb_speed = self.options.step_climb_speed,
-        .jump_height = self.options.jump_height,
-        .walk_speed = self.options.move_speed,
-        .sprint_multiplier = self.options.sprint_multiplier,
-    };
-}
-
 fn getCameraFront(self: *@This()) @Vector(3, f32) {
-    return Renderer.cameraFrontFromViewDirection(self.player.view_direction);
+    return Renderer.cameraFrontFromViewDirection(self.player().view_direction);
 }
 
 /// Publishes the block holding the player, the integer origin every chunk-window computation shares.
 fn publishPlayerBlock(self: *@This(), io: std.Io) void {
     self.player_block_mutex.lockUncancelable(io);
     defer self.player_block_mutex.unlock(io);
-    self.player_block = @intFromFloat(@floor(self.player.body.pos));
+    self.player_block = @intFromFloat(@floor(self.player().body.pos));
 }
 
 /// The last published player block. Any task can call this.
@@ -778,22 +757,14 @@ fn playerBlock(self: *@This(), io: std.Io) World.BlockPos {
 }
 
 fn snapshotView(self: *@This(), io: std.Io) ChunkStreamer.View {
-    const player_block = self.playerBlock(io);
-    self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
-    return .{ .player_block = player_block, .settings = .{
-        .lowest_level = self.options.lowest_level,
-        .highest_level = self.options.highest_level,
-        .render_distance = .{ self.options.render_distance_x, self.options.render_distance_y },
-        .lod_overlap = self.options.lod_overlap,
-    } };
+    return .{ .player_block = self.playerBlock(io), .settings = self.snapshotOptions(io).streamSettings() };
 }
 
-/// Reads one option under the shared options lock.
-fn option(self: *@This(), io: std.Io, comptime field: std.meta.FieldEnum(Options)) @FieldType(Options, @tagName(field)) {
+/// Copies the options under the shared options lock.
+fn snapshotOptions(self: *@This(), io: std.Io) Options {
     self.options_lock.lockSharedUncancelable(io);
     defer self.options_lock.unlockShared(io);
-    return @field(self.options, @tagName(field));
+    return self.options.*;
 }
 
 fn isUniformInvisible(io: std.Io, chunk: *Chunk) !bool {
@@ -810,13 +781,10 @@ fn isUniformInvisible(io: std.Io, chunk: *Chunk) !bool {
 fn streamChunk(self: *@This(), io: std.Io, allocator: std.mem.Allocator, request: ChunkStreamer.Request) !void {
     var meshed = false;
     defer self.streamer.completions.push(io, .{ .pos = request.pos, .kind = request.kind, .meshed = meshed });
-    switch (request.kind) {
-        // The task may start long after the streamer queued it, so skip a chunk the player has left.
-        .load => |settings| {
-            const view: ChunkStreamer.View = .{ .settings = settings, .player_block = self.playerBlock(io) };
-            if (!view.keeps(request.pos)) return;
-        },
-        .remesh => {},
+    // The task may start long after the streamer queued it, so skip a chunk the player has left.
+    if (request.kind == .load) {
+        const view: ChunkStreamer.View = .{ .settings = request.kind.load, .player_block = self.playerBlock(io) };
+        if (!view.keeps(request.pos)) return;
     }
     try self.meshChunk(io, allocator, request.pos, request.kind == .load);
     meshed = true;
@@ -865,61 +833,46 @@ fn editorCallback(io: std.Io, allocator: std.mem.Allocator, chunk_pos: World.Chu
     };
 }
 
-const GridSize = struct { width: u32, rows: u32 };
-
-/// One grid's size from the options, at least one slot each way.
-fn gridSize(self: *@This(), io: std.Io, grid: EntityTypes.Player.Grid) GridSize {
-    self.options_lock.lockSharedUncancelable(io);
-    defer self.options_lock.unlockShared(io);
-    const width, const rows = switch (grid) {
-        .hotbar => .{ self.options.hotbar_width, self.options.hotbar_height },
-        .main => .{ self.options.inventory_width, self.options.inventory_height },
-    };
-    return .{ .width = @max(width, 1), .rows = @max(rows, 1) };
-}
-
-/// Resizes the player's grids to the current options. Resizing deletes the items that no longer fit.
-fn applyInventorySizes(self: *@This(), io: std.Io) !void {
+/// Resizes the player's grids to the options. Resizing deletes the items that no longer fit.
+fn applyInventorySizes(self: *@This(), options: Options) !void {
     for (std.enums.values(EntityTypes.Player.Grid)) |grid| {
-        const size = self.gridSize(io, grid);
-        try self.player.resizeGrid(self.allocator, grid, size.width, size.rows);
+        const width, const rows = options.gridSize(grid);
+        try self.player().resizeGrid(self.allocator, grid, width, rows);
     }
 }
 
 fn spawnPlayer(game: *@This(), io: std.Io, allocator: std.mem.Allocator, spawn_pos: @Vector(3, f64)) !void {
     const z: tracy.Zone = .begin(.{ .src = @src(), .name = "spawnPlayer" });
     defer z.end();
-    const hotbar_size = game.gridSize(io, .hotbar);
-    var hotbar: Item.Inventory = try .init(allocator, hotbar_size.width, hotbar_size.rows);
+    const options = game.snapshotOptions(io);
+    const hotbar_width, const hotbar_rows = options.gridSize(.hotbar);
+    var hotbar: Item.Inventory = try .init(allocator, hotbar_width, hotbar_rows);
     errdefer hotbar.deinit(allocator);
-    const main_size = game.gridSize(io, .main);
-    var main: Item.Inventory = try .init(allocator, main_size.width, main_size.rows);
+    const main_width, const main_rows = options.gridSize(.main);
+    var main: Item.Inventory = try .init(allocator, main_width, main_rows);
     errdefer main.deinit(allocator);
-    fillStarterRow(&hotbar);
+    const starter_items: [2]Item.ItemType = .{ .PlaceRod, .PlaceSphere };
+    for (starter_items[0..@min(starter_items.len, hotbar.width)], 0..) |item_type, col| {
+        hotbar.at(.{ .col = @intCast(col) }).* = .{ .item_type = item_type, .amount = 1 };
+    }
     const player_entity = try game.entity_registry.spawn(io, allocator, &game.world, EntityTypes.Player{
         .body = .{
             .pos = spawn_pos,
-            .mover = .{ .bounding_box = Physics.Mover.boxFor(@floatCast(game.options.player_width), @floatCast(game.options.player_height)) },
+            .mover = .{ .bounding_box = Physics.Mover.boxFor(@floatCast(options.player_width), @floatCast(options.player_height)) },
             .last_update = .now(io, .awake),
         },
         .game_mode = game.spawn.mode,
         .view_direction = .{ 0.0001, -0.4, 0.001 },
         .inventories = .init(.{ .hotbar = hotbar, .main = main }),
     }, .{});
-    game.player_entity = player_entity;
     // The held reference keeps the player resident. The frame lane drives it.
-    game.player = @ptrCast(@alignCast(player_entity.ptr));
+    game.player_entity = player_entity;
     game.publishPlayerBlock(io);
-    game.renderer.updateCameraDirection(game.player.view_direction);
 }
 
-/// Placeholder starter hotbar row with the tools `Item.use` implements; every other
-/// slot starts empty. Real item grants come later.
-fn fillStarterRow(inventory: *Item.Inventory) void {
-    const starter_items: [2]Item.ItemType = .{ .PlaceRod, .PlaceSphere };
-    for (starter_items[0..@min(starter_items.len, inventory.width)], 0..) |item_type, col| {
-        inventory.set(0, @intCast(col), .{ .item_type = item_type, .amount = 1 });
-    }
+/// The player implementation behind the held `player_entity` reference.
+pub fn player(self: *const Game) *EntityTypes.Player {
+    return @ptrCast(@alignCast(self.player_entity.ptr));
 }
 
 test {

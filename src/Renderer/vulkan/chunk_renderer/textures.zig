@@ -108,7 +108,7 @@ pub const TextureManager = struct {
             }
         }
 
-        try self.loadTextureDirectory(io, pack.dir, allocator, ".png");
+        try self.loadTextureDirectory(io, pack.dir, allocator);
     }
 
     pub fn loadTextureDirectory(
@@ -116,13 +116,9 @@ pub const TextureManager = struct {
         io: std.Io,
         dir: std.Io.Dir,
         allocator: std.mem.Allocator,
-        keyword: []const u8,
     ) !void {
         try self.createSampler();
-        errdefer if (self.sampler != .null_handle) {
-            self.services.dev.destroySampler(self.sampler, &self.services.vk_ctx.vkalloc);
-            self.sampler = .null_handle;
-        };
+        errdefer core.destroyIfValid(self.services.dev, &self.sampler, &self.services.vk_ctx.vkalloc);
 
         errdefer {
             for (&self.textures.values) |*tex| self.destroyTexture(tex);
@@ -137,7 +133,7 @@ pub const TextureManager = struct {
 
         var dir_it = std.Io.Dir.iterate(dir);
         while (try dir_it.next(io)) |dir_entry| {
-            if (dir_entry.kind != .file or std.mem.find(u8, dir_entry.name, keyword) == null) continue;
+            if (dir_entry.kind != .file or std.mem.find(u8, dir_entry.name, ".png") == null) continue;
             const dot = std.mem.findScalar(u8, dir_entry.name, '.') orelse dir_entry.name.len;
             const block_type = std.meta.stringToEnum(Block, dir_entry.name[0..dot]) orelse continue;
             if (!block_type.isVisible()) continue;
@@ -209,7 +205,7 @@ pub const TextureManager = struct {
     }
 
     fn createSampler(self: *TextureManager) !void {
-        self.sampler = try core.createSampler(self.services.dev, &self.services.vk_ctx.vkalloc, .{
+        self.sampler = try core.createSampler(self.services.vk_ctx, .{
             .mag_filter = .nearest,
             .min_filter = .linear,
             .address_mode = .repeat,
@@ -221,13 +217,9 @@ pub const TextureManager = struct {
     }
 
     fn createTextureView(self: *TextureManager, tex: *Texture, format: vk.Format) !vk.ImageView {
-        return self.services.dev.createImageView(&.{
-            .image = tex.image,
-            .view_type = .@"2d",
-            .format = format,
-            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{ .aspect_mask = .{ .color = true }, .base_mip_level = 0, .level_count = tex.num_mip_levels, .base_array_layer = 0, .layer_count = 1 },
-        }, &self.services.vk_ctx.vkalloc);
+        var info = core.imageViewCreateInfo(tex.image, format, .{ .color = true });
+        info.subresource_range.level_count = tex.num_mip_levels;
+        return self.services.dev.createImageView(&info, &self.services.vk_ctx.vkalloc);
     }
 
     fn createDescriptorResources(self: *TextureManager) !void {
@@ -270,11 +262,9 @@ pub const TextureManager = struct {
         }, (&self.descriptor_set)[0..1]);
 
         var image_infos: [num_textures]vk.DescriptorImageInfo = undefined;
-        var tex_it = self.textures.iterator();
-        for (&image_infos) |*info| {
-            const entry = tex_it.next().?;
-            const tex = if (entry.value.view != .null_handle) entry.value else &self.default_texture;
-            info.* = .{ .sampler = self.sampler, .image_view = tex.view, .image_layout = .shader_read_only_optimal };
+        for (&image_infos, self.textures.values) |*info, tex| {
+            const view = if (tex.view != .null_handle) tex.view else self.default_texture.view;
+            info.* = .{ .sampler = self.sampler, .image_view = view, .image_layout = .shader_read_only_optimal };
         }
 
         self.services.dev.updateDescriptorSets(&.{vk.WriteDescriptorSet{
@@ -291,7 +281,7 @@ pub const TextureManager = struct {
 
     fn destroyTexture(self: *TextureManager, tex: *Texture) void {
         core.destroyIfValid(self.services.dev, &tex.view, &self.services.vk_ctx.vkalloc);
-        core.destroyImageWithMemory(self.services.dev, &tex.image, &tex.memory, &self.services.vk_ctx.vkalloc);
+        core.destroyImageWithMemory(self.services.vk_ctx, &tex.image, &tex.memory);
     }
 
     fn uploadSingleTexture(
@@ -321,19 +311,9 @@ pub const TextureManager = struct {
             .samples = .{ .@"1" = true },
         };
 
-        var mem_reqs2: vk.MemoryRequirements2 = .{ .memory_requirements = undefined };
-        self.services.dev.getDeviceImageMemoryRequirements(&.{ .p_create_info = &image_info, .plane_aspect = .{} }, &mem_reqs2);
-
-        const memory = try self.services.dev.allocateMemory(&.{
-            .allocation_size = mem_reqs2.memory_requirements.size,
-            .memory_type_index = try core.findMemoryType(self.services.vk_ctx.mem_props, mem_reqs2.memory_requirements.memory_type_bits, .{ .device_local = true }),
-        }, &self.services.vk_ctx.vkalloc);
+        const image, const memory = try core.allocateImageWithMemory(self.services.vk_ctx, &image_info);
         errdefer self.services.dev.freeMemory(memory, &self.services.vk_ctx.vkalloc);
-
-        const image = try self.services.dev.createImage(&image_info, &self.services.vk_ctx.vkalloc);
         errdefer self.services.dev.destroyImage(image, &self.services.vk_ctx.vkalloc);
-
-        try self.services.dev.bindImageMemory(image, memory, 0);
 
         const staging = try self.services.memory.cpuToGpu().alloc(u8, image_size);
         @memcpy(staging, rgba_data);

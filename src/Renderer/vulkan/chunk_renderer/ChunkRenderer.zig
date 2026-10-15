@@ -166,6 +166,9 @@ pub const PassContext = struct {
     depth_sampled_view: vk.ImageView,
     depth_aspect_mask: vk.ImageAspectFlags,
     frame_sequence: u64,
+    /// The face buffer every barrier and draw of this frame uses, snapshotted once so a
+    /// concurrent grow cannot split the frame across two buffers.
+    face: gpu.GpuRegionAllocator.Binding,
     /// Shared shadow state; null until VulkanRenderer wires it in.
     shadow: ?*ShadowRenderer,
     msaa_color_view: ?vk.ImageView = null,
@@ -285,9 +288,7 @@ pub fn deinit(self: *ChunkRenderer, io: std.Io) void {
     if (self.drain_future) |*future| {
         // Cancel waits for the drain and reports its final result; error.Canceled means it stopped.
         _ = future.cancel(io) catch |err| {
-            if (@intFromError(err) != @intFromError(error.Canceled)) {
-                std.log.err("ChunkRenderer: background drain failed during deinit: {any}", .{err});
-            }
+            if (err != error.Canceled) std.log.err("ChunkRenderer: background drain failed during deinit: {any}", .{err});
         };
         self.drain_future = null;
     }
@@ -573,7 +574,7 @@ fn pushPendingUpload(self: *ChunkRenderer, io: std.Io, pending: PendingMeshUploa
             // reported instead of hanging silently.
             const result = try self.dev.waitSemaphores(&.{
                 .semaphore_count = 1,
-                .p_semaphores = (&self.uploader.transfer.semaphore)[0..1],
+                .p_semaphores = (&self.vk_ctx.transfer_semaphore)[0..1],
                 .p_values = (&front_upload.timeline_value)[0..1],
             }, gpu.transfer_wait_timeout_ns);
             if (result != .success) std.log.warn("ChunkRenderer: pending upload queue stalled waiting for transfer value {d}; GPU may be stuck", .{front_upload.timeline_value});
@@ -683,16 +684,15 @@ fn applyRetireUpload(self: *ChunkRenderer, io: std.Io, new_mesh_in: gpu.MeshBuff
         const removed = try self.meshes.fetchPut(io, self.allocator, key, new_mesh);
         if (removed) |old| self.enqueueRetiredMesh(io, old.gpu_index, old, false);
     } else {
-        const gpu_idx = try self.scene.allocIndex(io);
+        const gpu_idx = try self.scene.allocIndex();
         new_mesh.gpu_index = gpu_idx;
         self.scene.writeCandidate(gpu_idx, new_mesh, is_transparent, transform);
-        self.scene.updateMaxAllocatedIndex(gpu_idx);
 
         const removed = self.meshes.fetchPut(io, self.allocator, key, new_mesh) catch |err| {
             // Roll back so a retry of this publish starts from a clean slate:
             // without this the slot would keep drawing an unregistered mesh and the
             // index would be permanently consumed.
-            self.scene.releaseCandidate(io, gpu_idx);
+            self.scene.releaseCandidate(gpu_idx);
             return err;
         };
         if (removed) |old| {
@@ -709,7 +709,7 @@ fn retireCompletedUploads(self: *ChunkRenderer, io: std.Io) !void {
     self.retire_mutex.lockUncancelable(io);
     defer self.retire_mutex.unlock(io);
 
-    const current_transfer_val = try self.dev.getSemaphoreCounterValue(self.uploader.transfer.semaphore);
+    const current_transfer_val = try self.dev.getSemaphoreCounterValue(self.vk_ctx.transfer_semaphore);
     self.uploader.retireStaging(io, current_transfer_val);
 
     while (true) {
@@ -780,7 +780,7 @@ fn applyPublication(self: *ChunkRenderer, io: std.Io, publication: Publication) 
             try self.reserveRetiredMesh(io);
             try self.applyRemoveUpload(io, key);
         },
-        .free_index => |gpu_index| self.scene.releaseCandidate(io, gpu_index),
+        .free_index => |gpu_index| self.scene.releaseCandidate(gpu_index),
     }
 }
 
@@ -835,7 +835,6 @@ fn processRetired(self: *ChunkRenderer, io: std.Io) !void {
     const current_graphics_val = try self.dev.getSemaphoreCounterValue(self.vk_ctx.graphics_timeline_semaphore);
 
     self.uploader.processRetiredFaceBuffers(io, current_graphics_val);
-    self.scene.processRetired(io, current_graphics_val);
 
     const items = &self.retired_meshes;
     self.retired_meshes_mutex.lockUncancelable(io);
@@ -890,7 +889,7 @@ fn createCullResources(self: *ChunkRenderer) !void {
         self.cull.pipeline_layout = .null_handle;
     }
 
-    const comp_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, cull_shader_spv);
+    const comp_module = try core.createShaderModule(self.vk_ctx, cull_shader_spv);
     defer self.dev.destroyShaderModule(comp_module, &self.vk_ctx.vkalloc);
 
     const cpci: vk.ComputePipelineCreateInfo = .{
@@ -900,9 +899,8 @@ fn createCullResources(self: *ChunkRenderer) !void {
         .base_pipeline_handle = .null_handle,
         .base_pipeline_index = -1,
     };
-    if (self.dev.createComputePipelines(.null_handle, (&cpci)[0..1], &self.vk_ctx.vkalloc, (&self.cull.pipeline)[0..1])) |res| {
-        if (res != .success) return error.PipelineCreationFailed;
-    } else |err| return err;
+    const res = try self.dev.createComputePipelines(.null_handle, (&cpci)[0..1], &self.vk_ctx.vkalloc, (&self.cull.pipeline)[0..1]);
+    if (res != .success) return error.PipelineCreationFailed;
 
     self.last_cull_version = std.math.maxInt(u32);
     self.updateCullDescriptorsIfNeeded();
@@ -914,7 +912,7 @@ fn destroyCullDescriptorResources(self: *ChunkRenderer) void {
 
 fn updateCullDescriptorSet(self: *ChunkRenderer, frame_idx: u32) void {
     const scene = self.scene;
-    const frame = &scene.frame_buffers.items[frame_idx];
+    const frame = &scene.frame_buffers[frame_idx];
     const infos: [5]vk.DescriptorBufferInfo = .{
         .{ .buffer = scene.persistent.buffer, .offset = scene.persistent.offset, .range = scene.persistent.slice.len * @sizeOf(gpu.MeshCandidate) },
         .{ .buffer = frame.indirect_draw, .offset = frame.indirect_draw_offset, .range = scene.draw_capacity * gpu.slot_count * @sizeOf(vk.DrawIndirectCommand) },
@@ -939,7 +937,7 @@ fn dispatchCulling(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_f
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "dispatchCulling" });
     defer zone.end();
     const scene = self.scene;
-    const frame = &scene.frame_buffers.items[current_frame];
+    const frame = &scene.frame_buffers[current_frame];
     if (reset_count) {
         self.dev.cmdFillBuffer(cmd_buffer, frame.count, frame.count_offset, @sizeOf(gpu.CullCount), 0);
         const min_off = frame.count_offset + @as(vk.DeviceSize, @offsetOf(gpu.CullCount, "aabb_min_ord"));
@@ -972,7 +970,7 @@ fn dispatchCulling(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_f
 /// shared trio every cull/pass transition protects.
 fn frameBufferBarriers(self: *ChunkRenderer, current_frame: u32, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) [3]vk.BufferMemoryBarrier2 {
     const scene = self.scene;
-    const frame = &scene.frame_buffers.items[current_frame];
+    const frame = &scene.frame_buffers[current_frame];
     return .{
         core.makeBufferBarrier2(frame.indirect_draw, frame.indirect_draw_offset, scene.draw_capacity * gpu.slot_count * @sizeOf(vk.DrawIndirectCommand), src_stage, src_access, dst_stage, dst_access),
         core.makeBufferBarrier2(frame.mesh_data, frame.mesh_data_offset, scene.draw_capacity * gpu.slot_count * @sizeOf(gpu.MeshData), src_stage, src_access, dst_stage, dst_access),
@@ -995,7 +993,8 @@ fn preCullFrameBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, curre
 fn prepareVisibility(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, total_candidates: u32) void {
     const scene = self.scene;
     const size: vk.DeviceSize = @as(vk.DeviceSize, total_candidates) * @sizeOf(u32);
-    if (scene.visibility_needs_clear.swap(false, .acq_rel)) {
+    if (scene.visibility_needs_clear) {
+        scene.visibility_needs_clear = false;
         self.dev.cmdFillBuffer(cmd_buffer, scene.visibility_buffer, scene.visibility_offset, size, 0);
         core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(scene.visibility_buffer, scene.visibility_offset, size, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .compute_shader = true }, .{ .shader_read = true, .shader_write = true }))[0..1]);
         return;
@@ -1020,7 +1019,7 @@ fn preLateCullBarrier(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, curren
 /// One barrier covering the late cull's outputs, then the count copy into the
 /// host-visible stats buffer.
 fn cullBarrierAndCopyStats(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, current_frame: u32) void {
-    const frame = &self.scene.frame_buffers.items[current_frame];
+    const frame = &self.scene.frame_buffers[current_frame];
     // Wider masks than strictly needed per buffer; extra dependencies are free here.
     core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, &self.frameBufferBarriers(current_frame, .{ .compute_shader = true }, .{ .shader_write = true }, .{ .draw_indirect = true, .all_transfer = true }, .{ .indirect_command_read = true, .transfer_read = true }));
 
@@ -1037,7 +1036,7 @@ pub fn createPipelines(self: *ChunkRenderer, depth_format: vk.Format, samples: v
 
     if (self.graphics_state.opaque_pipeline_layout != .null_handle) self.destroyGraphicsState();
 
-    const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, vertex_shader_spv);
+    const vert_module = try core.createShaderModule(self.vk_ctx, vertex_shader_spv);
     defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
 
     try self.createOpaquePipeline(vert_module, depth_format, samples);
@@ -1050,7 +1049,7 @@ fn createOpaquePipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule, dept
         self.scene.mesh_data_descriptor_set_layout,
         self.shadow.shadow_set_layout,
     };
-    try self.buildChunkPipeline(vert_module, fragment_shader_spv, depth_format, &set_layouts, &.{self.vk_ctx.swapchain_format}, &.{core.opaqueBlendAttachment()}, core.depthStencilState(true, .greater, true), &self.graphics_state.opaque_pipeline_layout, &self.graphics_state.pipeline, samples);
+    try self.buildChunkPipeline(vert_module, fragment_shader_spv, depth_format, &set_layouts, &.{self.vk_ctx.swapchain_format}, &.{core.opaque_blend_attachment}, &self.graphics_state.opaque_pipeline_layout, &self.graphics_state.pipeline, samples);
 }
 
 fn createTransparentPipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule, depth_format: vk.Format) !void {
@@ -1066,11 +1065,11 @@ fn createTransparentPipeline(self: *ChunkRenderer, vert_module: vk.ShaderModule,
         .{ .blend_enable = .true, .src_color_blend_factor = .one, .dst_color_blend_factor = .one, .color_blend_op = .add, .src_alpha_blend_factor = .one, .dst_alpha_blend_factor = .one, .alpha_blend_op = .add, .color_write_mask = .{ .r = true, .g = false, .b = false, .a = false } },
     };
     const formats: [3]vk.Format = .{ .r16g16b16a16_sfloat, .r16g16b16a16_sfloat, .r16_sfloat };
-    try self.buildChunkPipeline(vert_module, transparent_frag_spv, depth_format, &set_layouts, &formats, &blend_attachments, core.depthStencilState(true, .greater_or_equal, false), &self.graphics_state.transparent_pipeline_layout, &self.graphics_state.transparent_pipeline, .{ .@"1" = true });
+    try self.buildChunkPipeline(vert_module, transparent_frag_spv, depth_format, &set_layouts, &formats, &blend_attachments, &self.graphics_state.transparent_pipeline_layout, &self.graphics_state.transparent_pipeline, .{ .@"1" = true });
 }
 
-/// Builds a chunk pipeline layout (shared push constant range) and pipeline from the
-/// given set layouts, color formats, blend attachments, and depth-stencil state.
+/// Builds a depth-tested chunk pipeline layout (shared push constant range) and pipeline
+/// from the given set layouts, color formats, and blend attachments.
 fn buildChunkPipeline(
     self: *ChunkRenderer,
     vert_module: vk.ShaderModule,
@@ -1079,7 +1078,6 @@ fn buildChunkPipeline(
     set_layouts: []const vk.DescriptorSetLayout,
     formats: []const vk.Format,
     blend: []const vk.PipelineColorBlendAttachmentState,
-    depth_stencil: vk.PipelineDepthStencilStateCreateInfo,
     pipeline_layout: *vk.PipelineLayout,
     pipeline: *vk.Pipeline,
     samples: vk.SampleCountFlags,
@@ -1097,21 +1095,28 @@ fn buildChunkPipeline(
         .p_push_constant_ranges = (&pc_range)[0..1],
     }, &self.vk_ctx.vkalloc);
 
-    const frag_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, frag_spv);
+    const frag_module = try core.createShaderModule(self.vk_ctx, frag_spv);
     defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
-    if (samples.@"1") {
-        pipeline.* = try core.buildGraphicsPipelineWithTopologyAndSamples(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip, .{ .@"1" = true });
-    } else {
-        pipeline.* = try core.buildGraphicsPipelineWithTopologyAndSamples(self.dev, &self.vk_ctx.vkalloc, self.vk_ctx.pipeline_creation_feedback, vert_module, frag_module, formats, depth_format, depth_stencil, blend, pipeline_layout.*, gpu.MeshUploader.faceVertexInputState(), .triangle_strip, samples);
-    }
+    pipeline.* = try core.buildGraphicsPipeline(self.vk_ctx, .{
+        .vert_module = vert_module,
+        .frag_module = frag_module,
+        .color_formats = formats,
+        .blend_attachments = blend,
+        .depth_format = depth_format,
+        .depth_test = true,
+        .layout = pipeline_layout.*,
+        .vertex_input = gpu.MeshUploader.faceVertexInputState(),
+        .topology = .triangle_strip,
+        .samples = samples,
+    });
 }
 
 pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordPasses" });
     defer zone.end();
     self.updateCullDescriptorsIfNeeded();
-    self.uploader.cmdAcquireFaceBuffer(ctx.cmd_buffer);
+    self.uploader.cmdAcquireFaceBuffer(ctx.cmd_buffer, ctx.face);
 
     const pc: PushConstants = .{
         .projview = @bitCast(@shuffle(f32, ctx.projview, undefined, projview_transpose_mask)),
@@ -1186,13 +1191,9 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
     // The shadow raster fills the tail of the frame where the GPU is draining and
     // overlaps with the next frame's cull/vertex work; its output is sampled next frame.
     // Gated on candidates: with none, no cull ran, so the count buffer was never zeroed.
-    if (shadowActive(ctx)) |shadow| {
-        const face_buf = self.uploader.region_allocator.buffer.load(.acquire);
-        const face_buf_off: vk.DeviceSize = self.uploader.region_allocator.buffer_offset.load(.monotonic);
-        shadow.recordShadowPass(ctx.cmd_buffer, ctx.frame_idx, face_buf, face_buf_off);
-    }
+    if (shadowActive(ctx)) |shadow| shadow.recordShadowPass(ctx.cmd_buffer, ctx.frame_idx, ctx.face);
 
-    self.uploader.cmdReleaseFaceBuffer(ctx.cmd_buffer);
+    self.uploader.cmdReleaseFaceBuffer(ctx.cmd_buffer, ctx.face);
 }
 
 /// True when the shadow cull+raster should run this frame: a cascade is active and
@@ -1200,7 +1201,7 @@ pub fn recordPasses(self: *ChunkRenderer, ctx: *const PassContext) void {
 fn shadowActive(ctx: *const PassContext) ?*ShadowRenderer {
     if (ctx.total_candidates == 0) return null;
     const shadow = ctx.shadow orelse return null;
-    if (!shadow.frameHasCascade()) return null;
+    if (shadow.frameCascadeCount() == 0) return null;
     return shadow;
 }
 
@@ -1299,9 +1300,7 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
 
     self.dev.cmdBindPipeline(ctx.cmd_buffer, .graphics, self.graphics_state.pipeline);
 
-    core.setDynamicState(self.dev, ctx.cmd_buffer, .{ .back = true }, .greater, true);
-
-    core.setViewportAndScissor(self.dev, ctx.cmd_buffer, ctx.extent);
+    core.setDynamicState(self.dev, ctx.cmd_buffer, ctx.extent, .{ .back = true }, .{ .compare_op = .greater, .write = true });
 
     self.bindSharedDescriptorSets(ctx.cmd_buffer, self.graphics_state.opaque_pipeline_layout, ctx.frame_idx);
 
@@ -1320,8 +1319,8 @@ fn recordOpaquePass(self: *ChunkRenderer, ctx: *const PassContext, pc: PushConst
             .early => @offsetOf(gpu.CullCount, "opaque_count"),
             .late => @offsetOf(gpu.CullCount, "opaque_late_count"),
         };
-        const frame = &self.scene.frame_buffers.items[ctx.frame_idx];
-        self.drawChunkMeshes(ctx.cmd_buffer, ctx.frame_idx, frame.indirect_draw_offset + @as(vk.DeviceSize, slot * self.scene.draw_capacity) * @sizeOf(vk.DrawIndirectCommand), frame.count_offset + count_field);
+        const frame = &self.scene.frame_buffers[ctx.frame_idx];
+        self.drawChunkMeshes(ctx, frame.indirect_draw_offset + @as(vk.DeviceSize, slot * self.scene.draw_capacity) * @sizeOf(vk.DrawIndirectCommand), frame.count_offset + count_field);
     }
 
     self.dev.cmdEndRendering(ctx.cmd_buffer);
@@ -1349,8 +1348,7 @@ fn recordTransparentPass(self: *ChunkRenderer, ctx: *const PassContext, pc: Push
 
     self.dev.cmdBindPipeline(ctx.cmd_buffer, .graphics, self.graphics_state.transparent_pipeline);
 
-    core.setDynamicState(self.dev, ctx.cmd_buffer, .{}, .greater_or_equal, false);
-    core.setViewportAndScissor(self.dev, ctx.cmd_buffer, ctx.extent);
+    core.setDynamicState(self.dev, ctx.cmd_buffer, ctx.extent, .{}, .{ .compare_op = .greater_or_equal, .write = false });
 
     self.bindSharedDescriptorSets(ctx.cmd_buffer, self.graphics_state.transparent_pipeline_layout, ctx.frame_idx);
 
@@ -1366,8 +1364,8 @@ fn recordTransparentPass(self: *ChunkRenderer, ctx: *const PassContext, pc: Push
     self.pushChunkConstants(ctx.cmd_buffer, self.graphics_state.transparent_pipeline_layout, pc, gpu.transparent_slot * self.scene.draw_capacity);
 
     if (ctx.total_candidates > 0) {
-        const frame = &self.scene.frame_buffers.items[ctx.frame_idx];
-        self.drawChunkMeshes(ctx.cmd_buffer, ctx.frame_idx, frame.indirect_draw_offset + @as(vk.DeviceSize, gpu.transparent_slot * self.scene.draw_capacity) * @sizeOf(vk.DrawIndirectCommand), frame.count_offset + @as(vk.DeviceSize, @intCast(@offsetOf(gpu.CullCount, "transparent_count"))));
+        const frame = &self.scene.frame_buffers[ctx.frame_idx];
+        self.drawChunkMeshes(ctx, frame.indirect_draw_offset + @as(vk.DeviceSize, gpu.transparent_slot * self.scene.draw_capacity) * @sizeOf(vk.DrawIndirectCommand), frame.count_offset + @as(vk.DeviceSize, @intCast(@offsetOf(gpu.CullCount, "transparent_count"))));
     }
 
     self.dev.cmdEndRendering(ctx.cmd_buffer);
@@ -1380,17 +1378,12 @@ fn pushChunkConstants(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, pipeli
     self.dev.cmdPushConstants(cmd_buffer, pipeline_layout, .{ .vertex = true, .fragment = true }, 0, push_constants_size, &pc_x);
 }
 
-/// Binds the face vertex buffer and issues the indirect count draw for the pass. The
-/// face buffer is momentarily null while allocRegion grows it; the draw is skipped in
-/// that rare window instead of binding a stale buffer.
-fn drawChunkMeshes(self: *ChunkRenderer, cmd_buffer: vk.CommandBuffer, frame_idx: u32, draw_offset: vk.DeviceSize, count_offset: vk.DeviceSize) void {
-    const face_buf = self.uploader.region_allocator.buffer.load(.acquire);
-    if (face_buf == .null_handle) return;
-    const face_buf_off: vk.DeviceSize = self.uploader.region_allocator.buffer_offset.load(.monotonic);
-    self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face_buf)[0..1], (&face_buf_off)[0..1]);
+/// Binds the face vertex buffer and issues the indirect count draw for the pass.
+fn drawChunkMeshes(self: *ChunkRenderer, ctx: *const PassContext, draw_offset: vk.DeviceSize, count_offset: vk.DeviceSize) void {
+    self.dev.cmdBindVertexBuffers(ctx.cmd_buffer, 0, (&ctx.face.buffer)[0..1], (&ctx.face.offset)[0..1]);
 
-    const frame = &self.scene.frame_buffers.items[frame_idx];
-    self.dev.cmdDrawIndirectCount(cmd_buffer, frame.indirect_draw, draw_offset, frame.count, count_offset, self.scene.draw_capacity, @sizeOf(vk.DrawIndirectCommand));
+    const frame = &self.scene.frame_buffers[ctx.frame_idx];
+    self.dev.cmdDrawIndirectCount(ctx.cmd_buffer, frame.indirect_draw, draw_offset, frame.count, count_offset, self.scene.draw_capacity, @sizeOf(vk.DrawIndirectCommand));
 }
 
 test "projview transpose shuffle matches scalar loop" {

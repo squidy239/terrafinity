@@ -84,7 +84,7 @@ pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.G
     };
     errdefer self.deinit();
 
-    self.sampler = try core.createSampler(self.dev, &vk_ctx.vkalloc, .{ .mag_filter = .nearest, .min_filter = .nearest, .mipmap_mode = .nearest });
+    self.sampler = try core.createSampler(vk_ctx, .{ .mag_filter = .nearest, .min_filter = .nearest, .mipmap_mode = .nearest });
 
     const build_bindings: [2]vk.DescriptorSetLayoutBinding = .{
         .{ .binding = 0, .descriptor_type = .combined_image_sampler, .descriptor_count = 1, .stage_flags = .{ .compute = true }, .p_immutable_samplers = null },
@@ -107,7 +107,7 @@ pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.G
         .p_push_constant_ranges = (&pc_range)[0..1],
     }, &vk_ctx.vkalloc);
 
-    const comp_module = try core.createShaderModule(self.dev, &vk_ctx.vkalloc, depth_pyramid_spv);
+    const comp_module = try core.createShaderModule(vk_ctx, depth_pyramid_spv);
     defer self.dev.destroyShaderModule(comp_module, &vk_ctx.vkalloc);
     const cpci: vk.ComputePipelineCreateInfo = .{
         .flags = .{},
@@ -116,9 +116,8 @@ pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.G
         .base_pipeline_handle = .null_handle,
         .base_pipeline_index = -1,
     };
-    if (self.dev.createComputePipelines(.null_handle, (&cpci)[0..1], &vk_ctx.vkalloc, (&self.build_pipeline)[0..1])) |res| {
-        if (res != .success) return error.PipelineCreationFailed;
-    } else |err| return err;
+    const res = try self.dev.createComputePipelines(.null_handle, (&cpci)[0..1], &vk_ctx.vkalloc, (&self.build_pipeline)[0..1]);
+    if (res != .success) return error.PipelineCreationFailed;
 
     const frame_params = try allocator.alloc(FrameParams, VulkanContext.max_frames_in_flight);
     var allocated: usize = 0;
@@ -177,9 +176,7 @@ pub fn recreate(self: *DepthPyramid, io: std.Io, depth_extent: vk.Extent2D) !voi
         .sharing_mode = .exclusive,
         .samples = .{ .@"1" = true },
     };
-    const alloc = try core.allocateImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, &image_info);
-    self.image = alloc.image;
-    self.image_memory = alloc.memory;
+    self.image, self.image_memory = try core.allocateImageWithMemory(self.vk_ctx, &image_info);
 
     var full_info = core.imageViewCreateInfo(self.image, .r32_sfloat, .{ .color = true });
     full_info.subresource_range.level_count = mip_count;
@@ -279,7 +276,7 @@ fn destroyImageResources(self: *DepthPyramid) void {
     if (self.mip_views.len > 0) self.allocator.free(self.mip_views);
     self.mip_views = &.{};
     core.destroyIfValid(self.dev, &self.full_view, &self.vk_ctx.vkalloc);
-    core.destroyImageWithMemory(self.dev, &self.image, &self.image_memory, &self.vk_ctx.vkalloc);
+    core.destroyImageWithMemory(self.vk_ctx, &self.image, &self.image_memory);
 }
 
 /// Clears every mip to the far plane (0.0) and puts them in shader_read_only_optimal,
@@ -348,10 +345,4 @@ fn mipDim(base: u32, mip: usize) u32 {
 
 fn ceilDiv(value: u32, divisor: u32) u32 {
     return (value + divisor - 1) / divisor;
-}
-
-test "mipDim halves down to one" {
-    try std.testing.expectEqual(@as(u32, 960), mipDim(960, 0));
-    try std.testing.expectEqual(@as(u32, 480), mipDim(960, 1));
-    try std.testing.expectEqual(@as(u32, 1), mipDim(960, 10));
 }

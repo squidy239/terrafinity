@@ -224,7 +224,10 @@ pub fn SetAssociativeCacheType(
 
         /// If the key is present in the set, returns the way. Otherwise returns null.
         inline fn search(self: *const SetAssociativeCache, set: Set, key: Key) ?u16 {
-            const ways: u16 = searchTags(set.tags, set.tag);
+            const x: @Vector(layout.ways, Tag) = set.tags.*;
+            const y: @Vector(layout.ways, Tag) = @splat(set.tag);
+            const result: @Vector(layout.ways, bool) = x == y;
+            const ways: u16 = @as(Ways, @bitCast(result));
             if (ways == 0) return null;
 
             // Iterate over all ways to help the OOO execution.
@@ -243,13 +246,6 @@ pub fn SetAssociativeCacheType(
         /// Where each set bit represents the index of a way that has the same tag.
         const Ways = @Int(.unsigned, layout.ways);
 
-        inline fn searchTags(tags: *const [layout.ways]Tag, tag: Tag) Ways {
-            const x: @Vector(layout.ways, Tag) = tags.*;
-            const y: @Vector(layout.ways, Tag) = @splat(tag);
-
-            const result: @Vector(layout.ways, bool) = x == y;
-            return @bitCast(result);
-        }
         const Victim = struct { way: Clock, occupied: bool };
 
         /// Returns a copy of the counts of the set at `offset`.

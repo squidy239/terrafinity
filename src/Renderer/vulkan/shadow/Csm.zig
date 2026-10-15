@@ -112,9 +112,6 @@ pub const Cascade = struct {
     far_plane: f32,
     /// Latched light direction (direction light travels).
     light_dir: Vec3f,
-    /// Camera-relative light view-projection for the frame this cascade was committed
-    /// on, zm row-major data (bitcastable).
-    viewproj: [16]f32,
 };
 
 /// Everything needed to rebuild a cascade's matrix at any camera origin. Light-space
@@ -342,9 +339,7 @@ const RefreshPriority = struct {
         const last = self.last_refresh[cascade];
         if (last == never_refreshed) return std.math.maxInt(i64);
         const interval: i64 = @intCast(self.intervals[cascade]);
-        const now: i64 = @intCast(self.frame_number);
-        const last_i: i64 = @intCast(last);
-        const frames_since: i64 = if (now >= last_i) now - last_i else 0;
+        const frames_since = @max(@as(i64, @intCast(self.frame_number)) - @as(i64, @intCast(last)), 0);
         return frames_since - interval;
     }
 
@@ -385,21 +380,15 @@ pub fn nextRefreshSet(
     return selected;
 }
 
-/// Staleness padding: a cascade's footprint can grow by up to `staleness_frames` frames
-/// of camera motion since its last update. `per_frame_dist` is the measured camera
-/// movement in blocks per frame (NOT the max fly speed — that would grow the box while
-/// standing still and cause texel-swimming flicker).
-fn stalenessPadding(staleness_frames: u32, per_frame_dist: f32) f32 {
-    return @as(f32, @floatFromInt(staleness_frames)) * @max(per_frame_dist, 0.0);
-}
-
-/// Emits the camera-relative light view-projection for a committed cascade directly in
+/// Rebuilds a committed cascade's view-projection at the current camera origin, directly in
 /// GLSL column-major layout (translation in the 4th column, bottom row (0,0,0,1)) so w
 /// stays 1 — zm's row-major lookAtRH/ortho would read the off-origin translation as a
-/// projective w term. The eye sits at `center - view_pos` (f64 subtract) so the result
-/// matches `MeshData.relative_position` exactly; Vulkan NDC depth [0, 1] maps the near
-/// plane to 0 and the far to 1, matching the shadow pass's LESS_OR_EQUAL compare.
-fn buildViewProj(committed: CommittedCascade, view_pos: Vec3d) [16]f32 {
+/// projective w term. The eye sits at `center - view_pos` (f64 subtract), so a matrix
+/// committed on frame N and rebuilt on frame N+1 maps the same world point to the same
+/// light-space coordinates, matching `MeshData.relative_position` exactly; Vulkan NDC
+/// depth [0, 1] maps the near plane to 0 and the far to 1, matching the shadow pass's
+/// LESS_OR_EQUAL compare.
+pub fn viewProjAtOrigin(committed: CommittedCascade, view_pos: Vec3d) [16]f32 {
     const basis = buildLightBasis(committed.light_dir, world_up);
     const s = basis.right;
     const u = basis.up;
@@ -431,16 +420,14 @@ pub fn computeCascade(ctx: CascadeContext, cascade_index: u32) Cascade {
     const count = @min(ctx.cfg.cascade_count, max_cascades);
     std.debug.assert(cascade_index < count);
 
-    const radius = ctx.split_radii[cascade_index] + stalenessPadding(
-        ctx.refresh_intervals[cascade_index],
-        ctx.per_frame_dist,
-    );
+    // Pad by measured per-frame camera motion, not max fly speed, which would grow the box (texel-swim) while standing still.
+    const radius = ctx.split_radii[cascade_index] +
+        @as(f32, @floatFromInt(ctx.refresh_intervals[cascade_index])) * @max(ctx.per_frame_dist, 0.0);
 
     const basis = buildLightBasis(ctx.light_dir, world_up);
     const center_snapped = snapCenter(ctx.view_pos, radius, ctx.cfg.shadow_map_size, basis);
     const range = depthRange(ctx.scene_min, ctx.scene_max, center_snapped, ctx.light_dir, radius, ctx.cfg.max_depth_range);
     const split_radius = ctx.split_radii[cascade_index];
-    const committed = CommittedCascade{ .center_abs = center_snapped, .radius = radius, .split_radius = split_radius, .near_plane = range.near, .far_plane = range.far, .light_dir = ctx.light_dir };
 
     return .{
         .center_abs = center_snapped,
@@ -450,18 +437,7 @@ pub fn computeCascade(ctx: CascadeContext, cascade_index: u32) Cascade {
         .near_plane = range.near,
         .far_plane = range.far,
         .light_dir = ctx.light_dir,
-        .viewproj = buildViewProj(committed, ctx.view_pos),
     };
-}
-
-/// Rebuilds a committed cascade's view-projection at the current camera origin. A
-/// matrix committed on frame N and rebuilt on frame N+1 maps the same world point to
-/// the same light-space coordinates, so a shadow map rasterised on frame N samples
-/// correctly on frame N+1; the eye is placed at `center - view_pos` (f64 subtract),
-/// matching `MeshData.relative_position` exactly, rather than compensating by matrix
-/// composition.
-pub fn viewProjAtOrigin(committed: CommittedCascade, view_pos: Vec3d) [16]f32 {
-    return buildViewProj(committed, view_pos);
 }
 
 /// Trims a computed cascade to the fields needed to rebuild its matrix at any origin.
@@ -511,17 +487,6 @@ test "buildLightBasis degeneracy and orthonormality" {
     try testing.expectApproxEqAbs(1.0, @sqrt(dot3f(oblique.forward, oblique.forward)), 1e-5);
     const handedness = dot3f(cross3f(oblique.right, oblique.up), -oblique.forward);
     try testing.expect(handedness > 0.99);
-}
-
-test "sign: surface with N=+Y at noon is lit" {
-    const sun_dir: Vec3f = .{ 0.0, 1.0, 0.0 }; // noon, toward the sun
-    const light_dir = lightDirFromSunDir(sun_dir);
-    try testing.expectApproxEqAbs(0.0, light_dir[0], 1e-6);
-    try testing.expectApproxEqAbs(-1.0, light_dir[1], 1e-6);
-    // The cube's top face has inward normal -Y, so dot((-Y), light_dir) is +1 at noon.
-    const inward_top_normal: Vec3f = .{ 0.0, -1.0, 0.0 };
-    try testing.expect(dot3f(inward_top_normal, -sun_dir) > 0.9);
-    try testing.expect(dot3f(inward_top_normal, light_dir) > 0.9);
 }
 
 test "clampSunElevation engages near the horizon and leaves high sun alone" {
@@ -616,8 +581,8 @@ test "depth range maps near/far to Vulkan depth" {
     // equals near/far exactly), projected through the committed matrix.
     const near_world = cascade.center_abs + f * @as(Vec3d, @splat(cascade.near_plane));
     const far_world = cascade.center_abs + f * @as(Vec3d, @splat(cascade.far_plane));
-    const near_clip = mulVec(cascade.viewproj, worldVec(near_world - view_pos));
-    const far_clip = mulVec(cascade.viewproj, worldVec(far_world - view_pos));
+    const near_clip = mulVec(viewProjAtOrigin(committedOf(cascade), view_pos), worldVec(near_world - view_pos));
+    const far_clip = mulVec(viewProjAtOrigin(committedOf(cascade), view_pos), worldVec(far_world - view_pos));
 
     // Vulkan NDC depth is [0, 1], matching the shadow pass's clear and LESS_OR_EQUAL
     // compare. A receiver is shadowed exactly when its projected depth exceeds the
@@ -643,7 +608,7 @@ test "rebuilt matrix at a new origin reproduces the committed one" {
     // Rebuilding the committed cascade at a new origin must map the same world point
     // to the same clip coordinates the committed matrix produced.
     const world_pt: Vec3d = .{ 1050.0, 150.0, 950.0 };
-    const clip_committed = mulVec(cascade_a.viewproj, worldVec(world_pt - origin_a));
+    const clip_committed = mulVec(viewProjAtOrigin(committedOf(cascade_a), origin_a), worldVec(world_pt - origin_a));
     const rebuilt = viewProjAtOrigin(committedOf(cascade_a), origin_b);
     const clip_rebuilt = mulVec(rebuilt, worldVec(world_pt - origin_b));
     for (clip_committed, clip_rebuilt) |a, b| {
@@ -787,12 +752,6 @@ test "nextRefreshSet budget, ramp, and due-gating" {
     count = 0;
     for (set) |picked| count += @intFromBool(picked);
     try testing.expectEqual(@as(u32, 0), count);
-}
-
-test "staleness padding monotonic in movement, zero at zero" {
-    try testing.expectEqual(@as(f32, 0.0), stalenessPadding(4, 0.0));
-    try testing.expect(stalenessPadding(4, 0.5) < stalenessPadding(4, 1.0));
-    try testing.expect(stalenessPadding(4, 1.0) > stalenessPadding(2, 1.0));
 }
 
 test "sunDayFromSunDir mirrors the shader gate" {

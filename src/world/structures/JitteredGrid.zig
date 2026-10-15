@@ -28,19 +28,15 @@ pub fn JitteredGrid(comptime n: usize, comptime T: type) type {
             const box_size_vec: Vector = @splat(grid.box_size);
             const real_position = scale_vec * position;
             const box_position = @divFloor(real_position, box_size_vec);
-            const structure_pos = grid.findStructureInBox(box_position);
             const pos_in_box = @mod(real_position, box_size_vec); // [0, box_size) for positive divisor
 
+            const box_pos_int: @Int(.unsigned, n * @bitSizeOf(T)) = @bitCast(box_position);
+            const hashed: @Vector(n, U) = @bitCast(std.hash.int(box_pos_int));
+            const inner: U = @intCast(grid.inner_box_size);
+            const structure_pos: Vector = @bitCast(hashed % @as(@Vector(n, U), @splat(inner)));
             const in_range = @reduce(.And, structure_pos >= pos_in_box) and
                 @reduce(.And, structure_pos < pos_in_box + scale_vec);
             return if (in_range) structure_pos else null;
-        }
-
-        fn findStructureInBox(self: *const Self, box_position: Vector) Vector {
-            const box_pos_int: @Int(.unsigned, n * @bitSizeOf(T)) = @bitCast(box_position);
-            const hashed: @Vector(n, U) = @bitCast(std.hash.int(box_pos_int));
-            const inner: U = @intCast(self.inner_box_size);
-            return @bitCast(hashed % @as(@Vector(n, U), @splat(inner)));
         }
     };
 }

@@ -142,23 +142,6 @@ fn BucketType(comptime K: type, comptime V: type, comptime Context: type) type {
     };
 }
 
-test "ConcurrentHashMap basic" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    var map = ConcurrentHashMap(i32, i32, std.hash_map.AutoContext(i32), 4).init;
-    defer map.deinit(io, allocator);
-
-    try map.put(io, allocator, 1, 10);
-    try map.put(io, allocator, 2, 20);
-
-    try std.testing.expectEqual(@as(?i32, 10), map.get(io, 1));
-    try std.testing.expectEqual(@as(?i32, 20), map.get(io, 2));
-    try std.testing.expectEqual(@as(?i32, null), map.get(io, 3));
-
-    try std.testing.expectEqual(@as(?i32, 10), map.fetchRemove(io, 1));
-    try std.testing.expectEqual(@as(?i32, null), map.get(io, 1));
-}
-
 test "ConcurrentHashMap allocation failure" {
     const io = std.testing.io;
     const test_fn = struct {

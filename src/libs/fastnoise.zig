@@ -106,7 +106,6 @@ pub const DomainWarpType = enum {
     basic_grid,
 };
 
-/// State for one noise generator. Sampler calls read it, never write; set fields to configure.
 // Lookup tables are module-level so every Noise(Float) instantiation
 // shares one copy; the values are FastNoise's f32 tables. `f64` uses
 // them via `@floatCast` (exact for these values); not duplicated per-Float.
@@ -199,7 +198,7 @@ const grad_gy_table: [8]f32 = .{
 // vpermps path; the high bit of the index picks the half.
 fn warpTable(comptime offset: usize, comptime component: usize) [8]f32 {
     var t: [8]f32 = undefined;
-    for (0..8) |i| t[i] = warp_gradient_pairs[offset + i][component];
+    for (&t, warp_gradient_pairs[offset..][0..8]) |*value, pair| value.* = pair[component];
     return t;
 }
 const warp_gx_lo = warpTable(0, 0);
@@ -220,6 +219,7 @@ inline fn vpermpsF32(idx: @Vector(8, i32), table: @Vector(8, f32)) @Vector(8, f3
     return out;
 }
 
+/// Returns the state type for one noise generator. Sampler calls read the state, never write it; set fields to configure.
 pub fn Noise(comptime Float: type) type {
     switch (@typeInfo(Float)) {
         .float => |f| switch (f.bits) {
@@ -274,47 +274,40 @@ pub fn Noise(comptime Float: type) type {
         /// Flips the sign of every generated value, mapping `-1.0..1.0` to `1.0..-1.0`.
         /// Default `false`.
         invert: bool = false,
-        const Dim = enum { d2, d3 };
         /// Lanes processed per SIMD chunk, tuned to the target's vector width.
         const grid_lanes = std.simd.suggestVectorLength(Float) orelse 1;
 
+        /// A regular grid: index `(z * height + y) * width + x` is sampled at
+        /// `(x0 + x * spacing, y0 + y * spacing, z0 + z * spacing)`.
+        const Grid = struct { width: usize, depth: usize, x0: Float, y0: Float, z0: Float, spacing: Float };
+
         const CoordSource = union(enum) {
-            /// Samples a regular grid: index `(z * height + y) * width + x` is sampled at
-            /// `(x0 + x * spacing, y0 + y * spacing, z0 + z * spacing)`.
-            grid: struct { width: usize, depth: usize, x0: Float, y0: Float, z0: Float, spacing: Float },
-            /// Samples at explicit coordinates.
-            points: struct { xs: []const Float, ys: []const Float, zs: []const Float },
+            grid: Grid,
+            /// Samples at explicit x, y, and z coordinates.
+            points: [3][]const Float,
         };
 
-        /// Generates 2D noise at given position using the currently configured state.
-        /// The return value is normalized to the range of `-1.0` to `1.0`.
-        inline fn genNoise2DFractal(comptime noise: NoiseType, state: *const State, seed: i32, xv: @Vector(1, Float), yv: @Vector(1, Float)) @Vector(1, Float) {
-            return switch (state.fractal_type) {
-                .none, .progressive, .independent => genNoiseSingle2D(1, noise, state, seed, xv, yv),
-                .fbm => genFractal2D(1, noise, .fbm, state, seed, state.calculateFractalBounding(), xv, yv),
-                .ridged => genFractal2D(1, noise, .ridged, state, seed, state.calculateFractalBounding(), xv, yv),
-                .ping_pong => genFractal2D(1, noise, .ping_pong, state, seed, state.calculateFractalBounding(), xv, yv),
-            };
-        }
-
-        pub fn genNoise2D(state: *const State, x: Float, y: Float) Float {
+        // Direct single-sample path: bypasses the grid-batching dispatch
+        // (union handling, loop setup, store/load through a scratch
+        // buffer) that the generic fill path pays for every sample.
+        fn genNoiseAt(state: *const State, comptime dim: usize, position: [dim]Float) Float {
             @setFloatMode(.optimized);
             @setEvalBranchQuota(200_000);
-            // Direct single-sample path: bypasses the grid-batching dispatch
-            // (union handling, loop setup, store/load through a scratch
-            // buffer) that the generic fill path pays for every sample.
-            const FloatV = @Vector(1, Float);
-            const xv: FloatV = .{x * state.frequency};
-            const yv: FloatV = .{y * state.frequency};
-            const result: FloatV = switch (state.noise_type) {
-                .simplex => genNoise2DFractal(.simplex, state, state.seed, xv, yv),
-                .simplex_smooth => genNoise2DFractal(.simplex_smooth, state, state.seed, xv, yv),
-                .cellular => genNoise2DFractal(.cellular, state, state.seed, xv, yv),
-                .perlin => genNoise2DFractal(.perlin, state, state.seed, xv, yv),
-                .value_cubic => genNoise2DFractal(.value_cubic, state, state.seed, xv, yv),
-                .value => genNoise2DFractal(.value, state, state.seed, xv, yv),
+            var p: [dim]@Vector(1, Float) = undefined;
+            for (&p, position) |*coord, value| coord.* = .{value * state.frequency};
+            const result = switch (state.noise_type) {
+                inline else => |noise| switch (state.fractal_type) {
+                    .none, .progressive, .independent => sampleChunk(1, dim, noise, .none, state, 1.0, p),
+                    inline .fbm, .ridged, .ping_pong => |fractal| sampleChunk(1, dim, noise, fractal, state, state.calculateFractalBounding(), p),
+                },
             };
             return if (state.invert) -result[0] else result[0];
+        }
+
+        /// Generates 2D noise at the given position with the configured state.
+        /// The return value is in the range `-1.0` to `1.0`.
+        pub fn genNoise2D(state: *const State, x: Float, y: Float) Float {
+            return state.genNoiseAt(2, .{ x, y });
         }
 
         /// Fills `out` with 2D noise samples.
@@ -325,7 +318,7 @@ pub fn Noise(comptime Float: type) type {
         pub fn fillGrid2D(state: *const State, out: []Float, width: usize, x0: Float, y0: Float, spacing: Float) void {
             std.debug.assert(width != 0);
             std.debug.assert(out.len % width == 0);
-            fillGridDispatch(grid_lanes, .d2, state, out, .{ .grid = .{ .width = width, .depth = 1, .x0 = x0, .y0 = y0, .z0 = 0, .spacing = spacing } });
+            fillGridDispatch(grid_lanes, 2, state, out, .{ .grid = .{ .width = width, .depth = 1, .x0 = x0, .y0 = y0, .z0 = 0, .spacing = spacing } });
         }
 
         /// Fills `out` with 2D noise samples at explicit coordinates.
@@ -333,7 +326,7 @@ pub fn Noise(comptime Float: type) type {
         /// `out[i]` is the noise at `(xs[i], ys[i])`; the slices must have equal lengths.
         pub fn fillNoise2DGrid(state: *const State, out: []Float, xs: []const Float, ys: []const Float) void {
             std.debug.assert(out.len == xs.len and out.len == ys.len);
-            fillGridDispatch(grid_lanes, .d2, state, out, .{ .points = .{ .xs = xs, .ys = ys, .zs = &.{} } });
+            fillGridDispatch(grid_lanes, 2, state, out, .{ .points = .{ xs, ys, &.{} } });
         }
 
         /// Generates 2D noise at given position using the currently configured state.
@@ -343,35 +336,10 @@ pub fn Noise(comptime Float: type) type {
             return mapNoiseToRange(state.genNoise2D(x, y), T, min, max);
         }
 
-        /// Generates 3D noise at given position using the currently configured state.
-        /// The return value is normalized to the range of `-1.0` to `1.0`.
-        inline fn genNoise3DFractal(comptime noise: NoiseType, state: *const State, seed: i32, xv: @Vector(1, Float), yv: @Vector(1, Float), zv: @Vector(1, Float)) @Vector(1, Float) {
-            return switch (state.fractal_type) {
-                .none, .progressive, .independent => genNoiseSingle3D(1, noise, state, seed, xv, yv, zv),
-                .fbm => genFractal3D(1, noise, .fbm, state, seed, state.calculateFractalBounding(), xv, yv, zv),
-                .ridged => genFractal3D(1, noise, .ridged, state, seed, state.calculateFractalBounding(), xv, yv, zv),
-                .ping_pong => genFractal3D(1, noise, .ping_pong, state, seed, state.calculateFractalBounding(), xv, yv, zv),
-            };
-        }
-
+        /// Generates 3D noise at the given position with the configured state.
+        /// The return value is in the range `-1.0` to `1.0`.
         pub fn genNoise3D(state: *const State, x: Float, y: Float, z: Float) Float {
-            @setFloatMode(.optimized);
-            @setEvalBranchQuota(200_000);
-            // Direct single-sample path; see genNoise2D.
-            const FloatV = @Vector(1, Float);
-            var xv: FloatV = .{x * state.frequency};
-            var yv: FloatV = .{y * state.frequency};
-            var zv: FloatV = .{z * state.frequency};
-            rotate3DVec(state, 1, &xv, &yv, &zv);
-            const result: FloatV = switch (state.noise_type) {
-                .simplex => genNoise3DFractal(.simplex, state, state.seed, xv, yv, zv),
-                .simplex_smooth => genNoise3DFractal(.simplex_smooth, state, state.seed, xv, yv, zv),
-                .cellular => genNoise3DFractal(.cellular, state, state.seed, xv, yv, zv),
-                .perlin => genNoise3DFractal(.perlin, state, state.seed, xv, yv, zv),
-                .value_cubic => genNoise3DFractal(.value_cubic, state, state.seed, xv, yv, zv),
-                .value => genNoise3DFractal(.value, state, state.seed, xv, yv, zv),
-            };
-            return if (state.invert) -result[0] else result[0];
+            return state.genNoiseAt(3, .{ x, y, z });
         }
 
         /// Fills `out` with 3D noise samples.
@@ -384,7 +352,7 @@ pub fn Noise(comptime Float: type) type {
             std.debug.assert(width != 0);
             std.debug.assert(depth != 0);
             std.debug.assert(out.len % (width * depth) == 0);
-            fillGridDispatch(grid_lanes, .d3, state, out, .{ .grid = .{ .width = width, .depth = depth, .x0 = x0, .y0 = y0, .z0 = z0, .spacing = spacing } });
+            fillGridDispatch(grid_lanes, 3, state, out, .{ .grid = .{ .width = width, .depth = depth, .x0 = x0, .y0 = y0, .z0 = z0, .spacing = spacing } });
         }
 
         /// Fills `out` with 3D noise samples at explicit coordinates.
@@ -392,7 +360,7 @@ pub fn Noise(comptime Float: type) type {
         /// `out[i]` is the noise at `(xs[i], ys[i], zs[i])`; the slices must have equal lengths.
         pub fn fillNoise3DGrid(state: *const State, out: []Float, xs: []const Float, ys: []const Float, zs: []const Float) void {
             std.debug.assert(out.len == xs.len and out.len == ys.len and out.len == zs.len);
-            fillGridDispatch(grid_lanes, .d3, state, out, .{ .points = .{ .xs = xs, .ys = ys, .zs = zs } });
+            fillGridDispatch(grid_lanes, 3, state, out, .{ .points = .{ xs, ys, zs } });
         }
 
         /// Generates 3D noise at given position using the currently configured state.
@@ -402,6 +370,7 @@ pub fn Noise(comptime Float: type) type {
             return mapNoiseToRange(state.genNoise3D(x, y, z), T, min, max);
         }
 
+        /// Moves `x` and `y` by the configured 2D domain warp.
         pub inline fn domainWarp2D(state: *const State, x: *Float, y: *Float) void {
             var xs: @Vector(1, Float) = .{x.*};
             var ys: @Vector(1, Float) = .{y.*};
@@ -409,6 +378,7 @@ pub fn Noise(comptime Float: type) type {
             x.* = xs[0];
             y.* = ys[0];
         }
+        /// Moves `x`, `y`, and `z` by the configured 3D domain warp.
         pub inline fn domainWarp3D(state: *const State, x: *Float, y: *Float, z: *Float) void {
             switch (state.fractal_type) {
                 .progressive => state.domainWarpFractal3D(x, y, z, true),
@@ -459,22 +429,12 @@ pub fn Noise(comptime Float: type) type {
                 else => @compileError(@typeName(T) ++ " is not a numeric type"),
             };
         }
-        inline fn fastRound(f: Float) i32 {
-            @setFloatMode(.optimized);
-            return @round(f);
-        }
-
         inline fn splat(comptime T: type, value: anytype) T {
             return @splat(value);
         }
 
         inline fn floatFromInt(comptime T: type, value: anytype) T {
             return @floatFromInt(value);
-        }
-        fn iotaVec(comptime N: usize) @Vector(N, Float) {
-            var arr: [N]Float = undefined;
-            for (0..N) |i| arr[i] = @floatFromInt(i);
-            return arr;
         }
         inline fn lerp(a: anytype, b: @TypeOf(a), t: @TypeOf(a)) @TypeOf(a) {
             @setFloatMode(.optimized);
@@ -544,59 +504,76 @@ pub fn Noise(comptime Float: type) type {
         }
 
         fn storeChunk(comptime N: usize, start: usize, out: []Float, result: @Vector(N, Float)) void {
-            @setFloatMode(.optimized);
-            if (start + N <= out.len) {
-                inline for (0..N) |i| out[start + i] = result[i];
-            } else {
-                inline for (0..N) |i| {
-                    if (start + i < out.len) out[start + i] = result[i];
-                }
+            inline for (0..N) |i| {
+                if (start + i < out.len) out[start + i] = result[i];
             }
         }
 
-        fn fillGridDispatch(comptime N: usize, comptime dim: Dim, state: *const State, out: []Float, source: CoordSource) void {
-            switch (state.fractal_type) {
-                .none => fillGridDispatchNoise(N, dim, state, out, source, .none),
-                .fbm => fillGridDispatchNoise(N, dim, state, out, source, .fbm),
-                .ridged => fillGridDispatchNoise(N, dim, state, out, source, .ridged),
-                .ping_pong => fillGridDispatchNoise(N, dim, state, out, source, .ping_pong),
-                .progressive, .independent => fillGridDispatchNoise(N, dim, state, out, source, .none),
+        fn fillGridDispatch(comptime N: usize, comptime dim: usize, state: *const State, out: []Float, source: CoordSource) void {
+            switch (state.noise_type) {
+                inline else => |noise| switch (state.fractal_type) {
+                    .none, .progressive, .independent => fillGridImpl(N, dim, state, out, source, .none, noise),
+                    inline .fbm, .ridged, .ping_pong => |fractal| fillGridImpl(N, dim, state, out, source, fractal, noise),
+                },
             }
             if (state.invert) {
                 for (out) |*v| v.* = -v.*;
             }
         }
 
-        fn fillGridDispatchNoise(comptime N: usize, comptime dim: Dim, state: *const State, out: []Float, source: CoordSource, comptime fractal: FractalType) void {
-            switch (state.noise_type) {
-                .simplex => if (comptime dim == .d2) fillGrid2DImpl(N, state, out, source, fractal, .simplex) else fillGrid3DImpl(N, state, out, source, fractal, .simplex),
-                .simplex_smooth => if (comptime dim == .d2) fillGrid2DImpl(N, state, out, source, fractal, .simplex_smooth) else fillGrid3DImpl(N, state, out, source, fractal, .simplex_smooth),
-                .cellular => if (comptime dim == .d2) fillGrid2DImpl(N, state, out, source, fractal, .cellular) else fillGrid3DImpl(N, state, out, source, fractal, .cellular),
-                .perlin => if (comptime dim == .d2) fillGrid2DImpl(N, state, out, source, fractal, .perlin) else fillGrid3DImpl(N, state, out, source, fractal, .perlin),
-                .value_cubic => if (comptime dim == .d2) fillGrid2DImpl(N, state, out, source, fractal, .value_cubic) else fillGrid3DImpl(N, state, out, source, fractal, .value_cubic),
-                .value => if (comptime dim == .d2) fillGrid2DImpl(N, state, out, source, fractal, .value) else fillGrid3DImpl(N, state, out, source, fractal, .value),
-            }
+        /// Splits a row-major sample index into its grid cell `(x, y[, z])`.
+        inline fn gridCell(comptime dim: usize, comptime T: type, index: T, width: T, height: T) [dim]T {
+            if (dim == 2) return .{ index % width, index / width };
+            return .{ index % width, (index / width) % height, index / (width * height) };
         }
 
-        fn fillGrid2DImpl(comptime N: usize, state: *const State, out: []Float, source: CoordSource, comptime fractal: FractalType, comptime noise: NoiseType) void {
+        /// Computes the frequency-scaled coordinates of the chunk that starts at `start`.
+        inline fn gridCoords(comptime N: usize, comptime dim: usize, grid: Grid, frequency: Float, height: usize, start: usize) [dim]@Vector(N, Float) {
+            @setFloatMode(.optimized);
+            const FloatV = @Vector(N, Float);
+            const IndexV = @Vector(N, usize);
+            const index = std.simd.iota(usize, N) + @as(IndexV, @splat(start));
+            const cell = gridCell(dim, IndexV, index, @splat(grid.width), @splat(height));
+            const origin: [3]Float = .{ grid.x0, grid.y0, grid.z0 };
+            var p: [dim]FloatV = undefined;
+            inline for (&p, cell, origin[0..dim]) |*coord, i, o| {
+                coord.* = (@as(FloatV, @splat(o)) + floatFromInt(FloatV, i) * @as(FloatV, @splat(grid.spacing))) * @as(FloatV, @splat(frequency));
+            }
+            return p;
+        }
+
+        /// Samples one chunk of frequency-scaled coordinates; 3D coordinates get the configured rotation first.
+        inline fn sampleChunk(comptime N: usize, comptime dim: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, bounding: Float, chunk: [dim]@Vector(N, Float)) @Vector(N, Float) {
+            var p = chunk;
+            if (dim == 3) rotate3DVec(state, N, &p);
+            return switch (fractal) {
+                .fbm, .ridged, .ping_pong => genFractal(N, dim, noise, fractal, state, state.seed, bounding, p),
+                else => genNoiseSingle(N, dim, noise, state, state.seed, p),
+            };
+        }
+
+        fn fillGridImpl(comptime N: usize, comptime dim: usize, state: *const State, out: []Float, source: CoordSource, comptime fractal: FractalType, comptime noise: NoiseType) void {
             @setFloatMode(.optimized);
             @setEvalBranchQuota(200_000);
             const FloatV = @Vector(N, Float);
             const frequency_v: FloatV = @splat(state.frequency);
-            const iota_v: FloatV = comptime iotaVec(N);
+            // Grid rows per column; invariant across chunks, so hoist the
+            // division out of the loop (LLVM cannot hoist integer division).
+            const height: usize = switch (source) {
+                .grid => |g| if (dim == 3) out.len / (g.width * g.depth) else 0,
+                .points => 0,
+            };
+            const iota_v: FloatV = comptime std.simd.iota(Float, N);
             const spacing_freq: Float = switch (source) {
                 .grid => |g| g.spacing * state.frequency,
                 .points => 0,
             };
             const spacing_freq_v: FloatV = @splat(spacing_freq);
-            const x0_freq_v: FloatV = switch (source) {
-                .grid => |g| @splat(g.x0 * state.frequency),
+            const origin_freq: [3]Float = switch (source) {
+                .grid => |g| .{ g.x0 * state.frequency, g.y0 * state.frequency, g.z0 * state.frequency },
                 .points => @splat(0),
             };
-            const y0_freq: Float = switch (source) {
-                .grid => |g| g.y0 * state.frequency,
-                .points => 0,
-            };
+            const x0_freq_v: FloatV = @splat(origin_freq[0]);
 
             // Fractal bounding is loop-invariant; compute once instead of per
             // chunk (LLVM cannot hoist it past the stores without alias proof).
@@ -607,95 +584,68 @@ pub fn Noise(comptime Float: type) type {
             };
 
             var start: usize = 0;
-            // Carried grid counters: row = start / width, col = start % width
-            // maintained by addition and wraparound instead of per-chunk
-            // integer division (the division is 64-bit and ~25 cycles on Zen2).
-            var col: usize = 0;
-            var row: usize = 0;
+            // The grid cell of `start`, carried by addition and wraparound
+            // instead of a per-chunk 64-bit integer division (~25 cycles on Zen2).
+            var cell: [dim]usize = @splat(0);
             // Split the loop so full chunks carry no per-chunk bounds checks
             // and store via a single vector store; the tail (at most one
             // chunk) is handled separately below.
             const full_len = out.len - (out.len % N);
             while (start < full_len) : (start += N) {
-                var x: FloatV = undefined;
-                var y: FloatV = undefined;
+                var p: [dim]FloatV = undefined;
                 switch (source) {
-                    .grid => |g| {
-                        if (col + N <= g.width) {
-                            const col_f: Float = @floatFromInt(col);
-                            const row_f: Float = @floatFromInt(row);
-                            x = @mulAdd(FloatV, @as(FloatV, @splat(col_f)) + iota_v, spacing_freq_v, x0_freq_v);
-                            y = @splat(@mulAdd(Float, row_f, spacing_freq, y0_freq));
-                            col += N;
-                            if (col == g.width) {
-                                col = 0;
-                                row += 1;
-                            }
-                        } else {
-                            var idx: @Vector(N, usize) = undefined;
-                            inline for (0..N) |i| idx[i] = start + i;
-                            const width_v: @Vector(N, usize) = @splat(g.width);
-                            const ix = idx % width_v;
-                            x = (@as(FloatV, @splat(g.x0)) + floatFromInt(FloatV, ix) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                            y = (@as(FloatV, @splat(g.y0)) + floatFromInt(FloatV, idx / width_v) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                            // Re-sync the carried counters (rare: once per row).
-                            const next = start + N;
-                            col = next % g.width;
-                            row = next / g.width;
+                    .grid => |g| if (cell[0] + N <= g.width) {
+                        // The chunk fits inside one x-row, so the other
+                        // coordinates are constant within the chunk.
+                        p[0] = @mulAdd(FloatV, @as(FloatV, @splat(@as(Float, @floatFromInt(cell[0])))) + iota_v, spacing_freq_v, x0_freq_v);
+                        inline for (p[1..], cell[1..], origin_freq[1..dim]) |*coord, i, o| {
+                            coord.* = @splat(@mulAdd(Float, @floatFromInt(i), spacing_freq, o));
                         }
+                        cell[0] += N;
+                        if (cell[0] == g.width) {
+                            cell[0] = 0;
+                            cell[1] += 1;
+                            if (dim == 3 and cell[1] == height) {
+                                cell[1] = 0;
+                                cell[2] += 1;
+                            }
+                        }
+                    } else {
+                        p = gridCoords(N, dim, g, state.frequency, height, start);
+                        // Re-sync the carried counters (rare: once per row).
+                        cell = gridCell(dim, usize, start + N, g.width, height);
                     },
-                    .points => |p| {
-                        // One 32-byte load per coordinate instead of N scalar
-                        // loads plus inserts.
-                        x = @as(FloatV, @bitCast(p.xs[start..][0..N].*)) * frequency_v;
-                        y = @as(FloatV, @bitCast(p.ys[start..][0..N].*)) * frequency_v;
+                    // One 32-byte load per coordinate instead of N scalar
+                    // loads plus inserts.
+                    .points => |points| inline for (&p, points[0..dim]) |*coord, coords| {
+                        coord.* = @as(FloatV, @bitCast(coords[start..][0..N].*)) * frequency_v;
                     },
                 }
-
-                const result: FloatV = switch (fractal) {
-                    .none, .progressive, .independent => genNoiseSingle2D(N, noise, state, state.seed, x, y),
-                    .fbm, .ridged, .ping_pong => genFractal2D(N, noise, fractal, state, state.seed, bounding, x, y),
-                };
                 // Single 32-byte store; the full_len bound makes it provable.
-                out[start..][0..N].* = @as([N]Float, @bitCast(result));
+                out[start..][0..N].* = @as([N]Float, @bitCast(sampleChunk(N, dim, noise, fractal, state, bounding, p)));
             }
             // Tail chunk (at most one): the guarded paths.
-            if (start < out.len) {
-                var x: FloatV = undefined;
-                var y: FloatV = undefined;
-                switch (source) {
-                    .grid => |g| {
-                        var idx: @Vector(N, usize) = undefined;
-                        inline for (0..N) |i| idx[i] = start + i;
-                        const width_v: @Vector(N, usize) = @splat(g.width);
-                        const ix = idx % width_v;
-                        x = (@as(FloatV, @splat(g.x0)) + floatFromInt(FloatV, ix) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                        y = (@as(FloatV, @splat(g.y0)) + floatFromInt(FloatV, idx / width_v) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                    },
-                    .points => |p| {
-                        const remaining = out.len - start;
-                        inline for (0..N) |i| {
-                            x[i] = p.xs[start + @min(i, remaining - 1)];
-                            y[i] = p.ys[start + @min(i, remaining - 1)];
-                        }
-                        x *= frequency_v;
-                        y *= frequency_v;
-                    },
-                }
-                const result: FloatV = switch (fractal) {
-                    .none, .progressive, .independent => genNoiseSingle2D(N, noise, state, state.seed, x, y),
-                    .fbm, .ridged, .ping_pong => genFractal2D(N, noise, fractal, state, state.seed, bounding, x, y),
-                };
-                storeChunk(N, start, out, result);
+            if (start == out.len) return;
+            var p: [dim]FloatV = undefined;
+            switch (source) {
+                .grid => |g| p = gridCoords(N, dim, g, state.frequency, height, start),
+                .points => |points| inline for (&p, points[0..dim]) |*coord, coords| {
+                    const remaining = out.len - start;
+                    inline for (0..N) |i| coord[i] = coords[start + @min(i, remaining - 1)];
+                    coord.* *= frequency_v;
+                },
             }
+            storeChunk(N, start, out, sampleChunk(N, dim, noise, fractal, state, bounding, p));
         }
 
-        /// Applies the configured 3D rotation transform to a chunk of
-        /// frequency-scaled coordinates (shared by the grid fill and the
-        /// single-sample path).
-        inline fn rotate3DVec(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float), z: *@Vector(N, Float)) void {
+        /// Applies the configured 3D rotation to frequency-scaled coordinates
+        /// (shared by the grid fill, the single-sample path, and the 3D domain warp).
+        inline fn rotate3DVec(state: *const State, comptime N: usize, p: *[3]@Vector(N, Float)) void {
             @setFloatMode(.optimized);
             const FloatV = @Vector(N, Float);
+            const x = &p[0];
+            const y = &p[1];
+            const z = &p[2];
             switch (state.rotation_type) {
                 .improve_xy_planes => {
                     const xy = x.* + y.*;
@@ -717,167 +667,15 @@ pub fn Noise(comptime Float: type) type {
             }
         }
 
-        fn fillGrid3DImpl(comptime N: usize, state: *const State, out: []Float, source: CoordSource, comptime fractal: FractalType, comptime noise: NoiseType) void {
-            @setFloatMode(.optimized);
-            @setEvalBranchQuota(200_000);
-            const FloatV = @Vector(N, Float);
-            const frequency_v: FloatV = @splat(state.frequency);
-            // Grid rows per column; invariant across chunks, so hoist the
-            // division out of the loop (LLVM cannot hoist integer division).
-            const height: usize = switch (source) {
-                .grid => |g| out.len / (g.width * g.depth),
-                .points => 0,
-            };
-            const iota_v: FloatV = comptime iotaVec(N);
-            const spacing_freq: Float = switch (source) {
-                .grid => |g| g.spacing * state.frequency,
-                .points => 0,
-            };
-            const spacing_freq_v: FloatV = @splat(spacing_freq);
-            const x0_freq_v: FloatV = switch (source) {
-                .grid => |g| @splat(g.x0 * state.frequency),
-                .points => @splat(0),
-            };
-            const y0_freq: Float = switch (source) {
-                .grid => |g| g.y0 * state.frequency,
-                .points => 0,
-            };
-            const z0_freq: Float = switch (source) {
-                .grid => |g| g.z0 * state.frequency,
-                .points => 0,
-            };
-
-            // Fractal bounding is loop-invariant; compute once instead of per
-            // chunk (LLVM cannot hoist it past the stores without alias proof).
-            // `fractal` is comptime, so non-fractal fills skip it entirely.
-            const bounding: Float = switch (fractal) {
-                .fbm, .ridged, .ping_pong => state.calculateFractalBounding(),
-                else => 1.0,
-            };
-
-            var start: usize = 0;
-            // Carried grid counters: ix = start % width, iy = (start/width) %
-            // height, iz = start / (width*height), maintained by addition and
-            // wraparound instead of per-chunk 64-bit integer division.
-            var ix: usize = 0;
-            var iy: usize = 0;
-            var iz: usize = 0;
-            // Split the loop so full chunks carry no per-chunk bounds checks
-            // and store via a single vector store; see fillGrid2DImpl.
-            const full_len = out.len - (out.len % N);
-            while (start < full_len) : (start += N) {
-                var x: FloatV = undefined;
-                var y: FloatV = undefined;
-                var z: FloatV = undefined;
-                switch (source) {
-                    .grid => |g| {
-                        if (ix + N <= g.width) {
-                            // The chunk fits inside one x-row, so the y and z
-                            // coordinates are constant within the chunk.
-                            const ix0_f: Float = @floatFromInt(ix);
-                            const iy0_f: Float = @floatFromInt(iy);
-                            const iz0_f: Float = @floatFromInt(iz);
-                            x = @mulAdd(FloatV, @as(FloatV, @splat(ix0_f)) + iota_v, spacing_freq_v, x0_freq_v);
-                            y = @splat(@mulAdd(Float, iy0_f, spacing_freq, y0_freq));
-                            z = @splat(@mulAdd(Float, iz0_f, spacing_freq, z0_freq));
-                            ix += N;
-                            if (ix == g.width) {
-                                ix = 0;
-                                iy += 1;
-                                if (iy == height) {
-                                    iy = 0;
-                                    iz += 1;
-                                }
-                            }
-                        } else {
-                            var idx: @Vector(N, usize) = undefined;
-                            inline for (0..N) |i| idx[i] = start + i;
-                            const width_v: @Vector(N, usize) = @splat(g.width);
-                            const height_v: @Vector(N, usize) = @splat(height);
-                            const area_v: @Vector(N, usize) = @splat(g.width * height);
-                            const ixv = idx % width_v;
-                            const iyv = (idx / width_v) % height_v;
-                            const izv = idx / area_v;
-                            x = (@as(FloatV, @splat(g.x0)) + floatFromInt(FloatV, ixv) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                            y = (@as(FloatV, @splat(g.y0)) + floatFromInt(FloatV, iyv) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                            z = (@as(FloatV, @splat(g.z0)) + floatFromInt(FloatV, izv) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                            // Re-sync the carried counters (rare).
-                            const next = start + N;
-                            ix = next % g.width;
-                            iy = (next / g.width) % height;
-                            iz = next / (g.width * height);
-                        }
-                    },
-                    .points => |p| {
-                        // One 32-byte load per coordinate instead of N scalar
-                        // loads plus inserts.
-                        x = @as(FloatV, @bitCast(p.xs[start..][0..N].*)) * frequency_v;
-                        y = @as(FloatV, @bitCast(p.ys[start..][0..N].*)) * frequency_v;
-                        z = @as(FloatV, @bitCast(p.zs[start..][0..N].*)) * frequency_v;
-                    },
-                }
-
-                rotate3DVec(state, N, &x, &y, &z);
-
-                const result: FloatV = switch (fractal) {
-                    .none, .progressive, .independent => genNoiseSingle3D(N, noise, state, state.seed, x, y, z),
-                    .fbm, .ridged, .ping_pong => genFractal3D(N, noise, fractal, state, state.seed, bounding, x, y, z),
-                };
-                out[start..][0..N].* = @as([N]Float, @bitCast(result));
-            }
-            // Tail chunk (at most one): the guarded paths.
-            if (start < out.len) {
-                var x: FloatV = undefined;
-                var y: FloatV = undefined;
-                var z: FloatV = undefined;
-                switch (source) {
-                    .grid => |g| {
-                        var idx: @Vector(N, usize) = undefined;
-                        inline for (0..N) |i| idx[i] = start + i;
-                        const width_v: @Vector(N, usize) = @splat(g.width);
-                        const height_v: @Vector(N, usize) = @splat(height);
-                        const area_v: @Vector(N, usize) = @splat(g.width * height);
-                        const ixv = idx % width_v;
-                        const iyv = (idx / width_v) % height_v;
-                        const izv = idx / area_v;
-                        x = (@as(FloatV, @splat(g.x0)) + floatFromInt(FloatV, ixv) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                        y = (@as(FloatV, @splat(g.y0)) + floatFromInt(FloatV, iyv) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                        z = (@as(FloatV, @splat(g.z0)) + floatFromInt(FloatV, izv) * @as(FloatV, @splat(g.spacing))) * frequency_v;
-                    },
-                    .points => |p| {
-                        const remaining = out.len - start;
-                        inline for (0..N) |i| {
-                            x[i] = p.xs[start + @min(i, remaining - 1)];
-                            y[i] = p.ys[start + @min(i, remaining - 1)];
-                            z[i] = p.zs[start + @min(i, remaining - 1)];
-                        }
-                        x *= frequency_v;
-                        y *= frequency_v;
-                        z *= frequency_v;
-                    },
-                }
-
-                rotate3DVec(state, N, &x, &y, &z);
-
-                const result: FloatV = switch (fractal) {
-                    .none, .progressive, .independent => genNoiseSingle3D(N, noise, state, state.seed, x, y, z),
-                    .fbm, .ridged, .ping_pong => genFractal3D(N, noise, fractal, state, state.seed, bounding, x, y, z),
-                };
-                storeChunk(N, start, out, result);
-            }
-        }
-
         inline fn hash3D(seed: i32, x_primed: i32, y_primed: i32, z_primed: i32) i32 {
             return (seed ^ x_primed ^ y_primed ^ z_primed) *% 0x27D4EB2D;
         }
         inline fn hash2DVecPrimed(comptime N: usize, seed: i32, x_primed: @Vector(N, i32), y_primed: @Vector(N, i32)) @Vector(N, i32) {
-            @setFloatMode(.optimized);
             const seed_v: @Vector(N, i32) = @splat(seed);
             return (seed_v ^ x_primed ^ y_primed) *% splat(@Vector(N, i32), hash_multiplier);
         }
 
         inline fn hash3DVec(comptime N: usize, seed: i32, x_primed: @Vector(N, i32), y_primed: @Vector(N, i32), z_primed: @Vector(N, i32)) @Vector(N, i32) {
-            @setFloatMode(.optimized);
             const seed_v: @Vector(N, i32) = @splat(seed);
             return (seed_v ^ x_primed ^ y_primed ^ z_primed) *% splat(@Vector(N, i32), hash_multiplier);
         }
@@ -886,8 +684,7 @@ pub fn Noise(comptime Float: type) type {
             @setFloatMode(.optimized);
             const IntV = @Vector(N, i32);
             const FloatV = @Vector(N, Float);
-            var hash = hash_in;
-            hash ^= hash >> splat(IntV, 15);
+            const hash = hash_in ^ (hash_in >> splat(IntV, 15));
             if (comptime N == 8 and Float == f32 and builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
                 // One vpermps per component selects the table entry from the
                 // low three hash bits of each lane.  The XOR-sign path below
@@ -926,8 +723,7 @@ pub fn Noise(comptime Float: type) type {
             @setFloatMode(.optimized);
             const IntV = @Vector(N, i32);
             const FloatV = @Vector(N, Float);
-            var hash = hash_in;
-            hash ^= hash >> splat(IntV, 15);
+            const hash = hash_in ^ (hash_in >> splat(IntV, 15));
             const h13 = hash & splat(IntV, 13);
             const u = @select(Float, h13 > splat(IntV, 7), yd, xd);
             const v = @select(Float, h13 == splat(IntV, 12), xd, @select(Float, h13 < splat(IntV, 2), yd, zd));
@@ -965,7 +761,6 @@ pub fn Noise(comptime Float: type) type {
         }
 
         inline fn gradient2DTableVec(comptime N: usize, hash: @Vector(N, i32)) GradPair(N) {
-            @setFloatMode(.optimized);
             const IntV = @Vector(N, i32);
             const idx = (hash >> splat(IntV, 1)) & splat(IntV, 0xF);
             if (comptime N == 8 and Float == f32 and builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
@@ -989,7 +784,6 @@ pub fn Noise(comptime Float: type) type {
         }
 
         inline fn gradientPairSelect(comptime N: usize, comptime lo: usize, comptime hi: usize, idx: @Vector(N, i32)) GradPair(N) {
-            @setFloatMode(.optimized);
             const IntV = @Vector(N, i32);
             const FloatV = @Vector(N, Float);
             if (hi - lo == 1) {
@@ -1054,27 +848,23 @@ pub fn Noise(comptime Float: type) type {
             yo.* = value * ygo;
             zo.* = value * zgo;
         }
-        inline fn genNoiseSingle2D(comptime N: usize, comptime noise: NoiseType, state: *const State, seed: i32, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            return switch (noise) {
-                .simplex => singleSimplex2D(N, seed, x, y),
-                .simplex_smooth => singleSimplexS2D(N, seed, x, y),
-                .cellular => singleCellular2D(N, state, seed, x, y),
-                .perlin => singlePerlin2D(N, seed, x, y),
-                .value_cubic => singleValueCubic2D(N, seed, x, y),
-                .value => singleValue2D(N, seed, x, y),
+        inline fn genNoiseSingle(comptime N: usize, comptime dim: usize, comptime noise: NoiseType, state: *const State, seed: i32, p: [dim]@Vector(N, Float)) @Vector(N, Float) {
+            if (noise == .cellular) return singleCellular(N, dim, state, seed, p);
+            if (dim == 2) return switch (noise) {
+                .simplex => singleSimplex2D(N, seed, p[0], p[1]),
+                .simplex_smooth => singleSimplexS2D(N, seed, p[0], p[1]),
+                .perlin => singlePerlin2D(N, seed, p[0], p[1]),
+                .value_cubic => singleValueCubic2D(N, seed, p[0], p[1]),
+                .value => singleValue2D(N, seed, p[0], p[1]),
+                .cellular => unreachable,
             };
-        }
-
-        inline fn genNoiseSingle3D(comptime N: usize, comptime noise: NoiseType, state: *const State, seed: i32, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
             return switch (noise) {
-                .simplex => singleSimplex3D(N, seed, x, y, z),
-                .simplex_smooth => singleSimplexS3D(N, seed, x, y, z),
-                .cellular => singleCellular3D(N, state, seed, x, y, z),
-                .perlin => singlePerlin3D(N, seed, x, y, z),
-                .value_cubic => singleValueCubic3D(N, seed, x, y, z),
-                .value => singleValue3D(N, seed, x, y, z),
+                .simplex => singleSimplex3D(N, seed, p[0], p[1], p[2]),
+                .simplex_smooth => singleSimplexS3D(N, seed, p[0], p[1], p[2]),
+                .perlin => singlePerlin3D(N, seed, p[0], p[1], p[2]),
+                .value_cubic => singleValueCubic3D(N, seed, p[0], p[1], p[2]),
+                .value => singleValue3D(N, seed, p[0], p[1], p[2]),
+                .cellular => unreachable,
             };
         }
 
@@ -1082,7 +872,6 @@ pub fn Noise(comptime Float: type) type {
         // each, returning the four final hashes in [00, 10, 01, 11] order.
         // Shared by perlin and value noise; the hash sequence is unchanged.
         inline fn cellHash2D(comptime N: usize, seed: i32, x0: @Vector(N, i32), y0: @Vector(N, i32)) [4]@Vector(N, i32) {
-            @setFloatMode(.optimized);
             const IntV = @Vector(N, i32);
             const x0p: IntV = x0 *% splat(IntV, prime_x);
             const y0p: IntV = y0 *% splat(IntV, prime_y);
@@ -1101,7 +890,6 @@ pub fn Noise(comptime Float: type) type {
         }
 
         inline fn cellHash3D(comptime N: usize, seed: i32, x0: @Vector(N, i32), y0: @Vector(N, i32), z0: @Vector(N, i32)) [8]@Vector(N, i32) {
-            @setFloatMode(.optimized);
             const IntV = @Vector(N, i32);
             const x0p: IntV = x0 *% splat(IntV, prime_x);
             const y0p: IntV = y0 *% splat(IntV, prime_y);
@@ -1186,16 +974,11 @@ pub fn Noise(comptime Float: type) type {
             return lerp(yf0, yf1, zs) * splat(FloatV, 0.964921414852142333984375);
         }
 
-        inline fn valCoord2DFromHashVec(comptime N: usize, hash_in: @Vector(N, i32)) @Vector(N, Float) {
+        inline fn valCoordFromHashVec(comptime N: usize, hash_in: @Vector(N, i32)) @Vector(N, Float) {
             @setFloatMode(.optimized);
             const FloatV = @Vector(N, Float);
-            var hash = hash_in;
-            hash *%= hash *% splat(@Vector(N, i32), hash_multiplier);
+            const hash = hash_in *% (hash_in *% splat(@Vector(N, i32), hash_multiplier));
             return floatFromInt(FloatV, hash) * splat(FloatV, 1.0 / 2147483648.0);
-        }
-
-        inline fn valCoord3DFromHashVec(comptime N: usize, hash_in: @Vector(N, i32)) @Vector(N, Float) {
-            return valCoord2DFromHashVec(N, hash_in);
         }
 
         fn singleValue2D(comptime N: usize, seed: i32, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
@@ -1211,8 +994,8 @@ pub fn Noise(comptime Float: type) type {
             const ys = interpHermiteVec(N, y - y0_f);
 
             const h = cellHash2D(N, seed, x0, y0);
-            const xf0 = lerp(valCoord2DFromHashVec(N, h[0]), valCoord2DFromHashVec(N, h[1]), xs);
-            const xf1 = lerp(valCoord2DFromHashVec(N, h[2]), valCoord2DFromHashVec(N, h[3]), xs);
+            const xf0 = lerp(valCoordFromHashVec(N, h[0]), valCoordFromHashVec(N, h[1]), xs);
+            const xf1 = lerp(valCoordFromHashVec(N, h[2]), valCoordFromHashVec(N, h[3]), xs);
 
             return lerp(xf0, xf1, ys);
         }
@@ -1233,10 +1016,10 @@ pub fn Noise(comptime Float: type) type {
             const zs = interpHermiteVec(N, z - z0_f);
 
             const h = cellHash3D(N, seed, x0, y0, z0);
-            const xf00 = lerp(valCoord3DFromHashVec(N, h[0]), valCoord3DFromHashVec(N, h[1]), xs);
-            const xf10 = lerp(valCoord3DFromHashVec(N, h[2]), valCoord3DFromHashVec(N, h[3]), xs);
-            const xf01 = lerp(valCoord3DFromHashVec(N, h[4]), valCoord3DFromHashVec(N, h[5]), xs);
-            const xf11 = lerp(valCoord3DFromHashVec(N, h[6]), valCoord3DFromHashVec(N, h[7]), xs);
+            const xf00 = lerp(valCoordFromHashVec(N, h[0]), valCoordFromHashVec(N, h[1]), xs);
+            const xf10 = lerp(valCoordFromHashVec(N, h[2]), valCoordFromHashVec(N, h[3]), xs);
+            const xf01 = lerp(valCoordFromHashVec(N, h[4]), valCoordFromHashVec(N, h[5]), xs);
+            const xf11 = lerp(valCoordFromHashVec(N, h[6]), valCoordFromHashVec(N, h[7]), xs);
 
             const yf0 = lerp(xf00, xf10, ys);
             const yf1 = lerp(xf01, xf11, ys);
@@ -1271,10 +1054,10 @@ pub fn Noise(comptime Float: type) type {
             const x2_seed = seed_v ^ x2p;
             const x3_seed = seed_v ^ x3p;
 
-            const row_y0 = cubicLerp(valCoord2DFromHashVec(N, (x0_seed ^ y0p) *% mult_v), valCoord2DFromHashVec(N, (x1_seed ^ y0p) *% mult_v), valCoord2DFromHashVec(N, (x2_seed ^ y0p) *% mult_v), valCoord2DFromHashVec(N, (x3_seed ^ y0p) *% mult_v), xs);
-            const row_y1 = cubicLerp(valCoord2DFromHashVec(N, (x0_seed ^ y1p) *% mult_v), valCoord2DFromHashVec(N, (x1_seed ^ y1p) *% mult_v), valCoord2DFromHashVec(N, (x2_seed ^ y1p) *% mult_v), valCoord2DFromHashVec(N, (x3_seed ^ y1p) *% mult_v), xs);
-            const row_y2 = cubicLerp(valCoord2DFromHashVec(N, (x0_seed ^ y2p) *% mult_v), valCoord2DFromHashVec(N, (x1_seed ^ y2p) *% mult_v), valCoord2DFromHashVec(N, (x2_seed ^ y2p) *% mult_v), valCoord2DFromHashVec(N, (x3_seed ^ y2p) *% mult_v), xs);
-            const row_y3 = cubicLerp(valCoord2DFromHashVec(N, (x0_seed ^ y3p) *% mult_v), valCoord2DFromHashVec(N, (x1_seed ^ y3p) *% mult_v), valCoord2DFromHashVec(N, (x2_seed ^ y3p) *% mult_v), valCoord2DFromHashVec(N, (x3_seed ^ y3p) *% mult_v), xs);
+            const row_y0 = cubicLerp(valCoordFromHashVec(N, (x0_seed ^ y0p) *% mult_v), valCoordFromHashVec(N, (x1_seed ^ y0p) *% mult_v), valCoordFromHashVec(N, (x2_seed ^ y0p) *% mult_v), valCoordFromHashVec(N, (x3_seed ^ y0p) *% mult_v), xs);
+            const row_y1 = cubicLerp(valCoordFromHashVec(N, (x0_seed ^ y1p) *% mult_v), valCoordFromHashVec(N, (x1_seed ^ y1p) *% mult_v), valCoordFromHashVec(N, (x2_seed ^ y1p) *% mult_v), valCoordFromHashVec(N, (x3_seed ^ y1p) *% mult_v), xs);
+            const row_y2 = cubicLerp(valCoordFromHashVec(N, (x0_seed ^ y2p) *% mult_v), valCoordFromHashVec(N, (x1_seed ^ y2p) *% mult_v), valCoordFromHashVec(N, (x2_seed ^ y2p) *% mult_v), valCoordFromHashVec(N, (x3_seed ^ y2p) *% mult_v), xs);
+            const row_y3 = cubicLerp(valCoordFromHashVec(N, (x0_seed ^ y3p) *% mult_v), valCoordFromHashVec(N, (x1_seed ^ y3p) *% mult_v), valCoordFromHashVec(N, (x2_seed ^ y3p) *% mult_v), valCoordFromHashVec(N, (x3_seed ^ y3p) *% mult_v), xs);
 
             return cubicLerp(row_y0, row_y1, row_y2, row_y3, ys) * splat(FloatV, 1.0 / (1.5 * 1.5));
         }
@@ -1315,10 +1098,10 @@ pub fn Noise(comptime Float: type) type {
             inline for (0..4) |iz| {
                 var y_rows: [4]FloatV = undefined;
                 inline for (0..4) |iy| {
-                    const v0 = valCoord3DFromHashVec(N, (seed_xy[0][iy] ^ zps[iz]) *% mult_v);
-                    const v1 = valCoord3DFromHashVec(N, (seed_xy[1][iy] ^ zps[iz]) *% mult_v);
-                    const v2 = valCoord3DFromHashVec(N, (seed_xy[2][iy] ^ zps[iz]) *% mult_v);
-                    const v3 = valCoord3DFromHashVec(N, (seed_xy[3][iy] ^ zps[iz]) *% mult_v);
+                    const v0 = valCoordFromHashVec(N, (seed_xy[0][iy] ^ zps[iz]) *% mult_v);
+                    const v1 = valCoordFromHashVec(N, (seed_xy[1][iy] ^ zps[iz]) *% mult_v);
+                    const v2 = valCoordFromHashVec(N, (seed_xy[2][iy] ^ zps[iz]) *% mult_v);
+                    const v3 = valCoordFromHashVec(N, (seed_xy[3][iy] ^ zps[iz]) *% mult_v);
                     y_rows[iy] = cubicLerp(v0, v1, v2, v3, xs);
                 }
                 z_rows[iz] = cubicLerp(y_rows[0], y_rows[1], y_rows[2], y_rows[3], ys);
@@ -1399,10 +1182,8 @@ pub fn Noise(comptime Float: type) type {
             const unskew_delta = k_unskew2 * (s.dx_skewed + s.dy_skewed);
             const dx0 = s.dx_skewed + unskew_delta;
             const dy0 = s.dy_skewed + unskew_delta;
-            const offset_ge: FloatV = splat(FloatV, g2 - 1.0);
-            const offset_lt: FloatV = splat(FloatV, g2);
-            const dx1 = dx0 + @select(Float, x_ge_y, offset_ge, offset_lt);
-            const dy1 = dy0 + @select(Float, x_ge_y, offset_lt, offset_ge);
+            const dx1 = dx0 + @select(Float, x_ge_y, splat(FloatV, g2 - 1.0), splat(FloatV, g2));
+            const dy1 = dy0 + @select(Float, x_ge_y, splat(FloatV, g2), splat(FloatV, g2 - 1.0));
             const dx2 = dx0 - k_twice_unskew2_plus_1;
             const dy2 = dy0 - k_twice_unskew2_plus_1;
 
@@ -1781,7 +1562,7 @@ pub fn Noise(comptime Float: type) type {
         // Folds the configured distance metric over the nine neighbor cells.
         // `mode` is comptime, so each distance function still generates its own
         // unrolled loop with no per-cell branch.
-        inline fn cellularLoop2D(comptime N: usize, comptime mode: CellularDistanceFunc, seed: i32, xr_primed: @Vector(N, i32), yr_primed: @Vector(N, i32), xr_minus_x: @Vector(N, Float), yr_minus_y: @Vector(N, Float), jitter: Float, dist0: *@Vector(N, Float), dist1: *@Vector(N, Float), closest_hash: *@Vector(N, i32), comptime track_hash: bool, comptime track_dist1: bool) void {
+        inline fn cellularLoop2D(comptime N: usize, comptime mode: CellularDistanceFunc, seed: i32, r_primed: [2]@Vector(N, i32), r_minus_p: [2]@Vector(N, Float), jitter: Float, dist0: *@Vector(N, Float), dist1: *@Vector(N, Float), closest_hash: *@Vector(N, i32), comptime track_hash: bool, comptime track_dist1: bool) void {
             @setFloatMode(.optimized);
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
@@ -1791,11 +1572,11 @@ pub fn Noise(comptime Float: type) type {
                     const cell = cellularDelta2D(
                         N,
                         seed,
-                        xr_primed +% splat(IntV, ox *% prime_x),
-                        yr_primed +% splat(IntV, oy *% prime_y),
+                        r_primed[0] +% splat(IntV, ox *% prime_x),
+                        r_primed[1] +% splat(IntV, oy *% prime_y),
                         jitter,
-                        xr_minus_x + splat(FloatV, @as(Float, @floatFromInt(ox))),
-                        yr_minus_y + splat(FloatV, @as(Float, @floatFromInt(oy))),
+                        r_minus_p[0] + splat(FloatV, @as(Float, @floatFromInt(ox))),
+                        r_minus_p[1] + splat(FloatV, @as(Float, @floatFromInt(oy))),
                     );
                     const new_dist: FloatV = switch (mode) {
                         .euclidean, .euclidean_sq => cell.vx * cell.vx + cell.vy * cell.vy,
@@ -1807,42 +1588,44 @@ pub fn Noise(comptime Float: type) type {
             }
         }
 
-        fn singleCellular2D(comptime N: usize, state: *const State, seed: i32, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
+        fn singleCellular(comptime N: usize, comptime dim: usize, state: *const State, seed: i32, p: [dim]@Vector(N, Float)) @Vector(N, Float) {
             // The update flags depend only on the return type; dispatching
             // them comptime removes two predicted branches per cell from the
             // inner loops (9 cells/chunk in 2D, 27 in 3D).
             return switch (state.cellular_return) {
-                .cell_value => singleCellular2DRet(N, state, seed, x, y, true, false),
-                .distance => singleCellular2DRet(N, state, seed, x, y, false, false),
-                .distance2, .distance2_add, .distance2_sub, .distance2_mul, .distance2_div => singleCellular2DRet(N, state, seed, x, y, false, true),
+                .cell_value => singleCellularRet(N, dim, state, seed, p, true, false),
+                .distance => singleCellularRet(N, dim, state, seed, p, false, false),
+                .distance2, .distance2_add, .distance2_sub, .distance2_mul, .distance2_div => singleCellularRet(N, dim, state, seed, p, false, true),
             };
         }
 
-        fn singleCellular2DRet(comptime N: usize, state: *const State, seed: i32, x: @Vector(N, Float), y: @Vector(N, Float), comptime track_hash: bool, comptime track_dist1: bool) @Vector(N, Float) {
+        fn singleCellularRet(comptime N: usize, comptime dim: usize, state: *const State, seed: i32, p: [dim]@Vector(N, Float), comptime track_hash: bool, comptime track_dist1: bool) @Vector(N, Float) {
             @setFloatMode(.optimized);
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
+            const primes: [3]i32 = .{ prime_x, prime_y, prime_z };
 
-            const xr: IntV = @round(x);
-            const yr: IntV = @round(y);
             var dist0: FloatV = @splat(std.math.floatMax(Float));
             var dist1: FloatV = @splat(std.math.floatMax(Float));
             var closest_hash: IntV = @splat(0);
 
-            // Per-chunk cell arithmetic shared by all nine neighbors: the
-            // primed lattice coordinates and the lattice-origin offset are
-            // hoisted out of the cell loop (integer multiply distributes
-            // exactly, the float reassociation is within 1 ULP).
-            const xr_primed: IntV = xr *% splat(IntV, prime_x);
-            const yr_primed: IntV = yr *% splat(IntV, prime_y);
-            const xr_minus_x: FloatV = floatFromInt(FloatV, xr) - x;
-            const yr_minus_y: FloatV = floatFromInt(FloatV, yr) - y;
+            // Per-chunk cell arithmetic shared by all neighbors: the primed
+            // lattice coordinates and the lattice-origin offset are hoisted
+            // out of the cell loop (integer multiply distributes exactly, the
+            // float reassociation is within 1 ULP).
+            var r_primed: [dim]IntV = undefined;
+            var r_minus_p: [dim]FloatV = undefined;
+            inline for (&r_primed, &r_minus_p, p, primes[0..dim]) |*primed, *offset, coord, prime| {
+                const r: IntV = @round(coord);
+                primed.* = r *% splat(IntV, prime);
+                offset.* = floatFromInt(FloatV, r) - coord;
+            }
 
-            const jitter = 0.43701595 * state.cellular_jitter_mod;
+            const jitter = (if (dim == 2) 0.43701595 else 0.39614353) * state.cellular_jitter_mod;
+            const cellularLoop = if (dim == 2) cellularLoop2D else cellularLoop3D;
             switch (state.cellular_distance) {
-                .euclidean, .euclidean_sq => cellularLoop2D(N, .euclidean, seed, xr_primed, yr_primed, xr_minus_x, yr_minus_y, jitter, &dist0, &dist1, &closest_hash, track_hash, track_dist1),
-                .manhattan => cellularLoop2D(N, .manhattan, seed, xr_primed, yr_primed, xr_minus_x, yr_minus_y, jitter, &dist0, &dist1, &closest_hash, track_hash, track_dist1),
-                .hybrid => cellularLoop2D(N, .hybrid, seed, xr_primed, yr_primed, xr_minus_x, yr_minus_y, jitter, &dist0, &dist1, &closest_hash, track_hash, track_dist1),
+                .euclidean, .euclidean_sq => cellularLoop(N, .euclidean, seed, r_primed, r_minus_p, jitter, &dist0, &dist1, &closest_hash, track_hash, track_dist1),
+                inline .manhattan, .hybrid => |mode| cellularLoop(N, mode, seed, r_primed, r_minus_p, jitter, &dist0, &dist1, &closest_hash, track_hash, track_dist1),
             }
 
             if (state.cellular_distance == .euclidean and state.cellular_return != .cell_value) {
@@ -1864,7 +1647,7 @@ pub fn Noise(comptime Float: type) type {
             return @max(splat(FloatV, -1.0), @min(splat(FloatV, 1.0), result));
         }
 
-        fn cellularLoop3D(comptime N: usize, comptime mode: CellularDistanceFunc, seed: i32, xr_primed: @Vector(N, i32), yr_primed: @Vector(N, i32), zr_primed: @Vector(N, i32), xr_minus_x: @Vector(N, Float), yr_minus_y: @Vector(N, Float), zr_minus_z: @Vector(N, Float), jitter: Float, dist0: *@Vector(N, Float), dist1: *@Vector(N, Float), closest_hash: *@Vector(N, i32), comptime track_hash: bool, comptime track_dist1: bool) void {
+        fn cellularLoop3D(comptime N: usize, comptime mode: CellularDistanceFunc, seed: i32, r_primed: [3]@Vector(N, i32), r_minus_p: [3]@Vector(N, Float), jitter: Float, dist0: *@Vector(N, Float), dist1: *@Vector(N, Float), closest_hash: *@Vector(N, i32), comptime track_hash: bool, comptime track_dist1: bool) void {
             @setFloatMode(.optimized);
             const FloatV = @Vector(N, Float);
             const IntV = @Vector(N, i32);
@@ -1875,13 +1658,13 @@ pub fn Noise(comptime Float: type) type {
                         const cell = cellularDelta3D(
                             N,
                             seed,
-                            xr_primed +% splat(IntV, ox *% prime_x),
-                            yr_primed +% splat(IntV, oy *% prime_y),
-                            zr_primed +% splat(IntV, oz *% prime_z),
+                            r_primed[0] +% splat(IntV, ox *% prime_x),
+                            r_primed[1] +% splat(IntV, oy *% prime_y),
+                            r_primed[2] +% splat(IntV, oz *% prime_z),
                             jitter,
-                            xr_minus_x + splat(FloatV, @as(Float, @floatFromInt(ox))),
-                            yr_minus_y + splat(FloatV, @as(Float, @floatFromInt(oy))),
-                            zr_minus_z + splat(FloatV, @as(Float, @floatFromInt(oz))),
+                            r_minus_p[0] + splat(FloatV, @as(Float, @floatFromInt(ox))),
+                            r_minus_p[1] + splat(FloatV, @as(Float, @floatFromInt(oy))),
+                            r_minus_p[2] + splat(FloatV, @as(Float, @floatFromInt(oz))),
                         );
                         const new_dist: FloatV = switch (mode) {
                             .euclidean, .euclidean_sq => cell.vx * cell.vx + cell.vy * cell.vy + cell.vz * cell.vz,
@@ -1894,82 +1677,12 @@ pub fn Noise(comptime Float: type) type {
             }
         }
 
-        fn singleCellular3D(comptime N: usize, state: *const State, seed: i32, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
-            // Comptime update flags; see singleCellular2D.
-            return switch (state.cellular_return) {
-                .cell_value => singleCellular3DRet(N, state, seed, x, y, z, true, false),
-                .distance => singleCellular3DRet(N, state, seed, x, y, z, false, false),
-                .distance2, .distance2_add, .distance2_sub, .distance2_mul, .distance2_div => singleCellular3DRet(N, state, seed, x, y, z, false, true),
-            };
-        }
-
-        fn singleCellular3DRet(comptime N: usize, state: *const State, seed: i32, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float), comptime track_hash: bool, comptime track_dist1: bool) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            const FloatV = @Vector(N, Float);
-            const IntV = @Vector(N, i32);
-
-            const xr: IntV = @round(x);
-            const yr: IntV = @round(y);
-            const zr: IntV = @round(z);
-            var dist0: FloatV = @splat(std.math.floatMax(Float));
-            var dist1: FloatV = @splat(std.math.floatMax(Float));
-            var closest_hash: IntV = @splat(0);
-
-            // Per-chunk cell arithmetic shared by all 27 neighbors: the
-            // primed lattice coordinates and the lattice-origin offset are
-            // hoisted out of the cell loop (integer multiply distributes
-            // exactly, the float reassociation is within 1 ULP).
-            const xr_primed: IntV = xr *% splat(IntV, prime_x);
-            const yr_primed: IntV = yr *% splat(IntV, prime_y);
-            const zr_primed: IntV = zr *% splat(IntV, prime_z);
-            const xr_minus_x: FloatV = floatFromInt(FloatV, xr) - x;
-            const yr_minus_y: FloatV = floatFromInt(FloatV, yr) - y;
-            const zr_minus_z: FloatV = floatFromInt(FloatV, zr) - z;
-
-            const jitter = 0.39614353 * state.cellular_jitter_mod;
-            switch (state.cellular_distance) {
-                .euclidean, .euclidean_sq => cellularLoop3D(N, .euclidean, seed, xr_primed, yr_primed, zr_primed, xr_minus_x, yr_minus_y, zr_minus_z, jitter, &dist0, &dist1, &closest_hash, track_hash, track_dist1),
-                .manhattan => cellularLoop3D(N, .manhattan, seed, xr_primed, yr_primed, zr_primed, xr_minus_x, yr_minus_y, zr_minus_z, jitter, &dist0, &dist1, &closest_hash, track_hash, track_dist1),
-                .hybrid => cellularLoop3D(N, .hybrid, seed, xr_primed, yr_primed, zr_primed, xr_minus_x, yr_minus_y, zr_minus_z, jitter, &dist0, &dist1, &closest_hash, track_hash, track_dist1),
-            }
-
-            if (state.cellular_distance == .euclidean and state.cellular_return != .cell_value) {
-                dist0 = @sqrt(dist0);
-                if (state.cellular_return != .distance) dist1 = @sqrt(dist1);
-            }
-
-            const result = switch (state.cellular_return) {
-                .cell_value => floatFromInt(FloatV, closest_hash) * splat(FloatV, 1.0 / 2147483648.0),
-                .distance => dist0 - splat(FloatV, 1.0),
-                .distance2 => dist1 - splat(FloatV, 1.0),
-                .distance2_add => @mulAdd(FloatV, dist1 + dist0, splat(FloatV, 0.5), splat(FloatV, -1.0)),
-                .distance2_sub => (dist1 - dist0) - splat(FloatV, 1.0),
-                .distance2_mul => @mulAdd(FloatV, dist1 * dist0, splat(FloatV, 0.5), splat(FloatV, -1.0)),
-                .distance2_div => (dist0 / dist1) - splat(FloatV, 1.0),
-            };
-
-            // "hybrid" can result in out of range values
-            return @max(splat(FloatV, -1.0), @min(splat(FloatV, 1.0), result));
-        }
-
         // Maps one octave's raw noise to its contribution for the unweighted
         // even/odd chain. `fractal` is comptime, so the transform folds away.
-        inline fn octaveNoise2D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, xv: @Vector(N, Float), yv: @Vector(N, Float), strength: @Vector(N, Float)) @Vector(N, Float) {
+        inline fn octaveNoise(comptime N: usize, comptime dim: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, p: [dim]@Vector(N, Float), strength: @Vector(N, Float)) @Vector(N, Float) {
             @setFloatMode(.optimized);
             const FloatV = @Vector(N, Float);
-            const raw = genNoiseSingle2D(N, noise, state, seed, xv, yv);
-            return switch (fractal) {
-                .fbm => raw,
-                .ridged => @abs(raw),
-                .ping_pong => pingPongVec(N, (raw + splat(FloatV, 1.0)) * strength),
-                else => unreachable,
-            };
-        }
-
-        inline fn octaveNoise3D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, xv: @Vector(N, Float), yv: @Vector(N, Float), zv: @Vector(N, Float), strength: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            const FloatV = @Vector(N, Float);
-            const raw = genNoiseSingle3D(N, noise, state, seed, xv, yv, zv);
+            const raw = genNoiseSingle(N, dim, noise, state, seed, p);
             return switch (fractal) {
                 .fbm => raw,
                 .ridged => @abs(raw),
@@ -1985,7 +1698,7 @@ pub fn Noise(comptime Float: type) type {
         // combine fold to the same codegen as the hand-written copies.
         // Ridged factors (1 - 2*n_i)*amp_i across octaves:
         // sum(amp_i) - 2*sum(n_i*amp_i) = 1.0 - 2*(sum0 + sum1).
-        fn fractalEvenOdd2D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
+        fn fractalEvenOdd(comptime N: usize, comptime dim: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, p_start: [dim]@Vector(N, Float)) @Vector(N, Float) {
             @setFloatMode(.optimized);
             // An empty chain sums to zero, not to the ridged/ping-pong offset.
             if (state.octaves == 0) return @splat(0);
@@ -1996,81 +1709,30 @@ pub fn Noise(comptime Float: type) type {
             const strength: FloatV = @splat(state.ping_pong_strength);
             var sum0: FloatV = @splat(0);
             var sum1: FloatV = @splat(0);
-            var xv = x;
-            var yv = y;
+            var p = p_start;
             var amp0: FloatV = @splat(bounding);
             var amp1: FloatV = amp0 * gain;
             var i: u32 = 0;
             while (i + 1 < state.octaves) : (i += 2) {
-                // All three coordinate pairs for the pair are computed up
+                // All three coordinate sets for the pair are computed up
                 // front so the next iteration's floor can start as soon as
                 // these muls retire, overlapping the noise evaluations below.
-                const xv1 = xv * lac;
-                const yv1 = yv * lac;
-                const xv2 = xv1 * lac;
-                const yv2 = yv1 * lac;
-                const n0 = octaveNoise2D(N, noise, fractal, state, seed +% @as(i32, @intCast(i)), xv, yv, strength);
-                const n1 = octaveNoise2D(N, noise, fractal, state, seed +% @as(i32, @intCast(i + 1)), xv1, yv1, strength);
-                sum0 = @mulAdd(FloatV, n0, amp0, sum0);
-                sum1 = @mulAdd(FloatV, n1, amp1, sum1);
-                xv = xv2;
-                yv = yv2;
-                amp0 *= gain_sq;
-                amp1 *= gain_sq;
-            }
-            if (i < state.octaves) {
-                const n = octaveNoise2D(N, noise, fractal, state, seed +% @as(i32, @intCast(i)), xv, yv, strength);
-                switch (fractal) {
-                    .fbm => sum0 += n * amp0,
-                    .ridged, .ping_pong => sum0 = @mulAdd(FloatV, n, amp0, sum0),
-                    else => unreachable,
+                var p1: [dim]FloatV = undefined;
+                var p2: [dim]FloatV = undefined;
+                inline for (&p1, &p2, p) |*c1, *c2, c| {
+                    c1.* = c * lac;
+                    c2.* = c1.* * lac;
                 }
-            }
-            return switch (fractal) {
-                .fbm => sum0 + sum1,
-                .ridged => @mulAdd(FloatV, sum0 + sum1, splat(FloatV, -2.0), splat(FloatV, 1.0)),
-                .ping_pong => @mulAdd(FloatV, sum0 + sum1, splat(FloatV, 2.0), splat(FloatV, -1.0)),
-                else => unreachable,
-            };
-        }
-
-        fn fractalEvenOdd3D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            if (state.octaves == 0) return @splat(0);
-            const FloatV = @Vector(N, Float);
-            const gain: FloatV = @splat(state.gain);
-            const lac: FloatV = @splat(state.lacunarity);
-            const gain_sq: FloatV = gain * gain;
-            const strength: FloatV = @splat(state.ping_pong_strength);
-            var sum0: FloatV = @splat(0);
-            var sum1: FloatV = @splat(0);
-            var xv = x;
-            var yv = y;
-            var zv = z;
-            var amp0: FloatV = @splat(bounding);
-            var amp1: FloatV = amp0 * gain;
-            var i: u32 = 0;
-            while (i + 1 < state.octaves) : (i += 2) {
-                // All three coordinate triples computed up front; see the 2D
-                // even/odd loop for why.
-                const xv1 = xv * lac;
-                const yv1 = yv * lac;
-                const zv1 = zv * lac;
-                const xv2 = xv1 * lac;
-                const yv2 = yv1 * lac;
-                const zv2 = zv1 * lac;
-                const n0 = octaveNoise3D(N, noise, fractal, state, seed +% @as(i32, @intCast(i)), xv, yv, zv, strength);
-                const n1 = octaveNoise3D(N, noise, fractal, state, seed +% @as(i32, @intCast(i + 1)), xv1, yv1, zv1, strength);
+                const n0 = octaveNoise(N, dim, noise, fractal, state, seed +% @as(i32, @intCast(i)), p, strength);
+                const n1 = octaveNoise(N, dim, noise, fractal, state, seed +% @as(i32, @intCast(i + 1)), p1, strength);
                 sum0 = @mulAdd(FloatV, n0, amp0, sum0);
                 sum1 = @mulAdd(FloatV, n1, amp1, sum1);
-                xv = xv2;
-                yv = yv2;
-                zv = zv2;
+                p = p2;
                 amp0 *= gain_sq;
                 amp1 *= gain_sq;
             }
             if (i < state.octaves) {
-                const n = octaveNoise3D(N, noise, fractal, state, seed +% @as(i32, @intCast(i)), xv, yv, zv, strength);
+                const n = octaveNoise(N, dim, noise, fractal, state, seed +% @as(i32, @intCast(i)), p, strength);
                 switch (fractal) {
                     .fbm => sum0 += n * amp0,
                     .ridged, .ping_pong => sum0 = @mulAdd(FloatV, n, amp0, sum0),
@@ -2089,7 +1751,7 @@ pub fn Noise(comptime Float: type) type {
         // fractal types. `fractal` is comptime so the per-octave transform, the
         // sum combine, and the amplitude weighting fold to the same codegen as
         // the hand-written copies.
-        fn fractalWeighted2D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
+        fn fractalWeighted(comptime N: usize, comptime dim: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, p_start: [dim]@Vector(N, Float)) @Vector(N, Float) {
             @setFloatMode(.optimized);
             const FloatV = @Vector(N, Float);
             const gain: FloatV = @splat(state.gain);
@@ -2097,59 +1759,25 @@ pub fn Noise(comptime Float: type) type {
             const weighted: FloatV = @splat(state.weighted_strength);
             const strength: FloatV = @splat(state.ping_pong_strength);
             var sum: FloatV = @splat(0);
-            var xv = x;
-            var yv = y;
+            var p = p_start;
             var amp: FloatV = @splat(bounding);
             for (0..state.octaves) |i| {
-                const noise_v = octaveNoise2D(N, noise, fractal, state, seed +% @as(i32, @intCast(i)), xv, yv, strength);
+                const noise_v = octaveNoise(N, dim, noise, fractal, state, seed +% @as(i32, @intCast(i)), p, strength);
                 sum += switch (fractal) {
                     .fbm => noise_v * amp,
                     .ridged => (noise_v * splat(FloatV, -2.0) + splat(FloatV, 1.0)) * amp,
                     .ping_pong => (noise_v - splat(FloatV, 0.5)) * splat(FloatV, 2.0) * amp,
                     else => unreachable,
                 };
+                // FastNoiseLite clamps the fbm weight only in 2D.
+                const fbm_weight = if (dim == 2) @min(noise_v + splat(FloatV, 1.0), splat(FloatV, 2.0)) else noise_v + splat(FloatV, 1.0);
                 amp *= switch (fractal) {
-                    .fbm => lerp(splat(FloatV, 1.0), @min(noise_v + splat(FloatV, 1.0), splat(FloatV, 2.0)) * splat(FloatV, 0.5), weighted),
+                    .fbm => lerp(splat(FloatV, 1.0), fbm_weight * splat(FloatV, 0.5), weighted),
                     .ridged => lerp(splat(FloatV, 1.0), splat(FloatV, 1.0) - noise_v, weighted),
                     .ping_pong => lerp(splat(FloatV, 1.0), noise_v, weighted),
                     else => unreachable,
                 };
-                xv *= lac;
-                yv *= lac;
-                amp *= gain;
-            }
-            return sum;
-        }
-
-        fn fractalWeighted3D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            const FloatV = @Vector(N, Float);
-            const gain: FloatV = @splat(state.gain);
-            const lac: FloatV = @splat(state.lacunarity);
-            const weighted: FloatV = @splat(state.weighted_strength);
-            const strength: FloatV = @splat(state.ping_pong_strength);
-            var sum: FloatV = @splat(0);
-            var xv = x;
-            var yv = y;
-            var zv = z;
-            var amp: FloatV = @splat(bounding);
-            for (0..state.octaves) |i| {
-                const noise_v = octaveNoise3D(N, noise, fractal, state, seed +% @as(i32, @intCast(i)), xv, yv, zv, strength);
-                sum += switch (fractal) {
-                    .fbm => noise_v * amp,
-                    .ridged => (noise_v * splat(FloatV, -2.0) + splat(FloatV, 1.0)) * amp,
-                    .ping_pong => (noise_v - splat(FloatV, 0.5)) * splat(FloatV, 2.0) * amp,
-                    else => unreachable,
-                };
-                amp *= switch (fractal) {
-                    .fbm => lerp(splat(FloatV, 1.0), (noise_v + splat(FloatV, 1.0)) * splat(FloatV, 0.5), weighted),
-                    .ridged => lerp(splat(FloatV, 1.0), splat(FloatV, 1.0) - noise_v, weighted),
-                    .ping_pong => lerp(splat(FloatV, 1.0), noise_v, weighted),
-                    else => unreachable,
-                };
-                xv *= lac;
-                yv *= lac;
-                zv *= lac;
+                for (&p) |*coord| coord.* *= lac;
                 amp *= gain;
             }
             return sum;
@@ -2158,20 +1786,10 @@ pub fn Noise(comptime Float: type) type {
         // Unweighted/weighted octave chains shared by the fbm/ridged/
         // ping-pong fractal types. `fractal` is comptime so each
         // instantiation folds to the same codegen as the former per-type wrappers.
-        fn genFractal2D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float)) @Vector(N, Float) {
+        fn genFractal(comptime N: usize, comptime dim: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, p: [dim]@Vector(N, Float)) @Vector(N, Float) {
             @setFloatMode(.optimized);
-            if (state.weighted_strength == 0) {
-                return fractalEvenOdd2D(N, noise, fractal, state, seed, bounding, x, y);
-            }
-            return fractalWeighted2D(N, noise, fractal, state, seed, bounding, x, y);
-        }
-
-        fn genFractal3D(comptime N: usize, comptime noise: NoiseType, comptime fractal: FractalType, state: *const State, seed: i32, bounding: Float, x: @Vector(N, Float), y: @Vector(N, Float), z: @Vector(N, Float)) @Vector(N, Float) {
-            @setFloatMode(.optimized);
-            if (state.weighted_strength == 0) {
-                return fractalEvenOdd3D(N, noise, fractal, state, seed, bounding, x, y, z);
-            }
-            return fractalWeighted3D(N, noise, fractal, state, seed, bounding, x, y, z);
+            if (state.weighted_strength == 0) return fractalEvenOdd(N, dim, noise, fractal, state, seed, bounding, p);
+            return fractalWeighted(N, dim, noise, fractal, state, seed, bounding, p);
         }
 
         inline fn transformDomainWarpCoordinate2DVec(state: *const State, comptime N: usize, x: *@Vector(N, Float), y: *@Vector(N, Float)) void {
@@ -2189,23 +1807,12 @@ pub fn Noise(comptime Float: type) type {
         fn transformDomainWarpCoordinate3D(state: *const State, x: *Float, y: *Float, z: *Float) void {
             @setFloatMode(.optimized);
             switch (state.rotation_type) {
-                .improve_xy_planes => {
-                    const xy: Float = x.* + y.*;
-                    const s2: Float = xy * -0.211324865405187;
-                    z.* *= 0.577350269189626;
-                    x.* += s2 - z.*;
-                    y.* = y.* + s2 - z.*;
-                    z.* += xy * 0.577350269189626;
+                .improve_xy_planes, .improve_xz_planes => {
+                    var p: [3]@Vector(1, Float) = .{ .{x.*}, .{y.*}, .{z.*} };
+                    rotate3DVec(state, 1, &p);
+                    x.*, y.*, z.* = .{ p[0][0], p[1][0], p[2][0] };
                 },
-                .improve_xz_planes => {
-                    const xz: Float = x.* + z.*;
-                    const s2: Float = xz * -0.211324865405187;
-                    y.* *= 0.577350269189626;
-                    x.* += s2 - y.*;
-                    z.* += s2 - y.*;
-                    y.* += xz * 0.577350269189626;
-                },
-                else => switch (state.domain_warp_type) {
+                .none => switch (state.domain_warp_type) {
                     .simplex, .simplex_reduced => {
                         const r: Float = (x.* + y.* + z.*) * r3;
                         x.* = r - x.*;
@@ -2465,9 +2072,9 @@ pub fn Noise(comptime Float: type) type {
             const yy = y * frequency;
             const zz = z * frequency;
 
-            var i = fastRound(xx);
-            var j = fastRound(yy);
-            var k = fastRound(zz);
+            var i: i32 = @round(xx);
+            var j: i32 = @round(yy);
+            var k: i32 = @round(zz);
             var x0 = xx - @as(Float, @floatFromInt(i));
             var y0 = yy - @as(Float, @floatFromInt(j));
             var z0 = zz - @as(Float, @floatFromInt(k));
@@ -2591,7 +2198,7 @@ pub fn Noise(comptime Float: type) type {
             const FloatV = @Vector(N, Float);
 
             var start: usize = 0;
-            // Full/tail split; see fillGrid2DImpl.
+            // Full/tail split; see fillGridImpl.
             const full_len = out_xs.len - (out_xs.len % N);
             while (start < full_len) : (start += N) {
                 var x: FloatV = undefined;

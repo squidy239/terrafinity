@@ -25,10 +25,7 @@ pub const FuzzGenerator = struct {
     }
 
     fn genChunkBlocks(source: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World, blocks: *Chunk.Encoding, chunk_pos: ChunkPos, grid_buffer: *align(Chunk.Encoding.GridAlignment) [ChunkSize][ChunkSize][ChunkSize]Block) error{ Unrecoverable, OutOfMemory, Canceled }!?World.ChunkSource.GetBlocksMetadata {
-        _ = io;
-        _ = allocator;
-        _ = world;
-        _ = chunk_pos;
+        _ = .{ io, allocator, world, chunk_pos };
 
         const self: *FuzzGenerator = @ptrCast(@alignCast(source.data));
         blocks.* = .fuzzerMakeEncoding(grid_buffer, self.smith);
@@ -36,9 +33,6 @@ pub const FuzzGenerator = struct {
     }
 
     pub fn deinit(self: World.ChunkSource, io: std.Io, allocator: std.mem.Allocator, world: *World) void {
-        _ = self;
-        _ = world;
-        _ = io;
-        _ = allocator;
+        _ = .{ self, world, io, allocator };
     }
 };

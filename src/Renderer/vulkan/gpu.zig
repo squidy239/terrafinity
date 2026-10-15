@@ -7,10 +7,10 @@ const DeviceProxy = vk.DeviceProxy;
 const VulkanContext = @import("../../VulkanContext.zig").VulkanContext;
 const core = @import("core.zig");
 
-pub const IndexPool = struct {
+/// Free list of candidate slots. Owned by the frame thread, like the candidate buffer.
+const IndexPool = struct {
     free_indices: []u32,
     head: u32,
-    mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator, capacity: u32) !IndexPool {
         const indices = try allocator.alloc(u32, capacity);
@@ -22,33 +22,24 @@ pub const IndexPool = struct {
         allocator.free(self.free_indices);
     }
 
-    pub fn allocIndex(self: *IndexPool, io: std.Io) ?u32 {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+    pub fn allocIndex(self: *IndexPool) ?u32 {
         if (self.head == 0) return null;
         self.head -= 1;
         return self.free_indices[self.head];
     }
 
-    pub fn freeIndex(self: *IndexPool, io: std.Io, index: u32) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+    pub fn freeIndex(self: *IndexPool, index: u32) void {
         std.debug.assert(self.head < self.free_indices.len);
         self.free_indices[self.head] = index;
         self.head += 1;
     }
 
-    pub fn grow(self: *IndexPool, io: std.Io, allocator: std.mem.Allocator, new_capacity: u32) !void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+    pub fn grow(self: *IndexPool, allocator: std.mem.Allocator, new_capacity: u32) !void {
         const old_capacity = @as(u32, @intCast(self.free_indices.len));
         if (new_capacity <= old_capacity) return;
         const added = new_capacity - old_capacity;
-        const new_indices = try allocator.alloc(u32, new_capacity);
-        @memcpy(new_indices[0..self.head], self.free_indices[0..self.head]);
-        for (new_indices[self.head .. self.head + added], old_capacity..) |*val, i| val.* = @intCast(i);
-        allocator.free(self.free_indices);
-        self.free_indices = new_indices;
+        self.free_indices = try allocator.realloc(self.free_indices, new_capacity);
+        for (self.free_indices[self.head .. self.head + added], old_capacity..) |*val, i| val.* = @intCast(i);
         self.head += added;
     }
 };
@@ -59,7 +50,6 @@ pub const StagingRing = struct {
     allocator: std.mem.Allocator,
 
     mapping: []align(transfer_alignment) u8,
-    buffer: ?vk.Buffer,
 
     head: vk.DeviceSize,
     entries: std.ArrayList(struct { ptr: [*]const u8, timeline_value: ?u64 }),
@@ -72,7 +62,6 @@ pub const StagingRing = struct {
         return .{
             .allocator = allocator,
             .mapping = mapping,
-            .buffer = null,
             .head = 0,
             .entries = .empty,
         };
@@ -83,25 +72,12 @@ pub const StagingRing = struct {
         self.entries.deinit(self.allocator);
     }
 
-    /// Records the GPU buffer that backs the ring's mapping; alloc returns null until set.
-    pub fn resolve(self: *StagingRing, buffer: vk.Buffer) void {
-        std.debug.assert(buffer != .null_handle);
-        self.buffer = buffer;
-    }
-
     /// Allocates a staging slice, or null when the ring is full. The allocation
     /// failure of the entry bookkeeping is reported so callers do not mistake it
     /// for a full ring and spin.
     pub fn alloc(self: *StagingRing, io: std.Io, size: vk.DeviceSize) !?[]u8 {
         const result = try self.allocPair(io, .{ size, 0 });
         return if (result) |pair| pair[0] else null;
-    }
-
-    /// Offset of the oldest live entry from the mapping base. Non-empty only:
-    /// FIFO retirement guarantees entries[0] is the tail while any bytes are live.
-    fn tailOffset(self: *const StagingRing) vk.DeviceSize {
-        std.debug.assert(self.entries.items.len > 0);
-        return @intCast(@intFromPtr(self.entries.items[0].ptr) - @intFromPtr(self.mapping.ptr));
     }
 
     /// Reserves slices for both sizes as one atomic operation: either every nonzero
@@ -113,8 +89,6 @@ pub const StagingRing = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.buffer == null) return null;
-
         var total: vk.DeviceSize = 0;
         for (sizes) |size| total += std.mem.alignForward(vk.DeviceSize, size, transfer_alignment);
         // A pair that cannot fit even in an empty ring would spin forever in the
@@ -123,7 +97,8 @@ pub const StagingRing = struct {
 
         var wraps = false;
         if (self.entries.items.len > 0) {
-            const tail_offset = self.tailOffset();
+            // FIFO retirement guarantees entries[0] is the tail while any bytes are live.
+            const tail_offset: vk.DeviceSize = @intCast(@intFromPtr(self.entries.items[0].ptr) - @intFromPtr(self.mapping.ptr));
             std.debug.assert(tail_offset <= self.mapping.len);
             // Ring occupancy truth table (FIFO: tail is entries[0], head is the bump cursor):
             // | state                                 | live set              | free set                |
@@ -241,22 +216,27 @@ pub const GpuRegionAllocator = struct {
         safe_graphics: u64,
     };
 
-    buffer_slice: []align(buf_align.toByteUnits()) u8,
-    // Atomic so the render thread can size barriers without taking the allocator mutex.
-    buffer: std.atomic.Value(vk.Buffer) = .init(.null_handle),
-    buffer_offset: std.atomic.Value(vk.DeviceSize) = .init(0),
-    used: std.atomic.Value(vk.DeviceSize) = .init(0),
+    /// What the frame thread binds and barriers, read as one snapshot by `binding`.
+    pub const Binding = struct { buffer: vk.Buffer, offset: vk.DeviceSize, used: vk.DeviceSize };
 
-    free_regions: std.ArrayList(Region),
+    buffer_slice: []align(buf_align.toByteUnits()) u8,
+    // Atomic so the frame thread reads them without taking the allocator mutex. `grow`
+    // brackets the buffer swap with odd and even `binding_seq` values (a seqlock).
+    buffer: std.atomic.Value(vk.Buffer),
+    buffer_offset: std.atomic.Value(vk.DeviceSize),
+    used: std.atomic.Value(vk.DeviceSize) = .init(0),
+    binding_seq: std.atomic.Value(u32) = .init(0),
+
+    free_regions: std.ArrayList(Region) = .empty,
     free_list_allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
 
-    pub fn init(free_list_allocator: std.mem.Allocator, gpu_allocator: std.mem.Allocator, capacity_bytes: vk.DeviceSize) !GpuRegionAllocator {
-        const slice = try gpu_allocator.alignedAlloc(u8, buf_align, capacity_bytes);
-
-        return GpuRegionAllocator{
+    /// Takes ownership of `slice`, which `buffer` backs starting at `buffer_offset`.
+    pub fn init(free_list_allocator: std.mem.Allocator, slice: []align(buf_align.toByteUnits()) u8, buffer: vk.Buffer, buffer_offset: vk.DeviceSize) GpuRegionAllocator {
+        return .{
             .buffer_slice = slice,
-            .free_regions = .empty,
+            .buffer = .init(buffer),
+            .buffer_offset = .init(buffer_offset),
             .free_list_allocator = free_list_allocator,
         };
     }
@@ -266,35 +246,38 @@ pub const GpuRegionAllocator = struct {
         gpu_allocator.free(self.buffer_slice);
     }
 
-    /// Records the GPU buffer and base offset that back buffer_slice; allocRegion
-    /// returns null until this is set.
-    pub fn resolve(self: *GpuRegionAllocator, buffer: vk.Buffer, buffer_offset: vk.DeviceSize) void {
-        std.debug.assert(buffer != .null_handle);
-        self.buffer.store(buffer, .release);
-        self.buffer_offset.store(buffer_offset, .release);
-    }
-
     pub fn allocRegion(self: *GpuRegionAllocator, io: std.Io, length: vk.DeviceSize) ?AllocResult {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
         const buffer = self.buffer.load(.monotonic);
-        if (buffer == .null_handle) return null;
         const buffer_offset = self.buffer_offset.load(.monotonic);
 
-        var offset: vk.DeviceSize = undefined;
-        var safe_graphics: u64 = 0;
         if (self.findFreeRegion(length)) |found| {
-            offset = found.offset;
-            safe_graphics = found.safe_graphics;
-        } else {
-            const current_used = self.used.load(.monotonic);
-            const new_used, const overflow = @addWithOverflow(current_used, length);
-            if (overflow != 0 or new_used > self.buffer_slice.len) return null;
-            offset = current_used;
-            self.used.store(new_used, .monotonic);
+            return .{ .offset = found.offset, .buffer = buffer, .buffer_offset = buffer_offset, .safe_graphics = found.safe_graphics };
         }
-        return .{ .offset = offset, .buffer = buffer, .buffer_offset = buffer_offset, .safe_graphics = safe_graphics };
+        const current_used = self.used.load(.monotonic);
+        const new_used, const overflow = @addWithOverflow(current_used, length);
+        if (overflow != 0 or new_used > self.buffer_slice.len) return null;
+        // Release pairs with `binding`: a reader that sees a size grown into a new
+        // buffer also sees that grow's `binding_seq` change and retries.
+        self.used.store(new_used, .release);
+        return .{ .offset = current_used, .buffer = buffer, .buffer_offset = buffer_offset, .safe_graphics = 0 };
+    }
+
+    /// A consistent buffer, offset, and used size. Lock-free so the frame thread never
+    /// waits on allocation; it retries only while a grow is swapping the buffer.
+    pub fn binding(self: *const GpuRegionAllocator) Binding {
+        while (true) {
+            const seq = self.binding_seq.load(.acquire);
+            const result: Binding = .{
+                .buffer = self.buffer.load(.acquire),
+                .offset = self.buffer_offset.load(.acquire),
+                .used = self.used.load(.acquire),
+            };
+            if (seq % 2 == 0 and self.binding_seq.load(.monotonic) == seq) return result;
+            std.atomic.spinLoopHint();
+        }
     }
 
     fn overlaps(offset: vk.DeviceSize, length: vk.DeviceSize, region: Region) bool {
@@ -370,9 +353,10 @@ pub const GpuRegionAllocator = struct {
         return std.math.mul(vk.DeviceSize, self.buffer_slice.len, 2) catch error.OutOfMemory;
     }
 
-    /// Swaps in `new_slice`, which the caller allocates outside its locks because
-    /// device allocation is slow. Returns null when the buffer already reached that size.
-    pub fn grow(self: *GpuRegionAllocator, io: std.Io, new_slice: []align(buf_align.toByteUnits()) u8) ?GrowInfo {
+    /// Swaps in `new_slice`, backed by `buffer` at `buffer_offset`, which the caller allocates
+    /// outside its locks because device allocation is slow. Returns null when the buffer
+    /// already reached that size.
+    pub fn grow(self: *GpuRegionAllocator, io: std.Io, new_slice: []align(buf_align.toByteUnits()) u8, buffer: vk.Buffer, buffer_offset: vk.DeviceSize) ?GrowInfo {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
@@ -391,10 +375,12 @@ pub const GpuRegionAllocator = struct {
 
         self.buffer_slice = new_slice;
         // Freed regions stay reusable: the caller copies [0, used) into the new buffer,
-        // so their offsets remain valid. buffer is nulled until resolve() pairs it
-        // with the new handle — allocRegion returns null in the interim.
-        self.buffer.store(.null_handle, .release);
-        self.buffer_offset.store(0, .release);
+        // so their offsets remain valid.
+        const seq = self.binding_seq.load(.monotonic);
+        self.binding_seq.store(seq +% 1, .monotonic);
+        self.buffer_offset.store(buffer_offset, .release);
+        self.buffer.store(buffer, .release);
+        self.binding_seq.store(seq +% 2, .release);
 
         log.info("grew to {d} MB", .{self.buffer_slice.len / (1024 * 1024)});
 
@@ -405,23 +391,25 @@ pub const GpuRegionAllocator = struct {
 const reservoir_size = 512;
 
 pub const CommandPoolReservoir = struct {
-    pools: [reservoir_size]vk.CommandPool = @splat(@as(vk.CommandPool, .null_handle)),
+    pools: [reservoir_size]vk.CommandPool = undefined,
     cmds: [reservoir_size]vk.CommandBuffer = undefined,
     used: [reservoir_size]std.atomic.Value(bool) = @splat(std.atomic.Value(bool).init(false)),
+    /// Number of created pools; only `pools[0..count]` are valid.
     count: usize = 0,
 
     pub const Borrowed = struct { pool: vk.CommandPool, cmd: vk.CommandBuffer };
 
-    pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, init_count: usize, vkalloc: *const vk.AllocationCallbacks) !void {
-        self.count = init_count;
-        for (self.pools[0..init_count], self.cmds[0..init_count]) |*pool, *cmd| {
+    pub fn init(self: *CommandPoolReservoir, dev: DeviceProxy, queue_family: u32, vkalloc: *const vk.AllocationCallbacks) !void {
+        errdefer self.deinit(dev, vkalloc);
+        for (&self.pools, &self.cmds) |*pool, *cmd| {
             pool.* = try dev.createCommandPool(&.{ .flags = .{ .reset_command_buffer = true }, .queue_family_index = queue_family }, vkalloc);
+            self.count += 1;
             try dev.allocateCommandBuffers(&.{ .command_pool = pool.*, .level = .primary, .command_buffer_count = 1 }, (&cmd.*)[0..1]);
         }
     }
 
     pub fn deinit(self: *CommandPoolReservoir, dev: DeviceProxy, vkalloc: *const vk.AllocationCallbacks) void {
-        for (self.pools[0..self.count]) |pool| if (pool != .null_handle) dev.destroyCommandPool(pool, vkalloc);
+        for (self.pools[0..self.count]) |pool| dev.destroyCommandPool(pool, vkalloc);
     }
 
     pub fn tryBorrowPool(self: *CommandPoolReservoir) ?Borrowed {
@@ -515,31 +503,10 @@ pub const UploadResult = struct {
     safe_graphics: u64,
 };
 
-const TransferState = struct {
-    queue: vk.Queue = undefined,
-    queue_family_index: u32 = undefined,
-    semaphore: vk.Semaphore = .null_handle,
-    graphics_timeline_semaphore: vk.Semaphore = .null_handle,
-};
-
 const RetiredFaceBuffer = struct {
     slice: []align(256) u8,
     graphics_timeline_value: u64,
 };
-
-/// Frees entries whose graphics timeline has passed, scanning from the tail so
-/// `swapRemove` never revisits a moved element. Callers hold the list's mutex.
-fn sweepRetired(alloc: std.mem.Allocator, items: anytype, frontier: u64) void {
-    var i: usize = items.items.len;
-    while (i > 0) {
-        i -= 1;
-        const entry = items.items[i];
-        if (frontier >= entry.graphics_timeline_value) {
-            alloc.free(entry.slice);
-            _ = items.swapRemove(i);
-        }
-    }
-}
 
 /// Waits for a timeline semaphore to reach `value`, or times out. Returns the raw
 /// Vulkan wait result so callers can distinguish completion from a stall.
@@ -564,13 +531,8 @@ pub const MeshUploader = struct {
     staging_ring: StagingRing,
     region_allocator: GpuRegionAllocator,
     pool_reservoir: CommandPoolReservoir = .{},
-    retired_face_buffers: std.ArrayList(RetiredFaceBuffer) = undefined,
+    retired_face_buffers: std.ArrayList(RetiredFaceBuffer) = .empty,
     retired_face_buffers_mutex: std.Io.Mutex = .init,
-    transfer: TransferState = .{},
-    /// True when transfer and graphics queues share a physical queue family; their
-    /// submits then share the graphics queue mutex. On a distinct transfer family the
-    /// transfer pipeline locks only against itself.
-    shared_queue: bool,
 
     /// Serializes the resource acquisition phase of an upload. Every holder of a
     /// pool, staging slice, or region outside this section is a fully provisioned
@@ -588,7 +550,7 @@ pub const MeshUploader = struct {
         vk_ctx: *VulkanContext,
         memory: *GpuMemory,
         single_time: *core.SingleTime,
-        initial_region_bytes: vk.DeviceSize,
+        initial_face_bytes: vk.DeviceSize,
         initial_staging_bytes: vk.DeviceSize,
     ) !MeshUploader {
         var self: MeshUploader = .{
@@ -597,31 +559,19 @@ pub const MeshUploader = struct {
             .dev = vk_ctx.dev,
             .memory = memory,
             .single_time = single_time,
-            .shared_queue = vk_ctx.transfer_queue_family_index == vk_ctx.queue_family_index,
             .staging_ring = undefined,
             .region_allocator = undefined,
-            .retired_face_buffers = .empty,
-        };
-        self.transfer = .{
-            .queue_family_index = vk_ctx.transfer_queue_family_index,
-            .queue = vk_ctx.transfer_queue,
-            .semaphore = vk_ctx.transfer_semaphore,
-            .graphics_timeline_semaphore = vk_ctx.graphics_timeline_semaphore,
         };
 
-        self.region_allocator = try GpuRegionAllocator.init(allocator, memory.gpuOnly(), initial_region_bytes);
+        const face_slice = try memory.gpuOnly().alignedAlloc(u8, buf_align, initial_face_bytes);
+        const face_buf_info = memory.backing_allocator.getBufferAndOffset(.gpu_only, face_slice.ptr);
+        self.region_allocator = .init(allocator, face_slice, face_buf_info.buffer, face_buf_info.offset);
         errdefer self.region_allocator.deinit(memory.gpuOnly());
-        const face_buf_info = memory.backing_allocator.getBufferAndOffset(.gpu_only, self.region_allocator.buffer_slice.ptr);
-        self.region_allocator.resolve(face_buf_info.buffer, face_buf_info.offset);
 
         self.staging_ring = try StagingRing.init(allocator, memory.cpuToGpu(), initial_staging_bytes);
         errdefer self.staging_ring.deinit(memory.cpuToGpu());
-        const staging_info = memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, self.staging_ring.mapping.ptr);
-        self.staging_ring.resolve(staging_info.buffer);
 
-        try self.pool_reservoir.init(self.dev, self.transfer.queue_family_index, 512, &vk_ctx.vkalloc);
-        errdefer self.pool_reservoir.deinit(self.dev, &vk_ctx.vkalloc);
-
+        try self.pool_reservoir.init(self.dev, vk_ctx.transfer_queue_family_index, &vk_ctx.vkalloc);
         return self;
     }
 
@@ -720,10 +670,10 @@ pub const MeshUploader = struct {
     fn waitForTransferCompletion(self: *MeshUploader, io: std.Io) !void {
         try io.checkCancel();
         const last_submitted = self.vk_ctx.transfer_semaphore_value.load(.monotonic);
-        const completed = try self.dev.getSemaphoreCounterValue(self.transfer.semaphore);
+        const completed = try self.dev.getSemaphoreCounterValue(self.vk_ctx.transfer_semaphore);
         if (completed >= last_submitted) return;
         const wait_value = completed + 1;
-        const result = try waitTimelineValue(self.dev, self.transfer.semaphore, wait_value, transfer_wait_timeout_ns);
+        const result = try waitTimelineValue(self.dev, self.vk_ctx.transfer_semaphore, wait_value, transfer_wait_timeout_ns);
         if (result != .success) self.logTransferStall(io, wait_value, completed, last_submitted);
     }
 
@@ -760,11 +710,17 @@ pub const MeshUploader = struct {
         self.staging_ring.bind(io, slice, timeline_value);
     }
 
+    /// True when transfer and graphics queues share a physical queue family; their
+    /// submits then share the graphics queue mutex.
+    fn sharedQueue(self: *const MeshUploader) bool {
+        return self.vk_ctx.transfer_queue_family_index == self.vk_ctx.queue_family_index;
+    }
+
     /// The mutex guarding transfer-queue submits. On a distinct transfer family it is
     /// the dedicated transfer mutex so submits do not queue behind graphics/present;
     /// on a shared family the queue mutex must serialize both queues' vkQueueSubmit.
     fn transferLock(self: *MeshUploader) *std.Io.Mutex {
-        return if (self.shared_queue) &self.vk_ctx.queue_mutex else &self.vk_ctx.transfer_queue_mutex;
+        return if (self.sharedQueue()) &self.vk_ctx.queue_mutex else &self.vk_ctx.transfer_queue_mutex;
     }
 
     fn allocRegion(self: *MeshUploader, io: std.Io, buffer_size: vk.DeviceSize) !GpuRegionAllocator.AllocResult {
@@ -782,15 +738,15 @@ pub const MeshUploader = struct {
             // Drain the GPU before swapping the buffer, without holding the queue mutex
             // (the render thread needs it to advance the graphics timeline). Concurrent
             // growers may both drain; the retry after locking makes the double-drain benign.
-            try self.drainInFlightFrames();
+            try self.vk_ctx.waitSubmittedFrames();
 
             const transfer_done_val = self.vk_ctx.transfer_semaphore_value.load(.acquire);
-            if (transfer_done_val > 0) _ = try waitTimelineValue(self.dev, self.transfer.semaphore, transfer_done_val, std.math.maxInt(u64));
+            if (transfer_done_val > 0) _ = try waitTimelineValue(self.dev, self.vk_ctx.transfer_semaphore, transfer_done_val, std.math.maxInt(u64));
 
             // Exclude concurrent transfer submits across the buffer swap and copy: a
             // submit referencing the old buffer must not race the graphics-side copy.
             // Lock order is always transfer then graphics, so no path can deadlock.
-            const exclusive_transfer = !self.shared_queue;
+            const exclusive_transfer = !self.sharedQueue();
             if (exclusive_transfer) self.vk_ctx.transfer_queue_mutex.lockUncancelable(io);
             defer if (exclusive_transfer) self.vk_ctx.transfer_queue_mutex.unlock(io);
 
@@ -801,20 +757,18 @@ pub const MeshUploader = struct {
             if (self.region_allocator.allocRegion(io, buffer_size)) |result| return result;
 
             std.log.info("growing face data buffer...", .{});
-            const grow_info = self.region_allocator.grow(io, new_slice) orelse continue;
+            const face_buf_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, new_slice.ptr);
+            const grow_info = self.region_allocator.grow(io, new_slice, face_buf_info.buffer, face_buf_info.offset) orelse continue;
             unused_slice = null;
-
-            const face_buf_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, self.region_allocator.buffer_slice.ptr);
-            self.region_allocator.resolve(face_buf_info.buffer, face_buf_info.offset);
 
             const cmd = try self.single_time.begin();
             self.dev.cmdCopyBuffer2(cmd, &.{
                 .src_buffer = grow_info.old_buffer,
-                .dst_buffer = self.region_allocator.buffer.load(.monotonic),
+                .dst_buffer = face_buf_info.buffer,
                 .region_count = 1,
                 .p_regions = (&vk.BufferCopy2{
                     .src_offset = grow_info.old_buffer_offset,
-                    .dst_offset = self.region_allocator.buffer_offset.load(.monotonic),
+                    .dst_offset = face_buf_info.offset,
                     .size = grow_info.old_used,
                 })[0..1],
             });
@@ -871,7 +825,7 @@ pub const MeshUploader = struct {
             .flags = .{},
             .wait_semaphore_info_count = 1,
             .p_wait_semaphore_infos = (&vk.SemaphoreSubmitInfo{
-                .semaphore = self.transfer.graphics_timeline_semaphore,
+                .semaphore = self.vk_ctx.graphics_timeline_semaphore,
                 .value = wait_graphics_value,
                 .stage_mask = .{ .all_transfer = true },
                 .device_index = 0,
@@ -880,21 +834,17 @@ pub const MeshUploader = struct {
             .p_command_buffer_infos = cb_submit_infos[0..count].ptr,
             .signal_semaphore_info_count = 1,
             .p_signal_semaphore_infos = (&vk.SemaphoreSubmitInfo{
-                .semaphore = self.transfer.semaphore,
+                .semaphore = self.vk_ctx.transfer_semaphore,
                 .value = next_val,
                 .stage_mask = .{ .all_transfer = true },
                 .device_index = 0,
             })[0..1],
         };
 
-        try self.dev.queueSubmit2(self.transfer.queue, (&submit_info)[0..1], .null_handle);
+        try self.dev.queueSubmit2(self.vk_ctx.transfer_queue, (&submit_info)[0..1], .null_handle);
         self.vk_ctx.transfer_semaphore_value.store(next_val, .monotonic);
 
         return next_val;
-    }
-
-    pub fn drainInFlightFrames(self: *MeshUploader) !void {
-        try self.vk_ctx.waitSubmittedFrames();
     }
 
     pub fn retireStaging(self: *MeshUploader, io: std.Io, current_transfer_val: u64) void {
@@ -906,27 +856,39 @@ pub const MeshUploader = struct {
         // and must not stall frame submission.
         self.retired_face_buffers_mutex.lockUncancelable(io);
         defer self.retired_face_buffers_mutex.unlock(io);
-        sweepRetired(self.memory.gpuOnly(), &self.retired_face_buffers, current_graphics_val);
+        // Scans from the tail so `swapRemove` never revisits a moved element.
+        const items = &self.retired_face_buffers;
+        var i: usize = items.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = items.items[i];
+            if (current_graphics_val >= entry.graphics_timeline_value) {
+                self.memory.gpuOnly().free(entry.slice);
+                _ = items.swapRemove(i);
+            }
+        }
+    }
+
+    /// The frame thread snapshots this once per frame so every barrier and bind of the
+    /// frame agrees on the face buffer, even if a concurrent grow swaps it mid-frame.
+    pub fn faceBinding(self: *MeshUploader) GpuRegionAllocator.Binding {
+        return self.region_allocator.binding();
     }
 
     fn faceBufferBarrier(
         self: *MeshUploader,
         cmd_buffer: vk.CommandBuffer,
+        binding: GpuRegionAllocator.Binding,
         src_stage: vk.PipelineStageFlags2,
         src_access: vk.AccessFlags2,
         dst_stage: vk.PipelineStageFlags2,
         dst_access: vk.AccessFlags2,
     ) void {
-        const used = self.region_allocator.used.load(.monotonic);
-        if (used == 0) return;
-        // The buffer is momentarily null while allocRegion grows it; the per-frame
-        // transfer semaphore wait already covers the cross-queue sync in that window.
-        const buffer = self.region_allocator.buffer.load(.acquire);
-        if (buffer == .null_handle) return;
+        if (binding.used == 0) return;
         core.pipelineBarrier(cmd_buffer, self.dev, vk.BufferMemoryBarrier2, (&core.makeBufferBarrier2(
-            buffer,
-            self.region_allocator.buffer_offset.load(.monotonic),
-            used,
+            binding.buffer,
+            binding.offset,
+            binding.used,
             src_stage,
             src_access,
             dst_stage,
@@ -936,14 +898,14 @@ pub const MeshUploader = struct {
 
     /// Acquire side of the cross-queue memory dependency: makes the upload batch's
     /// transfer writes to the face buffer visible to this frame's vertex reads.
-    pub fn cmdAcquireFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer) void {
-        self.faceBufferBarrier(cmd_buffer, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .vertex_attribute_input = true }, .{ .vertex_attribute_read = true });
+    pub fn cmdAcquireFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer, binding: GpuRegionAllocator.Binding) void {
+        self.faceBufferBarrier(cmd_buffer, binding, .{ .all_transfer = true }, .{ .transfer_write = true }, .{ .vertex_attribute_input = true }, .{ .vertex_attribute_read = true });
     }
 
     /// Release side: makes this frame's vertex reads available before the next upload
     /// batch writes the same regions on the transfer queue.
-    pub fn cmdReleaseFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer) void {
-        self.faceBufferBarrier(cmd_buffer, .{ .vertex_attribute_input = true }, .{ .vertex_attribute_read = true }, .{ .all_transfer = true }, .{});
+    pub fn cmdReleaseFaceBuffer(self: *MeshUploader, cmd_buffer: vk.CommandBuffer, binding: GpuRegionAllocator.Binding) void {
+        self.faceBufferBarrier(cmd_buffer, binding, .{ .vertex_attribute_input = true }, .{ .vertex_attribute_read = true }, .{ .all_transfer = true }, .{});
     }
 
     const face_vertex_binding: vk.VertexInputBindingDescription = .{ .binding = 0, .stride = face_stride, .input_rate = .instance };
@@ -1074,61 +1036,42 @@ pub const shadow_slot_base: u32 = draw_type_count;
 
 const PersistentCandidates = struct {
     buffer: vk.Buffer = .null_handle,
-    mapped: [*]MeshCandidate = undefined,
     offset: vk.DeviceSize = 0,
     slice: []MeshCandidate = &.{},
 };
 
-const RetiredCandidateSlice = struct {
-    slice: []MeshCandidate,
-    graphics_timeline_value: u64,
-};
+const FrameSlices = struct {
+    mesh_data: []MeshData = &.{},
+    indirect_draw: []vk.DrawIndirectCommand = &.{},
+    count: []align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
+    stats: []align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
 
-/// Old visibility buffer kept alive after a candidate-buffer growth until the render
-/// thread is done reading the current `visibility_slice`; the render thread and worker
-/// growth paths are unsynchronized, so freeing here would leave a use-after-free window.
-const RetiredVisibilitySlice = struct {
-    slice: []align(cull_buffer_alignment.toByteUnits()) u32,
-    graphics_timeline_value: u64,
+    fn free(self: FrameSlices, memory: *GpuMemory) void {
+        memory.cpuToGpu().free(self.mesh_data);
+        memory.cpuToGpu().free(self.indirect_draw);
+        memory.gpuOnly().free(self.count);
+        memory.cpuToGpu().free(self.stats);
+    }
 };
 
 const PerFrameData = struct {
+    slices: FrameSlices = .{},
     indirect_draw: vk.Buffer = .null_handle,
-    indirect_draw_mapped: ?[*]vk.DrawIndirectCommand = null,
     indirect_draw_offset: vk.DeviceSize = 0,
     mesh_data: vk.Buffer = .null_handle,
-    mesh_data_mapped: ?[*]MeshData = null,
     mesh_data_offset: vk.DeviceSize = 0,
     count: vk.Buffer = .null_handle,
-    count_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
     count_offset: vk.DeviceSize = 0,
     stats: vk.Buffer = .null_handle,
-    stats_mapped: ?[*]align(cull_buffer_alignment.toByteUnits()) CullCount = null,
     stats_offset: vk.DeviceSize = 0,
-    stats_slice: []align(cull_buffer_alignment.toByteUnits()) CullCount = &.{},
     /// Player position pushed to the cull shader that wrote this slot's stats buffer.
     /// `getSceneAABB` adds it back to the player-relative reduction result.
     last_cull_player_pos: @Vector(3, f64) = @splat(0),
 };
 
-const PerFrameBuffers = struct {
-    items: []PerFrameData = &.{},
-
-    fn deinit(self: *PerFrameBuffers, allocator: std.mem.Allocator, cpu_to_gpu_gpa: std.mem.Allocator, gpu_only_gpa: std.mem.Allocator, draw_capacity: u32) void {
-        for (self.items) |*item| {
-            if (item.indirect_draw_mapped) |mapped| cpu_to_gpu_gpa.free(mapped[0 .. draw_capacity * slot_count]);
-            if (item.mesh_data_mapped) |mapped| cpu_to_gpu_gpa.free(mapped[0 .. draw_capacity * slot_count]);
-            if (item.count_slice.len > 0) gpu_only_gpa.free(item.count_slice);
-            if (item.stats_slice.len > 0) cpu_to_gpu_gpa.free(item.stats_slice);
-        }
-        allocator.free(self.items);
-        // Reset so a failed swapchain recreation cannot leave a dangling slice behind.
-        self.items = &.{};
-    }
-};
-
 /// GPU-driven indirect-draw scene: persistent candidate slots, per-frame indirect/
 /// mesh-data/count/stats buffers, and the frustum culling dispatch that fills them.
+/// Only the frame thread touches it, between beginFrame and the first recorded cull.
 pub const IndirectScene = struct {
     vk_ctx: *VulkanContext,
     allocator: std.mem.Allocator,
@@ -1137,18 +1080,14 @@ pub const IndirectScene = struct {
 
     persistent: PersistentCandidates = .{},
     index_pool: IndexPool = undefined,
-    max_allocated_index: std.atomic.Value(u32) = .init(0),
-    /// Guards both retirement lists: the drain task sweeps while the frame thread appends.
-    retired_slices_mutex: std.Io.Mutex = .init,
-    retired_candidate_slices: std.ArrayList(RetiredCandidateSlice) = .empty,
-    retired_visibility_slices: std.ArrayList(RetiredVisibilitySlice) = .empty,
-    frame_buffers: PerFrameBuffers = .{},
+    /// One past the highest slot that may hold a live candidate.
+    max_allocated_index: u32 = 0,
+    frame_buffers: []PerFrameData = &.{},
     /// Bumped whenever the candidate buffer or per-frame buffers are reallocated;
     /// consumers that bind these buffers (e.g. the cull dispatch) re-bind on change.
     buffers_version: u32 = 0,
 
-    draw_capacity: u32 = 4096,
-    max_draw_indirect_count: u32 = fallback_max_draw_indirect_count,
+    draw_capacity: u32,
 
     /// One u32 per candidate slot: nonzero when the mesh passed last frame's late cull.
     /// Written by the late cull, read by the early cull; wrong bits only cost perf
@@ -1158,7 +1097,7 @@ pub const IndirectScene = struct {
     visibility_slice: []align(cull_buffer_alignment.toByteUnits()) u32 = &.{},
     /// True when the visibility buffer holds garbage (fresh or regrown); the next
     /// recorded frame zero-fills it before the early cull reads it.
-    visibility_needs_clear: std.atomic.Value(bool) = .init(true),
+    visibility_needs_clear: bool = true,
 
     mesh_data_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
     mesh_data_descriptor_pool: vk.DescriptorPool = .null_handle,
@@ -1170,20 +1109,14 @@ pub const IndirectScene = struct {
             .allocator = allocator,
             .dev = vk_ctx.dev,
             .memory = memory,
+            .draw_capacity = initial_draw_capacity,
         };
-
-        self.max_draw_indirect_count = if (vk_ctx.props.limits.max_draw_indirect_count > 0)
-            vk_ctx.props.limits.max_draw_indirect_count
-        else
-            fallback_max_draw_indirect_count;
-        self.draw_capacity = initial_draw_capacity;
 
         const persistent_candidates_slice = try memory.cpuToGpu().alloc(MeshCandidate, initial_candidates);
         errdefer memory.cpuToGpu().free(persistent_candidates_slice);
         @memset(persistent_candidates_slice, MeshCandidate.zeroed());
         const cand_info = memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, persistent_candidates_slice.ptr);
         self.persistent.buffer = cand_info.buffer;
-        self.persistent.mapped = persistent_candidates_slice.ptr;
         self.persistent.offset = cand_info.offset;
         self.persistent.slice = persistent_candidates_slice;
 
@@ -1197,50 +1130,42 @@ pub const IndirectScene = struct {
         self.index_pool = try IndexPool.init(allocator, initial_candidates);
         errdefer self.index_pool.deinit(allocator);
 
-        self.frame_buffers.items = try allocator.alloc(PerFrameData, VulkanContext.max_frames_in_flight);
-        @memset(self.frame_buffers.items, .{});
-        errdefer self.frame_buffers.deinit(allocator, memory.cpuToGpu(), memory.gpuOnly(), self.draw_capacity);
-        for (self.frame_buffers.items) |*frame| try self.allocateIndirectBuffers(frame);
+        self.frame_buffers = try allocator.alloc(PerFrameData, VulkanContext.max_frames_in_flight);
+        @memset(self.frame_buffers, .{});
+        errdefer self.freeFrameBuffers();
+        for (self.frame_buffers) |*frame| self.fillFrameData(frame, try self.allocFrameSlices(self.draw_capacity));
 
         try self.createMeshDataDescriptorResources();
         errdefer self.destroyMeshDataDescriptorResources();
     }
 
+    fn freeFrameBuffers(self: *IndirectScene) void {
+        for (self.frame_buffers) |frame| frame.slices.free(self.memory);
+        self.allocator.free(self.frame_buffers);
+    }
+
     pub fn deinit(self: *IndirectScene) void {
-        self.frame_buffers.deinit(self.allocator, self.memory.cpuToGpu(), self.memory.gpuOnly(), self.draw_capacity);
+        self.freeFrameBuffers();
 
         self.destroyMeshDataDescriptorResources();
         core.destroyIfValid(self.dev, &self.mesh_data_descriptor_set_layout, &self.vk_ctx.vkalloc);
 
-        for (self.retired_candidate_slices.items) |entry| self.memory.cpuToGpu().free(entry.slice);
-        self.retired_candidate_slices.deinit(self.allocator);
-        for (self.retired_visibility_slices.items) |entry| self.memory.gpuOnly().free(entry.slice);
-        self.retired_visibility_slices.deinit(self.allocator);
         self.index_pool.deinit(self.allocator);
         self.memory.gpuOnly().free(self.visibility_slice);
         self.memory.cpuToGpu().free(self.persistent.slice);
     }
 
-    pub fn allocIndex(self: *IndirectScene, io: std.Io) !u32 {
-        while (true) {
-            if (self.index_pool.allocIndex(io)) |idx| return idx;
-            try self.growPersistentCandidates(io);
-        }
-    }
-
-    pub fn updateMaxAllocatedIndex(self: *IndirectScene, gpu_idx: u32) void {
-        var current_max = self.max_allocated_index.load(.monotonic);
-        while (gpu_idx >= current_max) {
-            if (self.max_allocated_index.cmpxchgStrong(current_max, gpu_idx + 1, .release, .monotonic)) |actual_val| {
-                current_max = actual_val;
-                continue;
-            }
-            break;
-        }
+    pub fn allocIndex(self: *IndirectScene) !u32 {
+        const index = while (true) {
+            if (self.index_pool.allocIndex()) |idx| break idx;
+            try self.growPersistentCandidates();
+        };
+        self.max_allocated_index = @max(self.max_allocated_index, index + 1);
+        return index;
     }
 
     pub fn writeCandidate(self: *IndirectScene, gpu_index: u32, mesh: MeshBuffer, is_transparent: bool, transform: CandidateTransform) void {
-        self.persistent.mapped[gpu_index] = .{
+        self.persistent.slice[gpu_index] = .{
             .absolute_position = transform.absolute_position,
             .scale = transform.scale,
             .face_count = mesh.face_count,
@@ -1251,12 +1176,12 @@ pub const IndirectScene = struct {
 
     /// Deactivates a slot without freeing its index (retirement happens later).
     pub fn markInactive(self: *IndirectScene, gpu_index: u32) void {
-        self.persistent.mapped[gpu_index].face_count = 0;
+        self.persistent.slice[gpu_index].face_count = 0;
     }
 
-    pub fn releaseCandidate(self: *IndirectScene, io: std.Io, gpu_index: u32) void {
-        self.persistent.mapped[gpu_index].face_count = 0;
-        self.index_pool.freeIndex(io, gpu_index);
+    pub fn releaseCandidate(self: *IndirectScene, gpu_index: u32) void {
+        self.persistent.slice[gpu_index].face_count = 0;
+        self.index_pool.freeIndex(gpu_index);
         self.tryShrinkMaxAllocatedIndex(gpu_index);
     }
 
@@ -1266,9 +1191,8 @@ pub const IndirectScene = struct {
     /// them). The value lags one frame: the CPU needs it before this frame's cull runs,
     /// so it reflects the last dispatch that wrote this frame slot's stats buffer.
     pub fn getSceneAABB(self: *IndirectScene, current_frame: u32) struct { min: [3]f64, max: [3]f64 } {
-        const frame = &self.frame_buffers.items[current_frame];
-        const counts = frame.stats_mapped orelse return .{ .min = .{ 0, 0, 0 }, .max = .{ 0, 0, 0 } };
-        const stats = counts[0];
+        const frame = &self.frame_buffers[current_frame];
+        const stats = frame.slices.stats[0];
         const pos = frame.last_cull_player_pos;
         const pos_arr: [3]f64 = @bitCast(pos);
         var min: [3]f64 = undefined;
@@ -1288,13 +1212,6 @@ pub const IndirectScene = struct {
         if (total_candidates > self.draw_capacity) try self.growDrawCapacity(total_candidates);
     }
 
-    pub fn processRetired(self: *IndirectScene, io: std.Io, current_graphics_val: u64) void {
-        self.retired_slices_mutex.lockUncancelable(io);
-        defer self.retired_slices_mutex.unlock(io);
-        sweepRetired(self.memory.cpuToGpu(), &self.retired_candidate_slices, current_graphics_val);
-        sweepRetired(self.memory.gpuOnly(), &self.retired_visibility_slices, current_graphics_val);
-    }
-
     fn fillFrameData(self: *IndirectScene, frame: *PerFrameData, slices: FrameSlices) void {
         slices.stats[0] = CullCount.zeroed();
 
@@ -1304,28 +1221,17 @@ pub const IndirectScene = struct {
         const stats_info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, slices.stats.ptr);
 
         frame.* = .{
+            .slices = slices,
             .mesh_data = mesh_data_info.buffer,
-            .mesh_data_mapped = slices.mesh_data.ptr,
             .mesh_data_offset = mesh_data_info.offset,
             .indirect_draw = indirect_draw_info.buffer,
-            .indirect_draw_mapped = slices.indirect_draw.ptr,
             .indirect_draw_offset = indirect_draw_info.offset,
             .count = count_info.buffer,
-            .count_slice = slices.count,
             .count_offset = count_info.offset,
             .stats = stats_info.buffer,
-            .stats_mapped = slices.stats.ptr,
-            .stats_slice = slices.stats,
             .stats_offset = stats_info.offset,
         };
     }
-
-    const FrameSlices = struct {
-        mesh_data: []MeshData,
-        indirect_draw: []vk.DrawIndirectCommand,
-        count: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-        stats: []align(cull_buffer_alignment.toByteUnits()) CullCount,
-    };
 
     fn allocFrameSlices(self: *IndirectScene, capacity: u32) !FrameSlices {
         const mesh_data = try self.memory.cpuToGpu().alloc(MeshData, capacity * slot_count);
@@ -1338,10 +1244,6 @@ pub const IndirectScene = struct {
         return .{ .mesh_data = mesh_data, .indirect_draw = indirect_draw, .count = count, .stats = stats };
     }
 
-    fn allocateIndirectBuffers(self: *IndirectScene, frame: *PerFrameData) !void {
-        self.fillFrameData(frame, try self.allocFrameSlices(self.draw_capacity));
-    }
-
     /// Doubles the draw capacity until it covers `min_capacity`, failing when the device's
     /// indirect-draw limit cannot hold the result.
     fn nextDrawCapacity(self: *IndirectScene, min_capacity: u32) !u32 {
@@ -1351,8 +1253,10 @@ pub const IndirectScene = struct {
         }
         // TODO: handle scenes that outgrow the device's max indirect count instead of
         // panicking (e.g. splitting the draw into multiple dispatches).
-        if (new_capacity > self.max_draw_indirect_count) {
-            std.log.err("IndirectScene: draw capacity {d} exceeds device max indirect count {d}. Cannot continue rendering.", .{ new_capacity, self.max_draw_indirect_count });
+        const device_max = self.vk_ctx.props.limits.max_draw_indirect_count;
+        const max_count = if (device_max > 0) device_max else fallback_max_draw_indirect_count;
+        if (new_capacity > max_count) {
+            std.log.err("IndirectScene: draw capacity {d} exceeds device max indirect count {d}. Cannot continue rendering.", .{ new_capacity, max_count });
             return error.MaxDrawCapacityExceeded;
         }
         return new_capacity;
@@ -1372,119 +1276,76 @@ pub const IndirectScene = struct {
         // out the transfer backlog while holding the queue locks uploads submit under.
         try self.vk_ctx.waitSubmittedFrames();
 
-        const old_draw_capacity = self.draw_capacity;
-        const num_frames = self.frame_buffers.items.len;
-
-        const new_frames = try self.allocator.alloc(FrameSlices, num_frames);
+        const new_frames = try self.allocator.alloc(FrameSlices, self.frame_buffers.len);
         defer self.allocator.free(new_frames);
 
         var allocated_frames: usize = 0;
-        errdefer {
-            for (new_frames[0..allocated_frames]) |slices| {
-                self.memory.cpuToGpu().free(slices.mesh_data);
-                self.memory.cpuToGpu().free(slices.indirect_draw);
-                self.memory.gpuOnly().free(slices.count);
-                self.memory.cpuToGpu().free(slices.stats);
-            }
-        }
+        errdefer for (new_frames[0..allocated_frames]) |slices| slices.free(self.memory);
         for (new_frames) |*dst| {
             dst.* = try self.allocFrameSlices(new_capacity);
             allocated_frames += 1;
         }
 
-        for (self.frame_buffers.items, new_frames) |*frame, new_slices| {
-            const old_mesh = frame.mesh_data_mapped.?;
-            const old_ind = frame.indirect_draw_mapped.?;
-            const old_count = frame.count_slice;
-            const old_stats = frame.stats_slice;
-
-            if (old_draw_capacity > 0) {
-                @memcpy(new_slices.mesh_data[0 .. old_draw_capacity * slot_count], old_mesh[0 .. old_draw_capacity * slot_count]);
-                @memcpy(new_slices.indirect_draw[0 .. old_draw_capacity * slot_count], old_ind[0 .. old_draw_capacity * slot_count]);
-            }
-
+        for (self.frame_buffers, new_frames) |*frame, new_slices| {
+            const old = frame.slices;
+            @memcpy(new_slices.mesh_data[0..old.mesh_data.len], old.mesh_data);
+            @memcpy(new_slices.indirect_draw[0..old.indirect_draw.len], old.indirect_draw);
             self.fillFrameData(frame, new_slices);
-
-            self.memory.cpuToGpu().free(old_mesh[0 .. old_draw_capacity * slot_count]);
-            self.memory.cpuToGpu().free(old_ind[0 .. old_draw_capacity * slot_count]);
-            self.memory.gpuOnly().free(old_count);
-            self.memory.cpuToGpu().free(old_stats);
+            old.free(self.memory);
         }
 
         self.draw_capacity = new_capacity;
         self.buffers_version += 1;
 
-        for (0..num_frames) |i| self.updateMeshDataDescriptorSet(@intCast(i));
+        for (0..self.frame_buffers.len) |i| self.updateMeshDataDescriptorSet(@intCast(i));
     }
 
-    fn growPersistentCandidates(self: *IndirectScene, io: std.Io) !void {
+    fn growPersistentCandidates(self: *IndirectScene) !void {
         const zone = tracy.Zone.begin(.{ .src = @src(), .name = "growPersistentCandidates" });
         defer zone.end();
 
-        const old_capacity = self.persistent.slice.len;
-        const new_capacity = old_capacity * 2;
-        std.log.info("IndirectScene: Growing persistent GPU scene candidates from {d} to {d}...", .{ old_capacity, new_capacity });
+        const old_slice = self.persistent.slice;
+        const new_capacity = old_slice.len * 2;
+        std.log.info("IndirectScene: Growing persistent GPU scene candidates from {d} to {d}...", .{ old_slice.len, new_capacity });
 
-        // Only graphics frames read the candidate and visibility buffers.
+        // Only graphics frames read the candidate and visibility buffers, and growth runs on
+        // the frame thread before it records, so the old buffers are unused once this returns.
         try self.vk_ctx.waitSubmittedFrames();
 
         const new_slice = try self.memory.cpuToGpu().alloc(MeshCandidate, new_capacity);
+        errdefer self.memory.cpuToGpu().free(new_slice);
+        const new_visibility = try self.memory.gpuOnly().alignedAlloc(u32, cull_buffer_alignment, new_capacity);
+        errdefer self.memory.gpuOnly().free(new_visibility);
+        try self.index_pool.grow(self.allocator, @intCast(new_capacity));
+
         @memset(new_slice, MeshCandidate.zeroed());
-
-        const new_visibility = self.memory.gpuOnly().alignedAlloc(u32, cull_buffer_alignment, new_capacity) catch |err| {
-            self.memory.cpuToGpu().free(new_slice);
-            return err;
-        };
-        // Reserve both retirement slots before touching any live state: the render
-        // thread reads these fields without a shared lock, so a failure after partial
-        // mutation would strand an old slice or pair a slice length with a stale buffer.
-        // The drain task sweeps these lists concurrently, so the mutations take its lock.
-        self.retired_slices_mutex.lockUncancelable(io);
-        defer self.retired_slices_mutex.unlock(io);
-        try self.retired_visibility_slices.ensureTotalCapacity(self.allocator, self.retired_visibility_slices.items.len + 1);
-        try self.retired_candidate_slices.ensureTotalCapacity(self.allocator, self.retired_candidate_slices.items.len + 1);
-
-        const current_frame_num = self.vk_ctx.frame_number.load(.acquire);
-        // The old slices are NOT freed here: a worker thread may grow the scene while
-        // the render thread still reads them, and deferring the free closes that window.
-        self.retired_visibility_slices.appendAssumeCapacity(.{
-            .slice = self.visibility_slice,
-            .graphics_timeline_value = current_frame_num + VulkanContext.max_frames_in_flight,
-        });
-        self.retired_candidate_slices.appendAssumeCapacity(.{
-            .slice = self.persistent.slice,
-            .graphics_timeline_value = current_frame_num + VulkanContext.max_frames_in_flight,
-        });
+        @memcpy(new_slice[0..old_slice.len], old_slice);
+        self.memory.cpuToGpu().free(old_slice);
+        self.memory.gpuOnly().free(self.visibility_slice);
 
         const current_vis_info = self.memory.backing_allocator.getBufferAndOffset(.gpu_only, new_visibility.ptr);
         self.visibility_buffer = current_vis_info.buffer;
         self.visibility_offset = current_vis_info.offset;
         self.visibility_slice = new_visibility;
-        self.visibility_needs_clear.store(true, .release);
-
-        @memcpy(new_slice[0..old_capacity], self.persistent.slice[0..old_capacity]);
+        self.visibility_needs_clear = true;
 
         const info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, new_slice.ptr);
         self.persistent.buffer = info.buffer;
-        self.persistent.mapped = new_slice.ptr;
         self.persistent.offset = info.offset;
         self.persistent.slice = new_slice;
-
-        try self.index_pool.grow(io, self.allocator, @intCast(new_capacity));
 
         self.buffers_version += 1;
     }
 
     fn tryShrinkMaxAllocatedIndex(self: *IndirectScene, freed_gpu_index: u32) void {
-        const current_max = self.max_allocated_index.load(.acquire);
-        if (freed_gpu_index + 1 < current_max) return;
+        if (freed_gpu_index + 1 < self.max_allocated_index) return;
 
         var new_max: u32 = freed_gpu_index;
         while (new_max > 0) : (new_max -= 1) {
-            if (self.persistent.mapped[new_max - 1].face_count != 0) break;
+            if (self.persistent.slice[new_max - 1].face_count != 0) break;
         }
 
-        self.max_allocated_index.store(new_max, .release);
+        self.max_allocated_index = new_max;
     }
 
     fn createMeshDataDescriptorResources(self: *IndirectScene) !void {
@@ -1503,8 +1364,8 @@ pub const IndirectScene = struct {
 
     fn updateMeshDataDescriptorSet(self: *IndirectScene, frame_idx: u32) void {
         const info: vk.DescriptorBufferInfo = .{
-            .buffer = self.frame_buffers.items[frame_idx].mesh_data,
-            .offset = self.frame_buffers.items[frame_idx].mesh_data_offset,
+            .buffer = self.frame_buffers[frame_idx].mesh_data,
+            .offset = self.frame_buffers[frame_idx].mesh_data_offset,
             .range = self.draw_capacity * slot_count * @sizeOf(MeshData),
         };
         self.dev.updateDescriptorSets((&core.bufferWriteDescriptorSet(self.mesh_data_descriptor_sets_per_frame[frame_idx], 0, .storage_buffer, &info))[0..1], null);
@@ -1515,21 +1376,15 @@ pub const IndirectScene = struct {
     }
 };
 
-test "GpuRegionAllocator checkAllAllocationFailures" {
-    const AllocFn = struct {
-        fn run(alloc: std.mem.Allocator) !void {
-            var allocator = try GpuRegionAllocator.init(alloc, alloc, 1024 * 1024);
-            allocator.deinit(alloc);
-        }
-    }.run;
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocFn, .{});
+/// A 1 MiB region allocator over a fake buffer handle, backed by `gpa`.
+fn testRegionAllocator(gpa: std.mem.Allocator) !GpuRegionAllocator {
+    return .init(gpa, try gpa.alignedAlloc(u8, buf_align, 1024 * 1024), @fromBackingInt(@intCast(1)), 0);
 }
 
 test "GpuRegionAllocator safe_graphics propagation" {
     const io = std.testing.io;
-    var allocator = try GpuRegionAllocator.init(std.testing.allocator, std.testing.allocator, 1024 * 1024);
+    var allocator = try testRegionAllocator(std.testing.allocator);
     defer allocator.deinit(std.testing.allocator);
-    allocator.resolve(@fromBackingInt(@intCast(1)), 0);
 
     const fresh = allocator.allocRegion(io, 64).?;
     try std.testing.expectEqual(@as(u64, 0), fresh.safe_graphics);
@@ -1546,9 +1401,8 @@ test "GpuRegionAllocator safe_graphics propagation" {
 }
 test "GpuRegionAllocator out-of-order frees merge" {
     const io = std.testing.io;
-    var allocator = try GpuRegionAllocator.init(std.testing.allocator, std.testing.allocator, 1024 * 1024);
+    var allocator = try testRegionAllocator(std.testing.allocator);
     defer allocator.deinit(std.testing.allocator);
-    allocator.resolve(@fromBackingInt(@intCast(1)), 0);
 
     const a = allocator.allocRegion(io, 64).?;
     const b = allocator.allocRegion(io, 64).?;
@@ -1588,11 +1442,73 @@ test "orderedEncode/orderedDecode round-trip preserves float ordering" {
     try std.testing.expectEqual(aabb_max_inf_ord, orderedEncode(-std.math.inf(f32)));
 }
 
+test "GpuRegionAllocator grow ignores a stale slice" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var allocator = try testRegionAllocator(gpa);
+    defer allocator.deinit(gpa);
+
+    for (0..2) |_| {
+        const new_slice = try gpa.alignedAlloc(u8, buf_align, try allocator.nextCapacity(io));
+        gpa.free(allocator.grow(io, new_slice, @fromBackingInt(@intCast(1)), 0).?.old_slice);
+    }
+    // A slice no larger than the current buffer means another thread already grew it.
+    const stale_slice = try gpa.alignedAlloc(u8, buf_align, allocator.buffer_slice.len);
+    defer gpa.free(stale_slice);
+    try std.testing.expect(allocator.grow(io, stale_slice, @fromBackingInt(@intCast(1)), 0) == null);
+}
+
+fn stagingRingAlloc(gpa: std.mem.Allocator) !void {
+    var ring = try StagingRing.init(gpa, gpa, 1024);
+    defer ring.deinit(gpa);
+    // The entry bookkeeping allocation must propagate OutOfMemory instead of reporting a full ring.
+    try std.testing.expect(try ring.alloc(std.testing.io, 8) != null);
+}
+
+fn stagingRingAllocPair(gpa: std.mem.Allocator) !void {
+    var ring = try StagingRing.init(gpa, gpa, 1024);
+    defer ring.deinit(gpa);
+    // The entry reservation must propagate OutOfMemory before the ring changes.
+    try std.testing.expect(try ring.allocPair(std.testing.io, .{ 8, 8 }) != null);
+}
+
+test "StagingRing checkAllAllocationFailures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAlloc, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocPair, .{});
+}
+
+test "StagingRing allocPair atomicity" {
+    const io = std.testing.io;
+    var ring = try StagingRing.init(std.testing.allocator, std.testing.allocator, 1024);
+    defer ring.deinit(std.testing.allocator);
+
+    // Zero sizes yield null slots without consuming space.
+    const empty = (try ring.allocPair(io, .{ 0, 0 })).?;
+    try std.testing.expectEqual(null, empty[0]);
+    try std.testing.expectEqual(null, empty[1]);
+
+    const pair = (try ring.allocPair(io, .{ 8, 16 })).?;
+    try std.testing.expectEqual(8, pair[0].?.len);
+    try std.testing.expectEqual(16, pair[1].?.len);
+
+    // A pair that does not fit as a whole is refused entirely; nothing is consumed.
+    try std.testing.expectEqual(null, try ring.allocPair(io, .{ 512, 512 }));
+
+    // After both slices retire, the refused pair fits again.
+    ring.bind(io, pair[0].?, 1);
+    ring.bind(io, pair[1].?, 1);
+    ring.retire(io, 1);
+    const big = (try ring.allocPair(io, .{ 512, 512 })).?;
+    try std.testing.expect(big[0] != null and big[1] != null);
+
+    // A pair larger than the whole ring fails loudly instead of spinning forever.
+    try std.testing.expectError(error.StagingTooLarge, ring.allocPair(io, .{ 1024, 1024 }));
+}
+
 test "StagingRing split gap boundary and degenerate full" {
     const io = std.testing.io;
     var ring = try StagingRing.init(std.testing.allocator, std.testing.allocator, 1024);
     defer ring.deinit(std.testing.allocator);
-    ring.resolve(@fromBackingInt(@intCast(1)));
 
     const Off = struct {
         fn run(r: *const StagingRing, slice: []const u8) vk.DeviceSize {

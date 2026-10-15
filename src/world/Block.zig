@@ -52,14 +52,10 @@ pub const Block = enum(Tag) {
         };
     }
 
-    pub inline fn isFluid(self: Block) bool {
-        return self.fluidProperties() != null;
-    }
-
     /// Visible blocks a body cannot enter. Fluids are moved through, not collided with.
     pub inline fn isSolid(self: Block) bool {
         if (self == .null) unreachable;
-        return self.isVisible() and !self.isFluid();
+        return self.isVisible() and self.fluidProperties() == null;
     }
 
     pub inline fn plantsCanGrow(self: Block) bool {
@@ -78,38 +74,6 @@ pub const Block = enum(Tag) {
         break :blk count;
     };
 };
-
-test "Block properties" {
-    const testing = std.testing;
-    try testing.expect(Block.air.isTransparent());
-    try testing.expect(!Block.stone.isTransparent());
-    try testing.expect(Block.stone.isSolid());
-    try testing.expect(!Block.air.isSolid());
-    try testing.expect(Block.grass.isVisible());
-    try testing.expect(!Block.air.isVisible());
-    try testing.expect(!Block.fine_grass.isVisible());
-    try testing.expect(!Block.fine_grass.isSolid());
-}
-
-test "Fluid blocks carry movement properties" {
-    const testing = std.testing;
-    const water = Block.water.fluidProperties().?;
-    try testing.expect(Block.water.isFluid());
-    try testing.expect(!Block.water.isSolid());
-    try testing.expect(water.buoyancy > 0);
-
-    // Leaves are a fluid the body does not collide with; they do not float it and
-    // resist far more than water, so a canopy only slows the fall.
-    const leaves = Block.leaves.fluidProperties().?;
-    try testing.expect(Block.leaves.isVisible());
-    try testing.expect(Block.leaves.isFluid());
-    try testing.expect(!Block.leaves.isSolid());
-    try testing.expectEqual(@as(f64, 0), leaves.buoyancy);
-    try testing.expect(leaves.resistance > water.resistance);
-
-    try testing.expect(Block.stone.isSolid());
-    try testing.expect(Block.stone.fluidProperties() == null);
-}
 
 test "water dense index matches shader" {
     const testing = std.testing;

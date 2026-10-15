@@ -241,8 +241,6 @@ comptime {
     if (@sizeOf(SkyParams) != 432) @compileError("SkyParams size mismatch (expected 432)");
 }
 
-const ParamBuffer = core.ParamBuffer;
-
 /// Everything the sky pass needs to record itself, gathered by the caller (VulkanRenderer).
 pub const RecordContext = struct {
     cmd_buffer: vk.CommandBuffer,
@@ -279,7 +277,8 @@ pipeline_layout: vk.PipelineLayout = .null_handle,
 descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
 descriptor_pool: vk.DescriptorPool = .null_handle,
 descriptor_sets_per_frame: []vk.DescriptorSet = &.{},
-param_buffers: []ParamBuffer = &.{},
+/// Per-frame CPU mappings of the `SkyParams` storage buffers.
+param_buffers: [VulkanContext.max_frames_in_flight][]align(16) u8 = @splat(&.{}),
 
 pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.GpuMemory) !SkyRenderer {
     var self: SkyRenderer = .{
@@ -319,11 +318,8 @@ pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.G
     );
 
     const cpu_to_gpu = memory.cpuToGpu();
-    self.param_buffers = try allocator.alloc(ParamBuffer, VulkanContext.max_frames_in_flight);
-    for (self.param_buffers) |*buf| buf.* = .{ .mapping = &.{} };
-
-    for (self.param_buffers) |*buf| {
-        buf.mapping = try cpu_to_gpu.alignedAlloc(u8, .fromByteUnits(16), @sizeOf(SkyParams));
+    for (&self.param_buffers) |*buf| {
+        buf.* = try cpu_to_gpu.alignedAlloc(u8, .fromByteUnits(16), @sizeOf(SkyParams));
     }
 
     self.updateParamDescriptors();
@@ -331,21 +327,17 @@ pub fn init(allocator: std.mem.Allocator, vk_ctx: *VulkanContext, memory: *gpu.G
 }
 
 pub fn deinit(self: *SkyRenderer) void {
-    for (self.param_buffers) |*buf| self.freeParamBuffer(buf);
-    if (self.param_buffers.len > 0) {
-        self.allocator.free(self.param_buffers);
-        self.param_buffers = &.{};
-    }
+    for (&self.param_buffers) |*buf| self.freeParamBuffer(buf);
     self.destroyDescriptorResources();
     core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
     core.destroyIfValid(self.dev, &self.pipeline_layout, &self.vk_ctx.vkalloc);
     core.destroyIfValid(self.dev, &self.descriptor_set_layout, &self.vk_ctx.vkalloc);
 }
 
-fn freeParamBuffer(self: *SkyRenderer, buf: *ParamBuffer) void {
-    if (buf.mapping.len > 0) {
-        self.memory.cpuToGpu().free(buf.mapping);
-        buf.mapping = &.{};
+fn freeParamBuffer(self: *SkyRenderer, buf: *[]align(16) u8) void {
+    if (buf.len > 0) {
+        self.memory.cpuToGpu().free(buf.*);
+        buf.* = &.{};
     }
 }
 
@@ -355,7 +347,7 @@ fn destroyDescriptorResources(self: *SkyRenderer) void {
 
 fn updateParamDescriptors(self: *SkyRenderer) void {
     for (self.param_buffers, self.descriptor_sets_per_frame) |buf, set| {
-        const info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, buf.mapping.ptr);
+        const info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, buf.ptr);
         const buffer_info: vk.DescriptorBufferInfo = .{ .buffer = info.buffer, .offset = info.offset, .range = @sizeOf(SkyParams) };
         const write = core.bufferWriteDescriptorSet(set, 0, .storage_buffer, &buffer_info);
         self.dev.updateDescriptorSets((&write)[0..1], null);
@@ -366,49 +358,25 @@ fn updateParamDescriptors(self: *SkyRenderer) void {
 pub fn createPipelines(self: *SkyRenderer, depth_format: vk.Format, samples: vk.SampleCountFlags) !void {
     core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
 
-    const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, sky_vert_spv);
+    const vert_module = try core.createShaderModule(self.vk_ctx, sky_vert_spv);
     defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
-    const frag_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, sky_frag_spv);
+    const frag_module = try core.createShaderModule(self.vk_ctx, sky_frag_spv);
     defer self.dev.destroyShaderModule(frag_module, &self.vk_ctx.vkalloc);
 
-    const depth_stencil = core.depthStencilState(false, .always, false);
-    const blend = core.opaqueBlendAttachment();
-    const no_vertex_input = core.emptyVertexInput();
-    if (samples.@"1") {
-        self.pipeline = try core.buildGraphicsPipeline(
-            self.dev,
-            &self.vk_ctx.vkalloc,
-            self.vk_ctx.pipeline_creation_feedback,
-            vert_module,
-            frag_module,
-            &.{self.vk_ctx.swapchain_format},
-            depth_format,
-            depth_stencil,
-            &.{blend},
-            self.pipeline_layout,
-            no_vertex_input,
-        );
-    } else {
-        self.pipeline = try core.buildGraphicsPipelineWithSamples(
-            self.dev,
-            &self.vk_ctx.vkalloc,
-            self.vk_ctx.pipeline_creation_feedback,
-            vert_module,
-            frag_module,
-            &.{self.vk_ctx.swapchain_format},
-            depth_format,
-            depth_stencil,
-            &.{blend},
-            self.pipeline_layout,
-            no_vertex_input,
-            samples,
-        );
-    }
+    self.pipeline = try core.buildGraphicsPipeline(self.vk_ctx, .{
+        .vert_module = vert_module,
+        .frag_module = frag_module,
+        .color_formats = &.{self.vk_ctx.swapchain_format},
+        .blend_attachments = &.{core.opaque_blend_attachment},
+        .depth_format = depth_format,
+        .layout = self.pipeline_layout,
+        .samples = samples,
+    });
 }
 
 /// Copies the given params into the current frame's uniform buffer. Call before `record`.
 pub fn uploadParams(self: *SkyRenderer, frame_idx: u32, params: *const SkyParams) void {
-    @memcpy(self.param_buffers[frame_idx].mapping[0..@sizeOf(SkyParams)], std.mem.asBytes(params));
+    @memcpy(self.param_buffers[frame_idx][0..@sizeOf(SkyParams)], std.mem.asBytes(params));
 }
 
 pub fn record(self: *SkyRenderer, ctx: *const RecordContext) void {
@@ -450,8 +418,7 @@ pub fn record(self: *SkyRenderer, ctx: *const RecordContext) void {
     self.dev.cmdBeginRendering(cmd_buffer, &core.renderingInfo(ctx.extent, &.{color_attachment}, &depth_attachment));
 
     self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);
-    core.setDynamicState(self.dev, cmd_buffer, .{}, .always, false);
-    core.setViewportAndScissor(self.dev, cmd_buffer, ctx.extent);
+    core.setDynamicState(self.dev, cmd_buffer, ctx.extent, .{}, .{ .compare_op = .always, .write = false });
 
     const desc_set: vk.DescriptorSet = self.descriptor_sets_per_frame[ctx.frame_idx];
     self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, (&desc_set)[0..1], null);

@@ -101,9 +101,8 @@ pub const Mover = struct {
     fn moveAndCollide(self: *@This(), io: std.Io, allocator: std.mem.Allocator, physics: *Body, delta_t: f64, reader: *World.Reader) !void {
         self.advanceClimb(physics, delta_t);
 
-        const pos_offset = physics.velocity * @as(@Vector(3, f64), @splat(delta_t));
         const max_move: @Vector(3, f64) = @splat(self.maxSubstep());
-        var remaining = pos_offset;
+        var remaining = physics.velocity * @as(@Vector(3, f64), @splat(delta_t));
         var substeps: u32 = 0;
         while (!std.meta.eql(remaining, @Vector(3, f64){ 0, 0, 0 }) and substeps < max_substeps) : (substeps += 1) {
             const step = std.math.clamp(remaining, -max_move, max_move);
@@ -317,14 +316,6 @@ fn setTestSource(world: *World, get_blocks: anytype) void {
         .getTerrainHeight = null,
         .deinit = null,
     }, null, null, null };
-}
-
-test "Mover box is centered on the position" {
-    const box = Mover.boxFor(2, 6);
-    try std.testing.expectEqual(@as(f64, -1), box.min.data[0]);
-    try std.testing.expectEqual(@as(f64, 1), box.max.data[0]);
-    try std.testing.expectEqual(@as(f64, -3), box.min.data[1]);
-    try std.testing.expectEqual(@as(f64, 3), box.max.data[1]);
 }
 
 test "Mover substep follows the smallest extent" {

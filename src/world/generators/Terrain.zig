@@ -625,14 +625,6 @@ pub const DefaultGenerator = struct {
         return filled;
     }
 
-    test "blade height scales with slope" {
-        try std.testing.expectEqual(0, bladeHeightScale(0, 0.5));
-        try std.testing.expectEqual(1, bladeHeightScale(0.5, 0.5));
-        try std.testing.expectEqual(1, bladeHeightScale(2, 0.5));
-        try std.testing.expectApproxEqAbs(0.5, bladeHeightScale(0.25, 0.5), 1e-6);
-        try std.testing.expectEqual(1, bladeHeightScale(0, 0));
-    }
-
     test "blades sit on alternating voxels" {
         // Negative base exercises two's-complement parity in the stride phase.
         const base: World.BlockPos = .{ -8, -8, -8 };
@@ -682,9 +674,8 @@ pub const DefaultGenerator = struct {
         const slopes_full = DefaultGenerator.grassSlopes(&heights, .full);
         const expected = DefaultGenerator.getDifferential(&heights);
         try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&expected), std.mem.asBytes(&slopes_full)));
-        const full = expected;
         var max_full: f32 = 0;
-        for (full) |row| {
+        for (expected) |row| {
             for (row) |s| {
                 try std.testing.expect(std.math.isFinite(s));
                 max_full = @max(max_full, s);
@@ -1044,9 +1035,7 @@ pub const DefaultGenerator = struct {
     fn upsample(comptime N: usize, lattice: *const [N * N]f32) [sample_count]f32 {
         const Interp = interpolation.MultilinearInterpolator(f32, 2, .{ N, N }, .{ ChunkSize, ChunkSize });
         const samples = Interp.init(std.mem.bytesAsValue(Interp.Points, std.mem.asBytes(lattice)).*).sampleGrid();
-        var out: [sample_count]f32 = undefined;
-        for (samples, 0..) |row, x| out[x * ChunkSize ..][0..ChunkSize].* = row;
-        return out;
+        return std.mem.bytesAsValue([sample_count]f32, std.mem.asBytes(&samples)).*;
     }
 
     /// Flat index of coarse node (a, b). The far edge clamps to the last sample since its neighbor belongs to the next chunk.

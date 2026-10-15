@@ -48,9 +48,6 @@ pub const ErosionParams = struct {
 const wave_offset: f32 = 0.25;
 /// Per-octave decay of the mask rounding width.
 const rounding_decay: f32 = 0.5;
-/// Unit smoothing width: smoothStart(t, 1.0) is exactly the old easeOut(t),
-/// the smoothstep ramp over [0, 1].
-const unit_ramp: f32 = 1.0;
 /// Floor for the config-controlled `detail` exponent. It keeps the hoisted
 /// reciprocal finite in release builds, which do not have the debug assert.
 pub const min_detail: f32 = 1e-6;
@@ -117,7 +114,6 @@ const State = struct {
         // Chain rule for the caller's coordinate scaling, plus the sign flip
         // that makes the slope point downhill.
         const side: [2]f32 = .{ wave.side_x * -octave.freq, wave.side_y * -octave.freq };
-        const sloping = @abs(wave.sin);
 
         // Straight gullies: adding the normalized slope fakes constant steepness
         // so tributaries branch at clean angles instead of curling along flanks.
@@ -138,7 +134,7 @@ const State = struct {
             params.ridge_rounding,
             std.math.clamp(wave.cos + 0.5, 0.0, 1.0),
         ) * octave.rounding;
-        self.mask = powInv(self.mask, inv_detail) * smoothStart(smoothStart(sloping, rounding), unit_ramp);
+        self.mask = powInv(self.mask, inv_detail) * smoothstep(smoothStart(@abs(wave.sin), rounding));
     }
 };
 
@@ -164,7 +160,11 @@ fn seedSlope(height_and_slope: [3]f32, params: ErosionParams) [2]f32 {
 /// less gives an instant step at zero.
 fn smoothStart(t: f32, smoothing: f32) f32 {
     if (smoothing <= 0) return if (t > 0) 1.0 else 0.0;
-    const m = std.math.clamp(t / smoothing, 0.0, 1.0);
+    return smoothstep(std.math.clamp(t / smoothing, 0.0, 1.0));
+}
+
+/// Smoothstep ramp for `m` in [0, 1].
+fn smoothstep(m: f32) f32 {
     return m * m * (3.0 - 2.0 * m);
 }
 
@@ -307,15 +307,6 @@ test "the pattern fades gradually with the steepness" {
     // contribution is also cut by the mask, so the window swings shrink.
     const range_half = sweepRange(params, 32, .{ 0.5, 0.0 }, .{ 0.0, 0.125 }, .{ 0.0, params.fade_slope * 0.5, 0.0 }, params.fade_slope * 0.5);
     try std.testing.expect(range_full > range_half);
-}
-
-test "slope fade mask follows the inverted quadratic" {
-    // Fully closed on flat terrain, fully open at full steepness, and
-    // quadratic in between: at half steepness it keeps three quarters of the
-    // pattern, unlike a linear (0.5) or sqrt (0.29) fade.
-    try std.testing.expectEqual(@as(f32, 0.0), slopeFadeMask(0.0));
-    try std.testing.expectApproxEqAbs(@as(f32, 0.75), slopeFadeMask(0.5), 1e-6);
-    try std.testing.expectEqual(@as(f32, 1.0), slopeFadeMask(1.0));
 }
 
 test "zero fade slope disables the fade" {

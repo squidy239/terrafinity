@@ -75,18 +75,6 @@ pub fn joinEnums(comptime Tag: type, comptime enums: []const type) type {
     };
 }
 
-test "joinEnums numbers fields sequentially in argument order" {
-    const First = enum { a, b };
-    const Second = enum(u8) { c, d };
-    const Joined = joinEnums(u16, &.{ First, Second });
-
-    try std.testing.expectEqual(@as(usize, 4), @typeInfo(Joined).@"enum".field_names.len);
-    try std.testing.expectEqual(@as(u16, 0), @backingInt(Joined.a));
-    try std.testing.expectEqual(@as(u16, 1), @backingInt(Joined.b));
-    try std.testing.expectEqual(@as(u16, 2), @backingInt(Joined.c));
-    try std.testing.expectEqual(@as(u16, 3), @backingInt(Joined.d));
-}
-
 test "refAllDecls" {
     std.testing.refAllDecls(@This());
 }

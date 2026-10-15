@@ -4,7 +4,6 @@ const tracy = @import("tracy");
 const vk = @import("vulkan");
 const DeviceProxy = vk.DeviceProxy;
 
-const Renderer = @import("../../../Renderer.zig");
 const VulkanContext = @import("../../../VulkanContext.zig").VulkanContext;
 const World = @import("../../../world/World.zig");
 const core = @import("../core.zig");
@@ -24,49 +23,30 @@ const light_step_texels: f32 = 1.0;
 /// max_cascades arrays (matching the GLSL `float [max_cascades]` members) so the layout
 /// stays stable across a runtime cascade_count change; cascade-uniform values are scalars.
 pub const ShadowParams = extern struct {
-    light_viewproj: [Csm.max_cascades][16]f32,
-    split_radius: [Csm.max_cascades]f32 align(16),
-    texel_world_size: [Csm.max_cascades]f32 align(16),
-    box_radius: [Csm.max_cascades]f32 align(16),
-    normal_bias_scale: f32,
-    blur_radius: f32,
-    blend_fraction: f32,
-    fade_start: f32,
-    fade_end: f32,
-    cascade_count: u32,
-    shadow_strength: f32,
-    debug_colors: u32,
-
-    pub fn default() ShadowParams {
-        return .{
-            .light_viewproj = @splat(@splat(0.0)),
-            .split_radius = @splat(0.0),
-            .texel_world_size = @splat(0.0),
-            .box_radius = @splat(0.0),
-            .normal_bias_scale = 0.0,
-            .blur_radius = 0.0,
-            .blend_fraction = 0.0,
-            .fade_start = 0.0,
-            .fade_end = 0.0,
-            .cascade_count = 0,
-            .shadow_strength = 0.0,
-            .debug_colors = 0,
-        };
-    }
+    light_viewproj: [Csm.max_cascades][16]f32 = @splat(@splat(0.0)),
+    split_radius: [Csm.max_cascades]f32 align(16) = @splat(0.0),
+    texel_world_size: [Csm.max_cascades]f32 align(16) = @splat(0.0),
+    box_radius: [Csm.max_cascades]f32 align(16) = @splat(0.0),
+    normal_bias_scale: f32 = 0.0,
+    blur_radius: f32 = 0.0,
+    blend_fraction: f32 = 0.0,
+    fade_start: f32 = 0.0,
+    fade_end: f32 = 0.0,
+    cascade_count: u32 = 0,
+    shadow_strength: f32 = 0.0,
+    debug_colors: u32 = 0,
 };
 
 comptime {
-    if (@offsetOf(ShadowParams, "split_radius") != 2048) @compileError("ShadowParams.split_radius offset mismatch (expected 2048)");
-    if (@offsetOf(ShadowParams, "texel_world_size") != 2176) @compileError("ShadowParams.texel_world_size offset mismatch (expected 2176)");
-    if (@offsetOf(ShadowParams, "box_radius") != 2304) @compileError("ShadowParams.box_radius offset mismatch (expected 2304)");
-    if (@offsetOf(ShadowParams, "normal_bias_scale") != 2432) @compileError("ShadowParams.normal_bias_scale offset mismatch (expected 2432)");
-    if (@offsetOf(ShadowParams, "blur_radius") != 2436) @compileError("ShadowParams.blur_radius offset mismatch (expected 2436)");
-    if (@offsetOf(ShadowParams, "blend_fraction") != 2440) @compileError("ShadowParams.blend_fraction offset mismatch (expected 2440)");
-    if (@offsetOf(ShadowParams, "fade_start") != 2444) @compileError("ShadowParams.fade_start offset mismatch (expected 2444)");
-    if (@offsetOf(ShadowParams, "fade_end") != 2448) @compileError("ShadowParams.fade_end offset mismatch (expected 2448)");
-    if (@offsetOf(ShadowParams, "cascade_count") != 2452) @compileError("ShadowParams.cascade_count offset mismatch (expected 2452)");
-    if (@offsetOf(ShadowParams, "shadow_strength") != 2456) @compileError("ShadowParams.shadow_strength offset mismatch (expected 2456)");
-    if (@offsetOf(ShadowParams, "debug_colors") != 2460) @compileError("ShadowParams.debug_colors offset mismatch (expected 2460)");
+    const offsets = .{
+        .{ "split_radius", 2048 },      .{ "texel_world_size", 2176 }, .{ "box_radius", 2304 },
+        .{ "normal_bias_scale", 2432 }, .{ "blur_radius", 2436 },      .{ "blend_fraction", 2440 },
+        .{ "fade_start", 2444 },        .{ "fade_end", 2448 },         .{ "cascade_count", 2452 },
+        .{ "shadow_strength", 2456 },   .{ "debug_colors", 2460 },
+    };
+    for (offsets) |entry| {
+        if (@offsetOf(ShadowParams, entry[0]) != entry[1]) @compileError("ShadowParams." ++ entry[0] ++ " offset mismatch with shadow.glsl");
+    }
     if (@sizeOf(ShadowParams) != 2464) @compileError("ShadowParams size mismatch (expected 2464)");
 }
 
@@ -77,10 +57,8 @@ const ShadowPushConstants = extern struct {
 
 comptime {
     if (@sizeOf(ShadowPushConstants) != 68) @compileError("ShadowPushConstants size mismatch with GLSL layout (expected 68)");
-    if (@sizeOf(ShadowPushConstants) > 128) @compileError("ShadowPushConstants exceeds max push constant size");
+    if (@offsetOf(ShadowPushConstants, "mesh_base") != 64) @compileError("ShadowPushConstants.mesh_base offset mismatch with GLSL layout (expected 64)");
 }
-
-const ParamBuffer = core.ParamBuffer;
 
 /// Owns the shadow depth texture array (1 layer per cascade), the depth-only pipeline,
 /// the per-frame ShadowParams storage buffer, the comparison sampler, the shared
@@ -91,17 +69,15 @@ const ParamBuffer = core.ParamBuffer;
 pub const ShadowRenderer = @This();
 
 vk_ctx: *VulkanContext,
-allocator: std.mem.Allocator,
 dev: DeviceProxy,
 memory: *gpu.GpuMemory,
 single_time: *core.SingleTime,
 scene: *gpu.IndirectScene,
-render_options: *const Renderer.RenderOptions,
-render_options_lock: *std.Io.RwLock,
 
 image: vk.Image = .null_handle,
 image_memory: vk.DeviceMemory = .null_handle,
-views: []vk.ImageView = &.{},
+/// Per-cascade layer views; the first `cascade_count` are live.
+views: [Csm.max_cascades]vk.ImageView = @splat(.null_handle),
 /// 2D-array view of every layer; the fragment shaders sample this as sampler2DArrayShadow.
 array_view: vk.ImageView = .null_handle,
 format: vk.Format = .undefined,
@@ -112,63 +88,51 @@ shadow_set_layout: vk.DescriptorSetLayout = .null_handle,
 pipeline: vk.Pipeline = .null_handle,
 pipeline_layout: vk.PipelineLayout = .null_handle,
 compare_sampler: vk.Sampler = .null_handle,
-param_buffers: []ParamBuffer = &.{},
+param_buffers: [VulkanContext.max_frames_in_flight][]align(16) u8 = @splat(&.{}),
 
-/// Committed per-cascade data (snapped center, box, light basis) rebuilt into a
-/// per-frame matrix by `viewProjAtOrigin`.
-committed: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .split_radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
+/// Committed (sampled) per-cascade data (snapped center, box, light basis) rebuilt into
+/// a per-frame matrix by `viewProjAtOrigin`; null until committed. The params
+/// cascade_count is the largest contiguous non-null prefix, so a stale cascade beyond
+/// it never classifies; the shader early-outs before it.
+committed: [Csm.max_cascades]?Csm.CommittedCascade = @splat(null),
 /// Latched light direction the shadow maps use, stepped in `light_step_texels` increments (see `latchLight`).
 light_dir: Csm.Vec3f = .{ 0.0, 0.0, -1.0 },
-/// Per-cascade commit validity. The params cascade_count is the largest contiguous valid prefix,
-/// so a stale cascade beyond it never classifies; the shader early-outs before it.
-valid: [Csm.max_cascades]bool = @splat(false),
 /// Cascades computed this frame, used only by the end-of-frame raster. Promoted into
-/// `committed` (the sampled state) at the start of the next prepareFrame, so a refreshed
-/// layer is only ever sampled with the matrix and box radius it was rasterized with.
-pending: [Csm.max_cascades]Csm.CommittedCascade = @splat(.{ .center_abs = .{ 0, 0, 0 }, .radius = 1.0, .split_radius = 1.0, .near_plane = 0.0, .far_plane = 1.0, .light_dir = .{ 0.0, 0.0, -1.0 } }),
-/// Per-cascade validity of `pending`; set when a cascade is computed this frame and
-/// cleared once it is promoted (or discarded on a light-direction reset).
-pending_valid: [Csm.max_cascades]bool = @splat(false),
+/// `committed` at the start of the next prepareFrame, so a refreshed layer is only ever
+/// sampled with the matrix and box radius it was rasterized with.
+pending: [Csm.max_cascades]?Csm.CommittedCascade = @splat(null),
 /// Whether shadows were active last frame; a false->true transition means the sun just
 /// rose and the committed state belongs to the pre-night light direction.
 was_active: bool = false,
 /// Smoothed camera movement in blocks per frame; pads staleness so a still player keeps a tight box.
 per_frame_dist: f32 = 0.0,
-last_view_pos: @Vector(3, f64) = .{ 0, 0, 0 },
-have_movement_sample: bool = false,
+last_view_pos: ?Csm.Vec3d = null,
 
 /// Frame counter advanced each prepareFrame; drives the refresh scheduler.
 frame_number: u32 = 0,
 /// Frame each cascade was last refreshed; `Csm.never_refreshed` until first raster.
 last_refresh: [Csm.max_cascades]u32 = @splat(Csm.never_refreshed),
-/// Cascades to rasterize at the end of this frame, most-overdue first (see `nextRefreshSet`).
-frame_cascades: [Csm.max_cascades]u32 = @splat(0),
+/// Cascades to rasterize at the end of this frame in ascending index order, so the
+/// nearest refreshed cascade comes first.
+frame_cascades: [gpu.shadow_slot_count]u32 = @splat(0),
 frame_cascade_count: u32 = 0,
-frame_origin: @Vector(3, f64) = .{ 0, 0, 0 },
-/// Cull planes for the frame's cascades, one entry per cascade slot, camera-relative.
-frame_planes: [gpu.shadow_slot_count][6]@Vector(4, f32) = @splat(@splat(@as(@Vector(4, f32), @splat(0)))),
+frame_origin: Csm.Vec3d = .{ 0, 0, 0 },
 frame_min_chunk_size: f32 = 0.0,
 
 config_applied: Csm.ShadowConfig = .{},
 
 pub fn init(
-    allocator: std.mem.Allocator,
     vk_ctx: *VulkanContext,
     memory: *gpu.GpuMemory,
     single_time: *core.SingleTime,
     scene: *gpu.IndirectScene,
-    render_options: *const Renderer.RenderOptions,
-    render_options_lock: *std.Io.RwLock,
 ) !ShadowRenderer {
     var self: ShadowRenderer = .{
-        .allocator = allocator,
         .vk_ctx = vk_ctx,
         .dev = vk_ctx.dev,
         .memory = memory,
         .single_time = single_time,
         .scene = scene,
-        .render_options = render_options,
-        .render_options_lock = render_options_lock,
     };
     errdefer self.deinit();
 
@@ -176,22 +140,16 @@ pub fn init(
     try self.createSampler();
     try self.createPipelineLayout();
 
-    self.param_buffers = try allocator.alloc(ParamBuffer, VulkanContext.max_frames_in_flight);
-    for (self.param_buffers) |*buf| buf.* = .{ .mapping = &.{} };
-    for (self.param_buffers) |*buf| {
-        buf.mapping = try memory.cpuToGpu().alignedAlloc(u8, .fromByteUnits(16), @sizeOf(ShadowParams));
+    for (&self.param_buffers) |*buf| {
+        buf.* = try memory.cpuToGpu().alignedAlloc(u8, .fromByteUnits(16), @sizeOf(ShadowParams));
     }
 
     return self;
 }
 
 pub fn deinit(self: *ShadowRenderer) void {
-    for (self.param_buffers) |*buf| {
-        if (buf.mapping.len > 0) self.memory.cpuToGpu().free(buf.mapping);
-    }
-    if (self.param_buffers.len > 0) {
-        self.allocator.free(self.param_buffers);
-        self.param_buffers = &.{};
+    for (self.param_buffers) |buf| {
+        if (buf.len > 0) self.memory.cpuToGpu().free(buf);
     }
 
     core.destroyIfValid(self.dev, &self.compare_sampler, &self.vk_ctx.vkalloc);
@@ -211,7 +169,7 @@ fn createSharedSetLayout(self: *ShadowRenderer) !void {
 }
 
 fn createSampler(self: *ShadowRenderer) !void {
-    self.compare_sampler = try core.createSampler(self.dev, &self.vk_ctx.vkalloc, .{
+    self.compare_sampler = try core.createSampler(self.vk_ctx, .{
         .mipmap_mode = .nearest,
         .address_mode = .clamp_to_border,
         .compare_enable = true,
@@ -236,24 +194,25 @@ fn createPipelineLayout(self: *ShadowRenderer) !void {
 }
 
 fn createPipeline(self: *ShadowRenderer) !void {
-    const vert_module = try core.createShaderModule(self.dev, &self.vk_ctx.vkalloc, shadow_vert_spv);
+    const vert_module = try core.createShaderModule(self.vk_ctx, shadow_vert_spv);
     defer self.dev.destroyShaderModule(vert_module, &self.vk_ctx.vkalloc);
 
     core.destroyIfValid(self.dev, &self.pipeline, &self.vk_ctx.vkalloc);
-    self.pipeline = try core.buildDepthOnlyPipelineWithTopology(
-        self.dev,
-        &self.vk_ctx.vkalloc,
-        self.vk_ctx.pipeline_creation_feedback,
-        vert_module,
-        self.format,
-        self.pipeline_layout,
-        gpu.MeshUploader.faceVertexInputState(),
-        self.config_applied.depth_bias_constant,
-        self.config_applied.depth_bias_slope,
-        if (self.vk_ctx.depth_bias_clamp) self.config_applied.depth_bias_clamp else 0.0,
-        self.vk_ctx.depth_clamp,
-        .triangle_strip,
-    );
+    // Depth-only; recording sets standard (not reversed-Z) less-or-equal depth.
+    self.pipeline = try core.buildGraphicsPipeline(self.vk_ctx, .{
+        .vert_module = vert_module,
+        .depth_format = self.format,
+        .depth_test = true,
+        .layout = self.pipeline_layout,
+        .vertex_input = gpu.MeshUploader.faceVertexInputState(),
+        .topology = .triangle_strip,
+        .depth_bias = .{
+            .constant = self.config_applied.depth_bias_constant,
+            .slope = self.config_applied.depth_bias_slope,
+            .clamp = if (self.vk_ctx.depth_bias_clamp) self.config_applied.depth_bias_clamp else 0.0,
+        },
+        .depth_clamp = self.vk_ctx.depth_clamp,
+    });
 }
 
 /// Allocates (or recreates) the shadow depth array and per-cascade views. Called from
@@ -264,23 +223,20 @@ pub fn recreate(self: *ShadowRenderer, io: std.Io, config: Csm.ShadowConfig) !vo
     defer zone.end();
     const count = @min(config.cascade_count, Csm.max_cascades);
     const size = config.shadow_map_size;
-    const want_format: vk.Format = switch (config.depth_format) {
-        .d16 => .d16_unorm,
-        .d32 => .d32_sfloat,
-    };
 
-    // When shadows are disabled the image is null, so the `same` check below is always
-    // false and the teardown path would call deviceWaitIdle every frame. A torn-down
+    // A config that builds no image leaves it null, so the `same` check below is always
+    // false and the teardown path would wait for the device every frame. A torn-down
     // state is already current; just record the config and stop.
-    if (!config.enabled and self.image == .null_handle) {
+    if (self.image == .null_handle and (!config.enabled or count == 0 or size == 0)) {
         self.config_applied = config;
         return;
     }
 
+    // Compare the requested format, not `self.format`: pickDepthFormat may fall back.
     const same = self.image != .null_handle and
         self.cascade_count == count and
         self.map_size == size and
-        self.format == want_format and
+        self.config_applied.depth_format == config.depth_format and
         self.config_applied.depth_bias_constant == config.depth_bias_constant and
         self.config_applied.depth_bias_slope == config.depth_bias_slope and
         self.config_applied.depth_bias_clamp == config.depth_bias_clamp and
@@ -308,8 +264,8 @@ fn teardownResources(self: *ShadowRenderer, applied: Csm.ShadowConfig, count: u3
     self.config_applied = applied;
     self.cascade_count = count;
     self.map_size = size;
-    self.valid = @splat(false);
-    self.pending_valid = @splat(false);
+    self.committed = @splat(null);
+    self.pending = @splat(null);
     self.last_refresh = @splat(Csm.never_refreshed);
 }
 
@@ -342,9 +298,7 @@ fn createShadowImage(self: *ShadowRenderer, size: u32, count: u32) !void {
         .sharing_mode = .exclusive,
         .samples = .{ .@"1" = true },
     };
-    const alloc = try core.allocateImageWithMemory(self.dev, self.vk_ctx.mem_props, &self.vk_ctx.vkalloc, &image_info);
-    self.image = alloc.image;
-    self.image_memory = alloc.memory;
+    self.image, self.image_memory = try core.allocateImageWithMemory(self.vk_ctx, &image_info);
 
     try self.createImageViews(count);
 }
@@ -362,49 +316,30 @@ fn pickDepthFormat(self: *ShadowRenderer) !vk.Format {
     return error.ShadowDepthFormatNotSupported;
 }
 
-/// Allocates the per-cascade layer views and the 2D-array view, null-initialized so a
-/// partial failure leaves destroyShadowImage safe to run.
+/// Creates the per-cascade layer views and the 2D-array view. Unused views stay null,
+/// so a partial failure leaves destroyShadowImage safe to run.
 fn createImageViews(self: *ShadowRenderer, count: u32) !void {
-    self.views = try self.allocator.alloc(vk.ImageView, count);
-    for (self.views) |*view| view.* = .null_handle;
-    for (self.views, 0..) |*view, i| view.* = try self.createImageView(.@"2d", @intCast(i), 1);
+    for (self.views[0..count], 0..) |*view, i| view.* = try self.createImageView(.@"2d", @intCast(i), 1);
     self.array_view = try self.createImageView(.@"2d_array", 0, count);
 }
 
 /// Creates a depth image view over `layer_count` layers starting at `base_layer`.
 fn createImageView(self: *ShadowRenderer, view_type: vk.ImageViewType, base_layer: u32, layer_count: u32) !vk.ImageView {
-    return self.dev.createImageView(&.{
-        .flags = .{},
-        .image = self.image,
-        .view_type = view_type,
-        .format = self.format,
-        .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-        .subresource_range = .{
-            .aspect_mask = .{ .depth = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = base_layer,
-            .layer_count = layer_count,
-        },
-    }, &self.vk_ctx.vkalloc);
+    var info = core.imageViewCreateInfo(self.image, self.format, .{ .depth = true });
+    info.view_type = view_type;
+    info.subresource_range = depthRange(base_layer, layer_count);
+    return self.dev.createImageView(&info, &self.vk_ctx.vkalloc);
 }
 
 fn destroyShadowImage(self: *ShadowRenderer) void {
-    if (self.views.len > 0) {
-        for (self.views) |view| {
-            if (view != .null_handle) self.dev.destroyImageView(view, &self.vk_ctx.vkalloc);
-        }
-        self.allocator.free(self.views);
-        self.views = &.{};
-    }
+    for (&self.views) |*view| core.destroyIfValid(self.dev, view, &self.vk_ctx.vkalloc);
     core.destroyIfValid(self.dev, &self.array_view, &self.vk_ctx.vkalloc);
-    core.destroyImageWithMemory(self.dev, &self.image, &self.image_memory, &self.vk_ctx.vkalloc);
+    core.destroyImageWithMemory(self.vk_ctx, &self.image, &self.image_memory);
 }
 
 fn clearDepthArray(self: *ShadowRenderer, io: std.Io) !void {
     const cmd = try self.single_time.begin();
 
-    // These barriers span the whole array; makeImageBarrier2 only covers a single layer.
     const full_range = depthRange(0, self.cascade_count);
 
     const pre_barrier = core.imageBarrier2Range(self.image, full_range, .undefined, .transfer_dst_optimal, .{ .top_of_pipe = true }, .{}, .{ .all_transfer = true }, .{ .transfer_write = true });
@@ -433,26 +368,26 @@ fn depthRange(base_layer: u32, layer_count: u32) vk.ImageSubresourceRange {
     };
 }
 
-/// Computes the frame's cascade, commits it, and writes the per-frame params. Called
-/// every frame before the command buffer begins; `sun_dir` is the live sky direction,
-/// latched here once per schedule period so refreshed cascades share a light basis.
+/// Computes the frame's refreshed cascades into pending, and writes the per-frame params.
+/// Called every frame before the command buffer begins with the config snapshot `recreate`
+/// got; `sun_dir` is the live sky direction, latched here so refreshed cascades share a
+/// light basis.
 pub fn prepareFrame(
     self: *ShadowRenderer,
     frame_idx: u32,
-    view_pos: @Vector(3, f64),
+    config: Csm.ShadowConfig,
+    view_pos: Csm.Vec3d,
     sun_dir: Csm.Vec3f,
-    scene_min: [3]f64,
-    scene_max: [3]f64,
-) !void {
+    scene_min: Csm.Vec3d,
+    scene_max: Csm.Vec3d,
+) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "shadow_prepareFrame" });
     defer zone.end();
 
     self.measureMovement(view_pos);
 
-    // The caller (VulkanRenderer.draw) holds the options lock; read the live config so
-    // non-resource changes (blend, fade, strength, refresh intervals, splits) apply immediately.
-    const config = self.render_options.shadow;
-    const count = @min(config.cascade_count, Csm.max_cascades);
+    // A failed recreate can leave the image with fewer layers than the config asks for.
+    const count = @min(config.cascade_count, self.cascade_count);
     self.frame_cascade_count = 0;
 
     const light_dir_changed = self.latchLight(config, sun_dir);
@@ -463,24 +398,23 @@ pub fn prepareFrame(
     // sun. Reset the ramp so uncommitted cascades sample as fully lit rather than
     // projecting shadows from the previous light direction.
     if ((active and !self.was_active) or light_dir_changed) {
-        self.valid = @splat(false);
-        self.pending_valid = @splat(false);
+        self.committed = @splat(null);
+        self.pending = @splat(null);
         // Stale stamps would otherwise gate every cascade behind its long interval.
         self.last_refresh = @splat(Csm.never_refreshed);
     }
     self.was_active = active;
 
-    const split_radii = if (active) Csm.splitRadii(config) else @as([Csm.max_cascades]f32, @splat(0.0));
     if (active) {
         self.promotePending();
         self.refreshCascades(count, .{
             .cfg = config,
             .view_pos = view_pos,
             .light_dir = self.light_dir,
-            .scene_min = .{ scene_min[0], scene_min[1], scene_min[2] },
-            .scene_max = .{ scene_max[0], scene_max[1], scene_max[2] },
+            .scene_min = scene_min,
+            .scene_max = scene_max,
             .per_frame_dist = self.per_frame_dist,
-            .split_radii = split_radii,
+            .split_radii = Csm.splitRadii(config),
             .refresh_intervals = Csm.refreshIntervals(config),
         });
     }
@@ -498,13 +432,12 @@ pub fn prepareFrame(
 /// Measures smoothed camera movement in blocks per frame for staleness padding. Must
 /// stay per-frame (not per-second): the max fly speed would grow the boxes while
 /// standing still and cause texel-swimming flicker.
-fn measureMovement(self: *ShadowRenderer, view_pos: @Vector(3, f64)) void {
-    if (self.have_movement_sample) {
-        const delta = view_pos - self.last_view_pos;
-        const dist: f32 = @floatCast(@sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]));
+fn measureMovement(self: *ShadowRenderer, view_pos: Csm.Vec3d) void {
+    if (self.last_view_pos) |last_view_pos| {
+        const delta = view_pos - last_view_pos;
+        const dist: f32 = @floatCast(@sqrt(@reduce(.Add, delta * delta)));
         self.per_frame_dist = std.math.lerp(self.per_frame_dist, dist, movement_smoothing);
     }
-    self.have_movement_sample = true;
     self.last_view_pos = view_pos;
 }
 
@@ -535,13 +468,10 @@ fn latchLight(self: *ShadowRenderer, config: Csm.ShadowConfig, sun_dir: Csm.Vec3
 /// ever sampled with the matrix and box it was rasterized with; fresh cascades stay in
 /// pending (raster-only) until promoted here.
 fn promotePending(self: *ShadowRenderer) void {
-    for (&self.committed, &self.valid, &self.pending, &self.pending_valid) |*committed, *valid, *pending, *pending_valid| {
-        if (pending_valid.*) {
-            committed.* = pending.*;
-            valid.* = true;
-        }
+    for (&self.committed, self.pending) |*committed, pending| {
+        if (pending) |cascade| committed.* = cascade;
     }
-    self.pending_valid = @splat(false);
+    self.pending = @splat(null);
 }
 
 /// Minimum chunk world size that may cast a shadow: the larger of the texel-based
@@ -560,7 +490,7 @@ fn refreshCascades(self: *ShadowRenderer, count: u32, ctx: Csm.CascadeContext) v
     self.frame_origin = ctx.view_pos;
     // At most shadow_slot_count cascades can be drawn per frame (one slot each). If the
     // configured per-frame budget exceeds it, clamp so the buffers never overflow; the
-    // scheduler still picks the most-overdue cascades first.
+    // scheduler picks the most-overdue cascades.
     const budget = @min(ctx.cfg.cascades_per_frame, gpu.shadow_slot_count);
     const refresh_set = Csm.nextRefreshSet(count, budget, ctx.refresh_intervals, self.last_refresh, self.frame_number);
 
@@ -574,18 +504,13 @@ fn refreshCascades(self: *ShadowRenderer, count: u32, ctx: Csm.CascadeContext) v
     if (std.math.isFinite(finest_texel)) self.frame_min_chunk_size = effectiveMinChunkSize(ctx.cfg.min_chunk_texels * finest_texel, ctx.cfg.lowest_shadow_level);
 }
 
-/// Computes one refreshed cascade into its pending slot with the frame's cull planes,
-/// and returns its texel size for the minimum chunk size. Each cascade culls and draws
-/// its own box into its own slot.
+/// Computes one refreshed cascade into its pending slot and returns its texel size for
+/// the minimum chunk size. Each cascade culls and draws its own box into its own slot.
 fn refreshCascade(self: *ShadowRenderer, ctx: Csm.CascadeContext, cascade_index: usize) f32 {
     const cascade = Csm.computeCascade(ctx, @intCast(cascade_index));
-    const committed = Csm.committedOf(cascade);
-    const slot = self.frame_cascade_count;
-    self.pending[cascade_index] = committed;
-    self.pending_valid[cascade_index] = true;
+    self.pending[cascade_index] = Csm.committedOf(cascade);
     self.last_refresh[cascade_index] = self.frame_number;
-    self.frame_cascades[slot] = @intCast(cascade_index);
-    self.frame_planes[slot] = cullPlanes(committed, ctx.view_pos);
+    self.frame_cascades[self.frame_cascade_count] = @intCast(cascade_index);
     self.frame_cascade_count += 1;
     return cascade.texel;
 }
@@ -595,7 +520,7 @@ const ParamsContext = struct {
     active: bool,
     count: u32,
     config: Csm.ShadowConfig,
-    view_pos: @Vector(3, f64),
+    view_pos: Csm.Vec3d,
     frame_idx: u32,
 };
 
@@ -603,13 +528,14 @@ const ParamsContext = struct {
 /// committed prefix, so an uncommitted cascade is never classified into; it reads the
 /// cleared map -> lit.
 fn writeParams(self: *ShadowRenderer, ctx: ParamsContext) void {
-    var params = ShadowParams.default();
-    // Largest contiguous valid prefix: cascades 0..active_count-1 are all committed.
+    var params: ShadowParams = .{};
+    // Largest contiguous non-null prefix: cascades 0..active_count-1 are all committed.
     var active_count: u32 = 0;
-    while (active_count < ctx.count and self.valid[active_count]) active_count += 1;
+    while (active_count < ctx.count and self.committed[active_count] != null) active_count += 1;
     if (ctx.active and active_count > 0) {
         params.cascade_count = active_count;
-        for (self.committed[0..active_count], 0..) |committed, cascade| {
+        for (self.committed[0..active_count], 0..) |maybe_committed, cascade| {
+            const committed = maybe_committed.?;
             const view_proj = Csm.viewProjAtOrigin(committed, ctx.view_pos);
             @memcpy(params.light_viewproj[cascade][0..], view_proj[0..]);
             params.split_radius[cascade] = committed.split_radius;
@@ -621,21 +547,21 @@ fn writeParams(self: *ShadowRenderer, ctx: ParamsContext) void {
         params.blend_fraction = ctx.config.cascade_blend;
         // Fade is snapshotted from the outer committed cascade's split, not the live
         // max_shadow_distance, so it cannot outrun the box that cascade was fitted for.
-        const fade_end = self.committed[active_count - 1].split_radius;
+        const fade_end = self.committed[active_count - 1].?.split_radius;
         params.fade_start = fade_end * ctx.config.last_cascade_fade;
         params.fade_end = fade_end;
         params.shadow_strength = ctx.config.shadow_strength;
         params.debug_colors = @intFromBool(ctx.config.debug_cascade_colors);
     }
-    @memcpy(self.param_buffers[ctx.frame_idx].mapping[0..@sizeOf(ShadowParams)], std.mem.asBytes(&params));
+    @memcpy(self.param_buffers[ctx.frame_idx][0..@sizeOf(ShadowParams)], std.mem.asBytes(&params));
 }
 
-/// Frustum planes for the frame's cascade, camera-relative, matching Frustum's
+/// Frustum planes for one cascade, camera-relative, matching Frustum's
 /// inside = normal·p + w >= 0 convention. The range matches the projection exactly so
 /// the cull and the raster agree about which geometry is inside the cascade; nothing
 /// outside the projected depth range is culled in, so depth clamping never paints
 /// false occluder depth at the map edges.
-fn cullPlanes(committed: Csm.CommittedCascade, view_pos: @Vector(3, f64)) [6]@Vector(4, f32) {
+fn cullPlanes(committed: Csm.CommittedCascade, view_pos: Csm.Vec3d) [6]@Vector(4, f32) {
     const basis = Csm.buildLightBasis(committed.light_dir, Csm.world_up);
     const c: Csm.Vec3f = .{ @floatCast(committed.center_abs[0] - view_pos[0]), @floatCast(committed.center_abs[1] - view_pos[1]), @floatCast(committed.center_abs[2] - view_pos[2]) };
     const f = basis.forward;
@@ -652,25 +578,21 @@ fn cullPlanes(committed: Csm.CommittedCascade, view_pos: @Vector(3, f64)) [6]@Ve
     return planes;
 }
 
-pub fn frameHasCascade(self: *const ShadowRenderer) bool {
-    return self.frame_cascade_count > 0;
-}
-
 /// Number of cascades being refreshed this frame (the shadow cull dispatches this many
 /// times, once per slot).
 pub fn frameCascadeCount(self: *const ShadowRenderer) u32 {
     return self.frame_cascade_count;
 }
 
-/// The most-overdue cascade being refreshed this frame (ties favor the near cascades),
-/// for stats and debug.
+/// The nearest cascade being refreshed this frame, for stats and debug.
 pub fn frameInnermostCascade(self: *const ShadowRenderer) ?u32 {
     if (self.frame_cascade_count == 0) return null;
     return self.frame_cascades[0];
 }
 
+/// Cull planes for the cascade refreshed in `slot` this frame.
 pub fn frameCascadePlanes(self: *const ShadowRenderer, slot: u32) [6]@Vector(4, f32) {
-    return self.frame_planes[slot];
+    return cullPlanes(self.pending[self.frame_cascades[slot]].?, self.frame_origin);
 }
 
 pub fn frameMinChunkSize(self: *const ShadowRenderer) f32 {
@@ -700,7 +622,7 @@ pub fn nullImageInfo(self: *const ShadowRenderer) vk.DescriptorImageInfo {
 }
 
 pub fn paramsBufferInfo(self: *const ShadowRenderer, frame_idx: u32) vk.DescriptorBufferInfo {
-    const info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, self.param_buffers[frame_idx].mapping.ptr);
+    const info = self.memory.backing_allocator.getBufferAndOffset(.cpu_to_gpu, self.param_buffers[frame_idx].ptr);
     return .{ .buffer = info.buffer, .offset = info.offset, .range = @sizeOf(ShadowParams) };
 }
 
@@ -708,61 +630,56 @@ pub fn paramsBufferInfo(self: *const ShadowRenderer, frame_idx: u32) vk.Descript
 /// frame (promotion would commit a matrix whose layer was never written), and its
 /// last-refresh stamp is reset so the next frame re-picks it immediately.
 fn dropCascade(self: *ShadowRenderer, cascade: usize) void {
-    self.pending_valid[cascade] = false;
+    self.pending[cascade] = null;
     self.last_refresh[cascade] = Csm.never_refreshed;
 }
 
-/// Records the shadow raster pass for the frame's cascade. Must run inside the face
+/// Records the shadow raster pass for the frame's cascades. Must run inside the face
 /// buffer acquire/release window (the draw binds it as a vertex buffer).
 pub fn recordShadowPass(
     self: *ShadowRenderer,
     cmd_buffer: vk.CommandBuffer,
     frame_idx: u32,
-    face_buffer: vk.Buffer,
-    face_buffer_offset: vk.DeviceSize,
+    face: gpu.GpuRegionAllocator.Binding,
 ) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordShadowPass" });
     defer zone.end();
     const gpu_zone = self.vk_ctx.gpu_profiler.beginZone(cmd_buffer, frame_idx, .{ .src = @src(), .name = "shadow" });
     defer gpu_zone.end();
-    // Match the main passes: while allocRegion grows the face buffer it is momentarily
-    // null, and the draw would be skipped. Skipping the whole pass keeps the previous
-    // depth; running the layout transitions and the clear would wipe a layer to lit.
-    if (face_buffer == .null_handle or self.image == .null_handle) {
+    if (self.image == .null_handle) {
         for (self.frame_cascades[0..self.frame_cascade_count]) |cascade| self.dropCascade(cascade);
+        self.frame_cascade_count = 0;
         return;
     }
 
+    // Bound state persists across the per-cascade rendering scopes in one command buffer,
+    // so only the attachment, push constants, and draw change per cascade.
+    const extent: vk.Extent2D = .{ .width = self.map_size, .height = self.map_size };
+    self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);
+    // Cull front faces: the light view matrix (buildViewProj rows s,u,f) has opposite
+    // handedness to the camera, so the exterior/occluder faces (top faces, sun-facing
+    // sides) are the BACK faces there. Culling back faces would keep the cave
+    // interior's faces instead and the surface would never reach the map.
+    core.setDynamicState(self.dev, cmd_buffer, extent, .{ .front = true }, .{ .compare_op = .less_or_equal, .write = true });
+    const mesh_desc_set = self.scene.mesh_data_descriptor_sets_per_frame[frame_idx];
+    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, (&mesh_desc_set)[0..1], null);
+    self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face.buffer)[0..1], (&face.offset)[0..1]);
+
     for (self.frame_cascades[0..self.frame_cascade_count], 0..) |cascade, slot| {
-        if (self.views.len <= cascade) {
-            // Defensive: the image was rebuilt between compute and raster.
-            self.dropCascade(cascade);
-            continue;
-        }
-        self.recordCascadePass(cmd_buffer, frame_idx, cascade, @intCast(slot), face_buffer, face_buffer_offset);
+        self.recordCascadePass(cmd_buffer, frame_idx, extent, cascade, @intCast(slot));
     }
 }
 
 /// Records the depth raster for a single cascade layer: layout transitions, clear, and
 /// the indirect draw of the frame's culled geometry through the cascade's light matrix.
-fn recordCascadePass(
-    self: *ShadowRenderer,
-    cmd_buffer: vk.CommandBuffer,
-    frame_idx: u32,
-    cascade: u32,
-    slot: u32,
-    face_buffer: vk.Buffer,
-    face_buffer_offset: vk.DeviceSize,
-) void {
+fn recordCascadePass(self: *ShadowRenderer, cmd_buffer: vk.CommandBuffer, frame_idx: u32, extent: vk.Extent2D, cascade: u32, slot: u32) void {
     const zone = tracy.Zone.begin(.{ .src = @src(), .name = "recordCascadePass" });
     defer zone.end();
 
-    const extent: vk.Extent2D = .{ .width = self.map_size, .height = self.map_size };
     const layer_range = depthRange(cascade, 1);
 
     // Within-command-buffer dependency: this frame's fragment reads (opaque/transparent
-    // sample the shadow array) precede the write to this cascade's layer. makeImageBarrier2
-    // only covers layer 0, so the range is built by hand for the cascade layer.
+    // sample the shadow array) precede the write to this cascade's layer.
     const pre_barrier = core.imageBarrier2Range(self.image, layer_range, .shader_read_only_optimal, .depth_stencil_attachment_optimal, .{ .fragment_shader = true }, .{ .shader_read = true }, .{ .early_fragment_tests = true, .late_fragment_tests = true }, .{ .depth_stencil_attachment_write = true });
     core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&pre_barrier)[0..1]);
 
@@ -771,31 +688,17 @@ fn recordCascadePass(
     const depth_attachment = core.renderingAttachmentDepth(self.views[cascade], .depth_stencil_attachment_optimal, .clear, 1.0);
     self.dev.cmdBeginRendering(cmd_buffer, &core.renderingInfo(extent, &.{}, &depth_attachment));
 
-    self.dev.cmdBindPipeline(cmd_buffer, .graphics, self.pipeline);
-    // Cull front faces: the light view matrix (buildViewProj rows s,u,f) has opposite
-    // handedness to the camera, so the exterior/occluder faces (top faces, sun-facing
-    // sides) are the BACK faces there. Culling back faces would keep the cave
-    // interior's faces instead and the surface would never reach the map.
-    core.setDynamicState(self.dev, cmd_buffer, .{ .front = true }, .less_or_equal, true);
-    core.setViewportAndScissor(self.dev, cmd_buffer, extent);
-
-    const mesh_desc_set = self.scene.mesh_data_descriptor_sets_per_frame[frame_idx];
-    self.dev.cmdBindDescriptorSets(cmd_buffer, .graphics, self.pipeline_layout, 0, (&mesh_desc_set)[0..1], null);
-
     // The matrix must match the params used when sampling next frame: rebuilt from the
     // pending cascade at the origin the raster uses (the same origin the cascade was
     // computed at), so light-space coordinates are world-anchored. The pending slot is
     // promoted into committed (the sampled state) at the start of the next prepareFrame.
-    const pending_commit = self.pending[cascade];
     const shadow_pc = ShadowPushConstants{
-        .light_viewproj = Csm.viewProjAtOrigin(pending_commit, self.frame_origin),
+        .light_viewproj = Csm.viewProjAtOrigin(self.pending[cascade].?, self.frame_origin),
         .mesh_base = (gpu.shadow_slot_base + slot) * self.scene.draw_capacity,
     };
     self.dev.cmdPushConstants(cmd_buffer, self.pipeline_layout, .{ .vertex = true }, 0, @sizeOf(ShadowPushConstants), &shadow_pc);
 
-    self.dev.cmdBindVertexBuffers(cmd_buffer, 0, (&face_buffer)[0..1], (&face_buffer_offset)[0..1]);
-
-    const frame = &self.scene.frame_buffers.items[frame_idx];
+    const frame = &self.scene.frame_buffers[frame_idx];
     const indirect_offset = frame.indirect_draw_offset + @as(vk.DeviceSize, @intCast(gpu.shadow_slot_base + slot)) * self.scene.draw_capacity * @sizeOf(vk.DrawIndirectCommand);
     const count_offset = frame.count_offset + @as(vk.DeviceSize, @intCast(@offsetOf(gpu.CullCount, "shadow_count") + slot * @sizeOf(u32)));
     self.dev.cmdDrawIndirectCount(cmd_buffer, frame.indirect_draw, indirect_offset, frame.count, count_offset, self.scene.draw_capacity, @sizeOf(vk.DrawIndirectCommand));
@@ -804,12 +707,12 @@ fn recordCascadePass(
 
     // Trailing transition back to sampled layout; visible to the next frame's fragment
     // reads without any top-of-frame barrier.
-    const post_barrier = core.imageBarrier2Range(self.image, layer_range, .depth_stencil_attachment_optimal, .shader_read_only_optimal, .{ .late_fragment_tests = true }, .{ .depth_stencil_attachment_write = true }, .{ .fragment_shader = true }, .{ .shader_read = true });
+    const post_barrier = core.imageBarrier2Range(self.image, layer_range, .depth_stencil_attachment_optimal, .shader_read_only_optimal, .{ .early_fragment_tests = true, .late_fragment_tests = true }, .{ .depth_stencil_attachment_write = true }, .{ .fragment_shader = true }, .{ .shader_read = true });
     core.pipelineBarrier(cmd_buffer, self.dev, vk.ImageMemoryBarrier2, (&post_barrier)[0..1]);
 }
 
-test "ShadowParams layout" {
-    try std.testing.expectEqual(@as(usize, 2464), @sizeOf(ShadowParams));
+test {
+    std.testing.refAllDecls(@This());
 }
 
 test "effectiveMinChunkSize respects lowest shadow level" {

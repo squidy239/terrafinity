@@ -18,7 +18,6 @@ const SkyConfig = @import("Renderer/vulkan/sky/SkyRenderer.zig").SkyConfig;
 const VulkanContext = @import("VulkanContext.zig").VulkanContext;
 const generator_loader = @import("world/generator_loader.zig");
 const generator_api = @import("world/generators/generator_api.zig");
-const World = @import("world/World.zig");
 
 const press_start_2p: []const u8 = @embedFile("assets/press-start-2p/PressStart2P.ttf");
 const menu_background_image: []const u8 = @embedFile("assets/terrain.png");
@@ -26,12 +25,14 @@ const pixel_font = dvui.Font.array("Press Start 2P");
 const Ui = @This();
 
 const NewGameState = struct {
-    world_config: World.WorldConfig = .{},
     spawn_config: EntityRegistry.SpawnConfig = .{},
-    /// Index into the generator registry, chosen when the page first opens.
-    generator_index: ?usize = null,
-    config: ?*generator_api.ConfigTree = null,
-    preset_index: usize = 0,
+    /// Chosen when the page first opens.
+    generator: ?struct {
+        /// Index into the generator registry.
+        index: usize,
+        config: *generator_api.ConfigTree,
+        preset_index: usize,
+    } = null,
 };
 
 const main_theme: dvui.Theme = blk: {
@@ -89,11 +90,7 @@ keymap_path: []const u8,
 /// The binding slot waiting for the next button press, set from the settings page.
 key_capture: ?Key.Slot = null,
 worlds_path: []const u8,
-menu_background: dvui.Texture,
-/// One icon per item type, null when the pack has no file (draw the missing texture).
-item_textures: std.enums.EnumArray(Item.ItemType, ?dvui.Texture) = .initFill(null),
-/// Set by `initAssets`, like `menu_background`.
-missing_item_texture: dvui.Texture = undefined,
+textures: Textures,
 ui_window: *dvui.Window,
 running: *std.atomic.Value(bool),
 config_section_states: std.AutoHashMap(u64, bool),
@@ -110,27 +107,30 @@ world_list_dirty: bool = true,
 config_dirty: bool = false,
 
 menu_state: struct {
-    ingame: bool = false,
-    /// The full-screen page drawn over the game view. `.game` shows no page.
-    /// The inventory carries the slot the cursor picked up, so closing it drops the pick.
-    page: union(enum) { game, main, settings, newgame, esc, inventory: ?GridSlot } = .main,
+    /// The full-screen page drawn over the game view. `.game` shows no page, and only
+    /// it takes gameplay input, since an open page covers the game view.
+    /// Settings carries whether a game is open behind it. The inventory carries the
+    /// slot the cursor picked up, so closing it drops the pick.
+    page: union(enum) { game, main, settings: bool, newgame, esc, inventory: ?GridSlot } = .main,
     /// Preferences live beside the page so navigation never resets them.
     debug_info: bool = true,
-    crosshair: bool = true,
 
     pending_game_deinit: bool = false,
     pending_world_recreate: bool = false,
     terrain_developer_settings: bool = false,
 
-    /// Reports whether gameplay input is active. Every menu is drawn full-screen over
-    /// the game view, so an open one takes the input the player would otherwise get.
-    pub fn isPlayingGame(self: @This()) bool {
-        return self.ingame and self.page == .game;
+    /// Reports whether a game is open, behind a page or not.
+    pub fn inGame(self: @This()) bool {
+        return switch (self.page) {
+            .main, .newgame => false,
+            .settings => |in_game| in_game,
+            else => true,
+        };
     }
 
     /// Opens the escape menu in a game, or closes it or the inventory when one is open.
     pub fn handleEsc(self: *@This()) void {
-        if (!self.ingame) return;
+        if (!self.inGame()) return;
         self.page = switch (self.page) {
             .esc, .inventory => .game,
             else => .esc,
@@ -139,7 +139,6 @@ menu_state: struct {
 
     /// Opens the inventory during play, or closes it when it is open. Other pages ignore it.
     pub fn toggleInventory(self: *@This()) void {
-        if (!self.ingame) return;
         self.page = switch (self.page) {
             .game => .{ .inventory = null },
             .inventory => .game,
@@ -147,85 +146,82 @@ menu_state: struct {
         };
     }
 
-    fn enterGame(self: *@This()) void {
-        self.ingame = true;
-        self.page = .game;
-    }
-
     /// Goes back to the main menu and closes the terrain developer window.
     pub fn leaveGame(self: *@This()) void {
-        self.ingame = false;
         self.page = .main;
         self.terrain_developer_settings = false;
     }
 },
 
-/// RGBA texture upload shared by the background and item icons.
-fn createTexture(self: *Ui, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) !dvui.Texture {
-    return self.ui_window.backend.textureCreate(pixels, .{
-        .width = width,
-        .height = height,
-        .format = .rgba_32,
-        .interpolation = interpolation,
-    });
-}
+/// The menu background and item icons, uploaded once before the Ui exists.
+pub const Textures = struct {
+    menu_background: dvui.Texture,
+    /// One icon per item type, null when the pack has no file (draw `missing_item`).
+    items: std.enums.EnumArray(Item.ItemType, ?dvui.Texture) = .initFill(null),
+    missing_item: dvui.Texture,
 
-/// Uploads the menu background and the item icons.
-pub fn initAssets(self: *Ui, io: std.Io, allocator: std.mem.Allocator) !void {
-    var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, menu_background_image);
-    defer image.deinit(allocator);
-    self.menu_background = try self.createTexture(@ptrCast(image.asBytes().ptr), @intCast(image.cols), @intCast(image.rows), .linear);
-    try self.loadItemTextures(io, allocator);
-}
+    /// Loads `packs/<pack>/items/<ItemType>.png`. A missing or undecodable file falls
+    /// back to the 1x1 magenta missing texture, so a new icon file needs no code change.
+    pub fn load(io: std.Io, allocator: std.mem.Allocator, backend: dvui.Backend, pack_name: []const u8) !Textures {
+        var image = try zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, menu_background_image);
+        defer image.deinit(allocator);
+        const menu_background = try createTexture(backend, image, .linear);
 
-/// Loads `packs/<pack>/items/<ItemType>.png`. A missing or undecodable file falls
-/// back to the 1x1 magenta missing texture, so a new icon file needs no code change.
-fn loadItemTextures(self: *Ui, io: std.Io, allocator: std.mem.Allocator) !void {
-    const pack = try utils.openPackDir(io, allocator, self.config.game_config.render_options.selected_pack, "items");
-    defer allocator.free(pack.path);
-    defer pack.dir.close(io);
+        const pack = try utils.openPackDir(io, allocator, pack_name, "items");
+        defer allocator.free(pack.path);
+        defer pack.dir.close(io);
 
-    const missing_pixels: [4]u8 = .{ 255, 0, 255, 255 };
-    self.missing_item_texture = try self.createTexture(@ptrCast(&missing_pixels), 1, 1, .nearest);
-
-    for (std.enums.values(Item.ItemType)) |item_type| {
-        const filename = try allocator.print("{s}.png", .{@tagName(item_type)});
-        defer allocator.free(filename);
-        self.item_textures.set(item_type, try self.loadItemTexture(io, allocator, pack.dir, filename));
+        const missing_pixels: [4]u8 = .{ 255, 0, 255, 255 };
+        var textures: Textures = .{
+            .menu_background = menu_background,
+            .missing_item = try backend.textureCreate(@ptrCast(&missing_pixels), .{ .width = 1, .height = 1, .format = .rgba_32, .interpolation = .nearest }),
+        };
+        for (std.enums.values(Item.ItemType)) |item_type| {
+            const filename = try allocator.print("{s}.png", .{@tagName(item_type)});
+            defer allocator.free(filename);
+            textures.items.set(item_type, try loadItemTexture(io, allocator, backend, pack.dir, filename));
+        }
+        return textures;
     }
-}
 
-fn loadItemTexture(self: *Ui, io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename: []const u8) !?dvui.Texture {
-    const file = dir.openFile(io, filename, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => |e| return e,
-    };
-    defer file.close(io);
+    fn deinit(self: Textures, backend: dvui.Backend) void {
+        backend.textureDestroy(self.menu_background);
+        for (self.items.values) |texture| {
+            if (texture) |t| backend.textureDestroy(t);
+        }
+        backend.textureDestroy(self.missing_item);
+    }
 
-    const stat = try file.stat(io);
-    const bytes = try allocator.alloc(u8, @intCast(stat.size));
-    defer allocator.free(bytes);
-    var buf: [1024]u8 = undefined;
-    var reader = file.reader(io, &buf);
-    try reader.interface.readSliceAll(bytes);
+    fn createTexture(backend: dvui.Backend, image: zignal.Image(zignal.Rgba(u8)), interpolation: dvui.enums.TextureInterpolation) !dvui.Texture {
+        return backend.textureCreate(@ptrCast(image.asBytes().ptr), .{
+            .width = @intCast(image.cols),
+            .height = @intCast(image.rows),
+            .format = .rgba_32,
+            .interpolation = interpolation,
+        });
+    }
 
-    var image = zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, bytes) catch |err| {
-        std.log.warn("could not decode item icon items/{s}: {any}", .{ filename, err });
-        return null;
-    };
-    defer image.deinit(allocator);
+    fn loadItemTexture(io: std.Io, allocator: std.mem.Allocator, backend: dvui.Backend, dir: std.Io.Dir, filename: []const u8) !?dvui.Texture {
+        const bytes = dir.readFileAlloc(io, filename, allocator, .unlimited) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => |e| return e,
+        };
+        defer allocator.free(bytes);
 
-    return try self.createTexture(@ptrCast(image.asBytes().ptr), @intCast(image.cols), @intCast(image.rows), .nearest);
-}
+        var image = zignal.Image(zignal.Rgba(u8)).loadFromBytes(io, allocator, bytes) catch |err| {
+            std.log.warn("could not decode item icon items/{s}: {any}", .{ filename, err });
+            return null;
+        };
+        defer image.deinit(allocator);
+
+        return try createTexture(backend, image, .nearest);
+    }
+};
 
 /// Destroys the textures and frees the memory that the Ui owns.
 pub fn deinit(self: *Ui, allocator: std.mem.Allocator) void {
-    self.ui_window.backend.textureDestroy(self.menu_background);
-    for (self.item_textures.values) |texture| {
-        if (texture) |t| self.ui_window.backend.textureDestroy(t);
-    }
-    self.ui_window.backend.textureDestroy(self.missing_item_texture);
-    if (self.new_game.config) |config| generator_api.free(allocator, config);
+    self.textures.deinit(self.ui_window.backend);
+    if (self.new_game.generator) |selected| generator_api.free(allocator, selected.config);
     if (self.delete_world_name) |name| allocator.free(name);
     self.config_section_states.deinit();
     for (self.world_list.items) |entry| allocator.free(entry.name);
@@ -272,9 +268,9 @@ fn drawFrame(self: *Ui, io: std.Io, gpa: std.mem.Allocator, frame_time: std.Io.T
         }
 
         const menu = &self.menu_state;
-        if (menu.ingame) {
+        if (menu.inGame()) {
             if (menu.debug_info) self.debugInfo() catch |err| std.log.err("debugInfo failed: {}", .{err});
-            if (menu.crosshair) crossHair();
+            _ = dvui.label(@src(), "+", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5, .color_fill = .transparent, .font = .{ .size = 32 } });
             if (menu.page != .inventory) self.hotbar();
         }
         switch (menu.page) {
@@ -282,10 +278,11 @@ fn drawFrame(self: *Ui, io: std.Io, gpa: std.mem.Allocator, frame_time: std.Io.T
             .inventory => |*held| self.inventoryMenu(held),
             .esc => self.escMenu(),
             .main => self.mainPage(io, gpa) catch |err| showWorldError(frame_time, err),
-            .settings => self.settingsMenu(io, gpa) catch |err| std.log.err("settingsMenu failed: {}", .{err}),
+            .settings => |in_game| self.settingsMenu(io, gpa, in_game) catch |err| std.log.err("settingsMenu failed: {}", .{err}),
             .newgame => self.newGameMenu(io, gpa) catch |err| showWorldError(frame_time, err),
         }
-        if (menu.ingame and menu.terrain_developer_settings) self.drawTerrainDeveloperSettings(io, gpa);
+        // Only an open game sets the flag, and leaving the game clears it.
+        if (menu.terrain_developer_settings) self.drawTerrainDeveloperSettings(io, gpa);
     }
     _ = try self.ui_window.end(.{});
     if (self.menu_state.page == .settings) return;
@@ -307,16 +304,15 @@ pub fn recordCommandBuffer(
 ) !void {
     const vk_ctx = self.vk_ctx;
     const extent = vk_ctx.swapchain_extent;
-    const image_index = frame_ctx.image_index;
-    const image = vk_ctx.swapchain_images[image_index];
+    const target = &vk_ctx.swapchain_images[frame_ctx.image_index];
     try vk_ctx.dev.resetCommandBuffer(cmd, .{});
     try vk_ctx.dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit = true } });
 
-    VulkanContext.transitionImageLayout(vk_ctx.dev, cmd, image, vk_ctx.swapchain_image_layouts[image_index], .color_attachment_optimal);
-    vk_ctx.swapchain_image_layouts[image_index] = .color_attachment_optimal;
+    VulkanContext.transitionImageLayout(vk_ctx.dev, cmd, target.image, target.layout, .color_attachment_optimal);
+    target.layout = .color_attachment_optimal;
 
     const color_attachment: vk.RenderingAttachmentInfo = .{
-        .image_view = vk_ctx.swapchain_views[image_index],
+        .image_view = target.view,
         .image_layout = .color_attachment_optimal,
         .resolve_mode = .{},
         .resolve_image_layout = .undefined,
@@ -337,29 +333,33 @@ pub fn recordCommandBuffer(
     try self.drawFrame(io, gpa, frame_time);
     vk_ctx.dev.cmdEndRendering(cmd);
 
+    // Opening a game in drawFrame can recreate the swapchain and free `target`, so look the image up again.
+    const output = &vk_ctx.swapchain_images[frame_ctx.image_index];
     // The screenshot copy runs before the move to present layout and does that move itself.
-    const copied = vk_ctx.screenshot_requested.swap(false, .acq_rel) and copy: {
-        vk_ctx.recordScreenshotCopyFromColorAttachment(cmd, image, extent) catch |err| {
-            std.log.err("Screenshot copy recording failed: {any}", .{err});
-            break :copy false;
-        };
-        break :copy true;
+    const copied = vk_ctx.recordRequestedScreenshot(cmd, output.image, extent) catch |err| copied: {
+        std.log.err("Screenshot copy recording failed: {any}", .{err});
+        break :copied false;
     };
-    if (!copied) VulkanContext.transitionImageLayout(vk_ctx.dev, cmd, image, .color_attachment_optimal, .present_src_khr);
-    vk_ctx.swapchain_image_layouts[image_index] = .present_src_khr;
+    if (!copied) VulkanContext.transitionImageLayout(vk_ctx.dev, cmd, output.image, .color_attachment_optimal, .present_src_khr);
+    output.layout = .present_src_khr;
     try vk_ctx.dev.endCommandBuffer(cmd);
 }
 
+/// A flat color for the `dvui.Options` color fields.
+fn solid(r: u8, g: u8, b: u8, a: u8) dvui.ColorOrGradient {
+    return .{ .color = .{ .r = r, .g = g, .b = b, .a = a } };
+}
+
 fn menuCard(src: std.lang.SourceLocation, opts: dvui.Options) *dvui.BoxWidget {
-    var options: dvui.Options = .{
+    const options: dvui.Options = .{
         .min_size_content = .all(256),
-        .color_fill = .{ .color = .{ .r = 48, .g = 48, .b = 48, .a = 255 } },
+        .color_fill = solid(48, 48, 48, 255),
         .background = true,
         .corners = .all(0),
         .border = .all(8),
         .margin = .all(16),
         .gravity_y = 0.5,
-        .color_border = .{ .color = .{ .r = 48, .g = 77, .b = 48, .a = 225 } },
+        .color_border = solid(48, 77, 48, 225),
     };
     var card = dvui.widgetAlloc(dvui.BoxWidget);
     card.init(src, .{}, options.override(opts));
@@ -383,9 +383,8 @@ fn pageContent(id_extra: usize) *dvui.BoxWidget {
 }
 
 fn escMenu(self: *Ui) void {
-    std.debug.assert(self.menu_state.ingame);
     const button_options: dvui.Options = .{ .min_size_content = .width(640 * 0.75), .gravity_x = 0.5 };
-    const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = .{ .color = .{ .r = 0, .g = 200, .b = 200, .a = 150 } }, .expand = .both });
+    const menu = dvui.box(@src(), .{}, .{ .background = true, .color_fill = solid(0, 200, 200, 150), .expand = .both });
     defer menu.deinit();
     if (dvui.button(@src(), "Back To Game", .{}, button_options)) {
         self.menu_state.page = .game;
@@ -393,7 +392,7 @@ fn escMenu(self: *Ui) void {
     }
 
     if (dvui.button(@src(), "Settings", .{}, button_options)) {
-        self.menu_state.page = .settings;
+        self.menu_state.page = .{ .settings = true };
         return;
     }
 
@@ -416,7 +415,7 @@ fn debugInfo(self: *Ui) !void {
         .gravity_y = 1.0,
         .padding = .{ .w = 32, .h = 32 },
         .background = true,
-        .color_fill = .{ .color = .{ .r = 32, .g = 32, .b = 32, .a = 128 } },
+        .color_fill = solid(32, 32, 32, 128),
         .border = .all(8),
         .color_border = .green,
     });
@@ -427,7 +426,7 @@ fn debugInfo(self: *Ui) !void {
 
     const total = chunk_hits + chunk_misses;
     const chunk_hit_ratio: f32 = if (total == 0) 0 else @as(f32, @floatFromInt(chunk_hits)) / @as(f32, @floatFromInt(total));
-    const pos: @Vector(3, i64) = @intFromFloat(@round(self.game.player.body.pos));
+    const pos: @Vector(3, i64) = @intFromFloat(@round(self.game.player().body.pos));
     const spawn: @Vector(3, i64) = @intFromFloat(@round(self.game.spawn.pos));
     const stats = self.game.vulkan_renderer.frame_stats;
     const str = try std.mem.print(
@@ -471,29 +470,29 @@ fn debugInfo(self: *Ui) !void {
     text.addText(str, .{ .background = false });
 }
 
-fn settingsMenu(self: *Ui, io: std.Io, allocator: std.mem.Allocator) !void {
+fn settingsMenu(self: *Ui, io: std.Io, allocator: std.mem.Allocator, in_game: bool) !void {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    if (!self.menu_state.ingame) self.sidebar();
+    if (!in_game) self.sidebar();
     const settings = dvui.scrollArea(@src(), .{ .vertical_bar = .auto }, .{
         .expand = .both,
         .background = true,
-        .color_fill = .{ .color = .{ .r = 48, .g = 77, .b = 84, .a = 225 } },
+        .color_fill = solid(48, 77, 84, 225),
     });
     defer settings.deinit();
 
     const content = pageContent(0);
     defer content.deinit();
 
-    if (self.menu_state.ingame) {
+    if (in_game) {
         const game_mode_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .padding = .{ .y = 4, .h = 4 } });
         defer game_mode_row.deinit();
         dvui.labelNoFmt(@src(), "Game Mode", .{}, .{ .gravity_y = 0.5, .padding = .{ .x = 8, .w = 8 } });
         _ = dvui.dropdownEnum(
             @src(),
             EntityTypes.Player.GameMode,
-            .{ .choice = &self.game.player.game_mode },
+            .{ .choice = &self.game.player().game_mode },
             .{ .null_selectable = false },
             .{},
         );
@@ -541,30 +540,30 @@ fn settingsId(path: []const u8) u64 {
     return configId(settings_root_id, path);
 }
 
+const section_header_style: dvui.Options = .{
+    .color_fill = solid(44, 77, 44, 255),
+    .margin = .{ .y = 8 },
+    .padding = .{ .y = 8, .h = 8 },
+};
+
 /// Draws a toggle header and returns whether its section draws open on this frame.
-fn sectionHeader(self: *Ui, id: u64, default_open: bool, comptime fmt: []const u8, args: anytype) bool {
+fn sectionHeader(self: *Ui, id: u64, default_open: bool, style: dvui.Options, comptime fmt: []const u8, args: anytype) bool {
     const expanded = self.config_section_states.get(id) orelse default_open;
     var title_buffer: [300]u8 = undefined;
-    const title = sectionTitle(&title_buffer, expanded, fmt, args);
-    const toggled = dvui.button(@src(), title, .{}, .{
-        .expand = .horizontal,
-        .id_extra = @intCast(id),
-        .color_fill = .{ .color = .{ .r = 44, .g = 77, .b = 44, .a = 255 } },
-        .margin = .{ .y = 8 },
-        .padding = .{ .y = 8, .h = 8 },
-    });
-    if (!toggled) return expanded;
+    const marker: []const u8 = if (expanded) "[-] " else "[+] ";
+    const title = std.mem.print(&title_buffer, "{s}" ++ fmt, .{marker} ++ args) catch unreachable;
+    if (!dvui.button(@src(), title, .{}, style.override(.{ .expand = .horizontal, .id_extra = @intCast(id) }))) return expanded;
     self.config_section_states.put(id, !expanded) catch |err| std.log.warn("Ui: config section state store failed: {any}", .{err});
     return false;
 }
 
 /// Indented, framed container for a config section or array item.
-fn configBox(src: std.lang.SourceLocation, id: u64, color_fill: dvui.Color, padding: dvui.Rect) *dvui.BoxWidget {
+fn configBox(src: std.lang.SourceLocation, id: u64, color_fill: dvui.ColorOrGradient, padding: dvui.Rect) *dvui.BoxWidget {
     return dvui.box(src, .{ .dir = .vertical }, .{
         .expand = .horizontal,
         .id_extra = @intCast(id),
         .background = true,
-        .color_fill = .{ .color = color_fill },
+        .color_fill = color_fill,
         .margin = .{ .x = 12, .w = 12 },
         .padding = padding,
     });
@@ -576,18 +575,13 @@ fn settingsSection(self: *Ui, src: std.lang.SourceLocation, label: []const u8, i
 
 /// Draws a toggle header and returns the open section's box, or null when collapsed.
 fn collapsibleSection(self: *Ui, src: std.lang.SourceLocation, label: []const u8, id: u64, default_open: bool, padding_y: f32) ?*dvui.BoxWidget {
-    if (!self.sectionHeader(id, default_open, "{s}", .{label})) return null;
-    return configBox(src, id, .{ .r = 24, .g = 40, .b = 28, .a = 255 }, .{ .x = 16, .w = 16, .y = padding_y, .h = padding_y });
+    if (!self.sectionHeader(id, default_open, section_header_style, "{s}", .{label})) return null;
+    return configBox(src, id, solid(24, 40, 28, 255), .{ .x = 16, .w = 16, .y = padding_y, .h = padding_y });
 }
 
-fn sectionTitle(buffer: []u8, expanded: bool, comptime fmt: []const u8, args: anytype) []const u8 {
-    const marker: []const u8 = if (expanded) "[-] " else "[+] ";
-    return std.mem.print(buffer, "{s}" ++ fmt, .{marker} ++ args) catch unreachable;
-}
-
-fn settingsSlider(name: []const u8, value: anytype, min: f64, max: f64, id: u64) void {
+fn configSliderInt(name: []const u8, value: anytype, spec: generator_api.Spec, min: f64, max: f64, id: u64) void {
     var float_value: f32 = @floatFromInt(value.*);
-    if (!configSlider(name, &float_value, .{}, min, max, id)) return;
+    if (!configSlider(name, &float_value, spec, min, max, id)) return;
     if (@typeInfo(@TypeOf(value.*)).int.signedness == .unsigned and float_value < 0) return;
     value.* = @intFromFloat(float_value);
 }
@@ -645,7 +639,7 @@ fn drawFields(target: anytype, parent_id: u64, comptime prefix: []const u8, comp
         const id = configId(parent_id, prefix ++ row[1]);
         switch (@typeInfo(@TypeOf(value.*))) {
             .float => _ = configSlider(row[0], value, .{}, row[2], row[3], id),
-            .int => settingsSlider(row[0], value, row[2], row[3], id),
+            .int => configSliderInt(row[0], value, .{}, row[2], row[3], id),
             .bool => settingsCheckbox(row[0], value, id),
             .@"enum" => settingsEnum(row[0], @TypeOf(value.*), value, id),
             .array => settingsColor(row[0], value, id),
@@ -748,7 +742,7 @@ fn drawTerrainDeveloperSettings(self: *Ui, io: std.Io, allocator: std.mem.Alloca
         const warning = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
             .background = true,
-            .color_fill = .{ .color = .{ .r = 96, .g = 24, .b = 24, .a = 255 } },
+            .color_fill = solid(96, 24, 24, 255),
             .border = .all(4),
             .color_border = .red,
             .padding = .{ .x = 16, .w = 16, .y = 12, .h = 12 },
@@ -834,7 +828,7 @@ fn drawGeneralSettings(self: *Ui, io: std.Io, options: *Game.Options) void {
             .{ "Inventory Width", "inventory_width", 1, 16 },
             .{ "Inventory Height", "inventory_height", 1, 8 },
         });
-        if (self.menu_state.ingame and dvui.button(@src(), "Terrain Developer Settings", .{}, .{ .margin = .{ .y = 8 } })) {
+        if (self.menu_state.inGame() and dvui.button(@src(), "Terrain Developer Settings", .{}, .{ .margin = .{ .y = 8 } })) {
             self.menu_state.terrain_developer_settings = true;
         }
     }
@@ -894,7 +888,12 @@ fn buttonUses(keymap: *const Key.Keymap) ButtonUses {
     return uses;
 }
 
+/// Width of one binding column, so the header lines up with the key buttons below it.
+const binding_column_width = 240;
+
 fn drawKeyBindings(self: *Ui, io: std.Io) void {
+    keyBindingsHelp();
+    keyBindingsHeader();
     const uses = buttonUses(self.keymap);
     var changed = false;
     for (std.enums.values(Key.Action)) |action| changed = self.bindingRow(action, &uses) or changed;
@@ -903,6 +902,25 @@ fn drawKeyBindings(self: *Ui, io: std.Io) void {
         changed = true;
     }
     if (changed) self.saveKeymap(io);
+}
+
+fn keyBindingsHelp() void {
+    const help = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = .{ .y = 4, .h = 8 } });
+    defer help.deinit();
+    help.addText("Each action has a primary key and an alternate key. Either key triggers the action. " ++
+        "Click a key, then press the new key or mouse button. Press Escape to cancel. " ++
+        "A red key triggers more than one action.", .{});
+}
+
+fn keyBindingsHeader() void {
+    const header = configRow("Action", settingsId("keymap.header"));
+    defer header.deinit();
+    for (std.enums.values(Key.Binding.Which)) |which| {
+        const column = dvui.box(@src(), .{}, .{ .id_extra = @backingInt(which), .min_size_content = .width(binding_column_width) });
+        defer column.deinit();
+        var title_buffer: [16]u8 = undefined;
+        dvui.labelNoFmt(@src(), titleCase(@tagName(which), &title_buffer), .{}, .{ .gravity_x = 0.5 });
+    }
 }
 
 /// Draws one action's label, both slots, and its reset button. Returns whether the binding changed.
@@ -926,12 +944,14 @@ fn bindingRow(self: *Ui, action: Key.Action, uses: *const ButtonUses) bool {
 
 /// Draws a slot button that waits for a press when clicked, plus its clear button. Returns true when the user clears the slot.
 fn bindingSlot(self: *Ui, slot: Key.Slot, button: *?wio.Button, uses: *const ButtonUses, id: u64) bool {
+    const column = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = @intCast(id), .min_size_content = .width(binding_column_width), .gravity_y = 0.5 });
+    defer column.deinit();
     var name_buffer: [64]u8 = undefined;
     const text = if (std.meta.eql(self.key_capture, slot)) "Press a key..." else if (button.*) |bound| titleCase(@tagName(bound), &name_buffer) else "Unbound";
     const conflict = if (button.*) |bound| uses.get(bound) > 1 else false;
     if (dvui.button(@src(), text, .{}, .{
         .id_extra = @intCast(id),
-        .min_size_content = .width(160),
+        .expand = .horizontal,
         .gravity_y = 0.5,
         .color_fill = if (conflict) .red else null,
     })) self.key_capture = slot;
@@ -1013,12 +1033,8 @@ fn normalizeSettings(options: *Game.Options) void {
     render_options.sky.star_brightness_max = @max(std.math.clamp(render_options.sky.star_brightness_max, 0, 1), render_options.sky.star_brightness_min);
 }
 
-fn crossHair() void {
-    _ = dvui.label(@src(), "+", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5, .color_fill = .transparent, .font = .{ .size = 32 } });
-}
-
-const selected_slot_color: dvui.Color = .{ .r = 90, .g = 140, .b = 220, .a = 255 };
-const slot_border_color: dvui.Color = .{ .r = 150, .g = 150, .b = 150, .a = 160 };
+const selected_slot_color = solid(90, 140, 220, 255);
+const slot_border_color = solid(150, 150, 150, 160);
 const item_icon_size: f32 = 36;
 /// Space between the main grid and the hotbar on the inventory page.
 const hotbar_gap: f32 = 12;
@@ -1041,7 +1057,7 @@ fn bottomColumn() *dvui.BoxWidget {
 /// both grids. `held` only names the slot, so closing the page can never lose an item.
 fn inventoryMenu(self: *Ui, held: *?GridSlot) void {
     {
-        const backdrop = dvui.overlay(@src(), .{ .expand = .both, .background = true, .color_fill = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 120 } } });
+        const backdrop = dvui.overlay(@src(), .{ .expand = .both, .background = true, .color_fill = solid(0, 0, 0, 120) });
         defer backdrop.deinit();
         const column = bottomColumn();
         defer column.deinit();
@@ -1060,16 +1076,16 @@ const GridSlot = struct {
 
 /// Draws one grid. With `held`, slots take clicks. Without it, the grid only shows the items.
 fn gridPanel(self: *Ui, grid: EntityTypes.Player.Grid, held: ?*?GridSlot) void {
-    const player = self.game.player;
+    const player = self.game.player();
     const inventory = player.inventories.getPtr(grid);
     const panel = dvui.box(@src(), .{}, .{
         .id_extra = @backingInt(grid),
         .gravity_x = 0.5,
         .background = true,
-        .color_fill = .{ .color = .{ .r = 40, .g = 40, .b = 40, .a = 160 } },
+        .color_fill = solid(40, 40, 40, 160),
         .padding = .all(2),
         .border = .all(2),
-        .color_border = .{ .color = slot_border_color },
+        .color_border = slot_border_color,
     });
     defer panel.deinit();
 
@@ -1078,7 +1094,7 @@ fn gridPanel(self: *Ui, grid: EntityTypes.Player.Grid, held: ?*?GridSlot) void {
         defer bar.deinit();
         for (0..inventory.width) |col| {
             const here: GridSlot = .{ .grid = grid, .slot = .{ .row = @intCast(row), .col = @intCast(col) } };
-            const selected = grid == .hotbar and row == player.selected_row and col == player.selected_col;
+            const selected = grid == .hotbar and std.meta.eql(here.slot, player.selected);
             const slot = itemSlot(col, selected);
             defer slot.deinit();
             if (held) |pick| {
@@ -1095,7 +1111,7 @@ fn gridPanel(self: *Ui, grid: EntityTypes.Player.Grid, held: ?*?GridSlot) void {
 }
 
 fn gridSlot(self: *Ui, slot: GridSlot) *?Item.Item {
-    return self.game.player.inventories.getPtr(slot.grid).at(slot.slot);
+    return self.game.player().inventories.getPtr(slot.grid).at(slot.slot);
 }
 
 fn itemTooltip(slot: *const dvui.WidgetData, item_type: Item.ItemType) void {
@@ -1141,8 +1157,8 @@ fn itemSlot(id_extra: usize, selected: bool) *dvui.OverlayWidget {
         .padding = .all(2),
         .margin = .all(2),
         .border = .all(2),
-        .color_border = .{ .color = slot_border_color },
-        .color_fill = .{ .color = if (selected) selected_slot_color else .transparent },
+        .color_border = slot_border_color,
+        .color_fill = if (selected) selected_slot_color else .transparent,
         .background = true,
     });
 }
@@ -1176,31 +1192,29 @@ fn cursorIcon(self: *Ui, item: Item.Item) void {
 
 /// The pack's icon for an item, or the missing texture when the pack has none.
 fn itemTexture(self: *const Ui, item_type: Item.ItemType) dvui.Texture {
-    return self.item_textures.get(item_type) orelse self.missing_item_texture;
+    return self.textures.items.get(item_type) orelse self.textures.missing_item;
 }
 
 fn newGameGenerator(self: *Ui) ?*generator_loader.Generator {
-    const index = self.new_game.generator_index orelse return null;
-    return &self.generators.generators.items[index];
+    const selected = self.new_game.generator orelse return null;
+    return &self.generators.generators.items[selected.index];
 }
 
 fn selectNewGameGenerator(self: *Ui, allocator: std.mem.Allocator, index: usize) !void {
-    if (self.new_game.generator_index == index) return;
     const generator = &self.generators.generators.items[index];
-    const config = generator.defaultConfig(allocator) orelse return error.OutOfMemory;
-    if (self.new_game.config) |old_config| generator_api.free(allocator, old_config);
-    self.new_game.preset_index = generator.defaultPresetIndex();
-    self.new_game.config = config;
-    self.new_game.generator_index = index;
+    try self.setNewGameConfig(allocator, index, generator.defaultPresetIndex(), generator.defaultConfig(allocator));
 }
 
 fn selectNewGamePreset(self: *Ui, allocator: std.mem.Allocator, index: usize) !void {
-    const generator = self.newGameGenerator() orelse return;
-    const config = generator.presetConfig(allocator, index) orelse return error.OutOfMemory;
-    errdefer generator_api.free(allocator, config);
-    if (self.new_game.config) |old_config| generator_api.free(allocator, old_config);
-    self.new_game.config = config;
-    self.new_game.preset_index = index;
+    const selected = self.new_game.generator orelse return;
+    try self.setNewGameConfig(allocator, selected.index, index, self.newGameGenerator().?.presetConfig(allocator, index));
+}
+
+/// Replaces the selection, taking ownership of `config` (null means it failed to allocate).
+fn setNewGameConfig(self: *Ui, allocator: std.mem.Allocator, index: usize, preset_index: usize, config: ?*generator_api.ConfigTree) !void {
+    const new_config = config orelse return error.OutOfMemory;
+    if (self.new_game.generator) |old| generator_api.free(allocator, old.config);
+    self.new_game.generator = .{ .index = index, .config = new_config, .preset_index = preset_index };
 }
 
 const max_generator_dropdown_entries: usize = 16;
@@ -1209,9 +1223,9 @@ fn newGameMenu(self: *Ui, io: std.Io, allocator: std.mem.Allocator) !void {
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
-    if (!self.menu_state.ingame) self.sidebar();
+    self.sidebar();
 
-    const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = .{ .r = 48, .g = 77, .b = 84, .a = 225 } } });
+    const options = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = solid(48, 77, 84, 225) });
     defer options.deinit();
 
     const content = pageContent(1);
@@ -1234,12 +1248,12 @@ fn newGameMenu(self: *Ui, io: std.Io, allocator: std.mem.Allocator) !void {
 
     const scroll = dvui.scrollArea(@src(), .{ .vertical = .auto }, .{ .expand = .both });
     defer scroll.deinit();
-    if (self.new_game.config) |config| drawConfigTree(self, allocator, config);
+    if (self.new_game.generator) |selected| drawConfigTree(self, allocator, selected.config);
 }
 
 fn ensureNewGameGenerator(self: *Ui, allocator: std.mem.Allocator) !void {
     const generators = self.generators.generators.items;
-    if (self.new_game.generator_index != null or generators.len == 0) return;
+    if (self.new_game.generator != null or generators.len == 0) return;
     const initial = for (generators, 0..) |generator, i| {
         if (std.mem.eql(u8, generator.info.name, Game.WorldOptions.default.generator_name)) break i;
     } else 0;
@@ -1261,7 +1275,7 @@ fn createWorld(self: *Ui, io: std.Io, allocator: std.mem.Allocator, world_name: 
     defer allocator.free(game_path);
     const world_options: Game.WorldOptions = .{
         .generator_name = if (self.newGameGenerator()) |generator| generator.info.name else Game.WorldOptions.default.generator_name,
-        .world_config = self.new_game.world_config,
+        .world_config = .{},
         .spawn = self.new_game.spawn_config,
     };
     try world_options.save(io, game_path);
@@ -1269,7 +1283,6 @@ fn createWorld(self: *Ui, io: std.Io, allocator: std.mem.Allocator, world_name: 
     // Mark the list stale before the fallible open so a failed open still refreshes.
     self.world_list_dirty = true;
     try self.openGame(io, allocator, game_path);
-    self.menu_state.enterGame();
 }
 
 fn worldExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
@@ -1282,7 +1295,7 @@ fn worldExists(io: std.Io, dir: std.Io.Dir, name: []const u8) !bool {
 
 fn saveGeneratorConfig(self: *Ui, allocator: std.mem.Allocator, io: std.Io, game_path: []const u8) !void {
     const generator = self.newGameGenerator() orelse return;
-    const config = self.new_game.config orelse return;
+    const config = self.new_game.generator.?.config;
     generator.api.config_set_seeds(&io, config);
     const config_dir = try std.Io.Dir.path.join(allocator, &.{ game_path, "config" });
     defer allocator.free(config_dir);
@@ -1319,12 +1332,17 @@ fn generatorDropdown(self: *Ui, allocator: std.mem.Allocator) !void {
     const count = @min(generators.len, max_generator_dropdown_entries);
     var names_buffer: [max_generator_dropdown_entries][]const u8 = undefined;
     for (names_buffer[0..count], generators[0..count]) |*name, *generator| name.* = generator.info.name;
-    const selected = self.new_game.generator_index orelse 0;
-    const previous = if (selected < count) selected else 0;
-    var choice: usize = previous;
-    dvui.labelNoFmt(@src(), "Generator", .{}, .{ .font = .{ .size = 24 } });
-    _ = dvui.dropdown(@src(), names_buffer[0..count], .{ .choice = &choice }, .{}, .{});
-    if (choice != previous) try self.selectNewGameGenerator(allocator, choice);
+    const selected = if (self.new_game.generator) |current| current.index else 0;
+    if (headedDropdown("Generator", names_buffer[0..count], selected, 0)) |choice| try self.selectNewGameGenerator(allocator, choice);
+}
+
+/// Draws a titled dropdown and returns the new index when the user picks another entry.
+fn headedDropdown(title: []const u8, names: []const []const u8, current: usize, id_extra: usize) ?usize {
+    const previous = if (current < names.len) current else 0;
+    var choice = previous;
+    dvui.labelNoFmt(@src(), title, .{}, .{ .id_extra = id_extra, .font = .{ .size = 24 } });
+    _ = dvui.dropdown(@src(), names, .{ .choice = &choice }, .{}, .{ .id_extra = id_extra });
+    return if (choice != previous) choice else null;
 }
 
 fn presetDropdown(self: *Ui, allocator: std.mem.Allocator) !void {
@@ -1333,24 +1351,20 @@ fn presetDropdown(self: *Ui, allocator: std.mem.Allocator) !void {
     if (count == 0) return;
     var names_buffer: [max_generator_dropdown_entries][]const u8 = undefined;
     for (names_buffer[0..count], 0..) |*dest, i| dest.* = generator.presetName(i);
-    const previous = if (self.new_game.preset_index < count) self.new_game.preset_index else 0;
-    var choice: usize = previous;
-    dvui.labelNoFmt(@src(), "Preset", .{}, .{ .font = .{ .size = 24 } });
-    _ = dvui.dropdown(@src(), names_buffer[0..count], .{ .choice = &choice }, .{}, .{});
-    if (choice != previous) try self.selectNewGamePreset(allocator, choice);
+    if (headedDropdown("Preset", names_buffer[0..count], self.new_game.generator.?.preset_index, 1)) |choice| try self.selectNewGamePreset(allocator, choice);
 }
 
 fn mainPage(self: *Ui, io: std.Io, allocator: std.mem.Allocator) !void {
     const menuarea = dvui.overlay(@src(), .{ .expand = .both });
     defer menuarea.deinit();
-    _ = dvui.image(@src(), .{ .source = .{ .texture = self.menu_background }, .shrink = .vertical }, .{ .expand = .both });
+    _ = dvui.image(@src(), .{ .source = .{ .texture = self.textures.menu_background }, .shrink = .vertical }, .{ .expand = .both });
 
     const page = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer page.deinit();
 
     self.sidebar();
 
-    const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = .{ .color = .{ .r = 24, .g = 24, .b = 24, .a = 255 } }, .expand = .both });
+    const menu = dvui.box(@src(), .{}, .{ .background = false, .color_fill = solid(24, 24, 24, 255), .expand = .both });
     defer menu.deinit();
 
     const top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
@@ -1362,7 +1376,7 @@ fn mainPage(self: *Ui, io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 fn sidebar(self: *Ui) void {
-    const bar = dvui.box(@src(), .{ .dir = .vertical }, .{ .background = true, .color_fill = .{ .color = .{ .r = 48, .g = 77, .b = 48, .a = 225 } }, .expand = .vertical, .min_size_content = .width(128) });
+    const bar = dvui.box(@src(), .{ .dir = .vertical }, .{ .background = true, .color_fill = solid(48, 77, 48, 225), .expand = .vertical, .min_size_content = .width(128) });
     defer bar.deinit();
     const button_options: dvui.Options = .{ .gravity_x = 0.5, .color_fill = .blue, .margin = .all(16), .expand = .horizontal, .padding = .{ .y = 16, .h = 16 } };
 
@@ -1373,7 +1387,7 @@ fn sidebar(self: *Ui) void {
         return;
     }
     if (dvui.button(@src(), "Settings", .{}, button_options)) {
-        self.menu_state.page = .settings;
+        self.menu_state.page = .{ .settings = false };
         return;
     }
     if (dvui.button(@src(), "Quit", .{}, button_options.override(.{ .color_fill = .olive }))) self.running.store(false, .unordered);
@@ -1425,9 +1439,7 @@ fn continueMenu(self: *Ui, io: std.Io, allocator: std.mem.Allocator) !void {
             std.log.info("Joining game: {s}", .{item.name});
             const world_path = try std.Io.Dir.path.join(allocator, &.{ self.worlds_path, item.name });
             defer allocator.free(world_path);
-            try self.openGame(io, allocator, world_path);
-            self.menu_state.enterGame();
-            return;
+            return self.openGame(io, allocator, world_path);
         }
 
         if (dvui.button(@src(), "Delete", .{}, .{ .gravity_x = 0.0, .expand = .none, .margin = .{ .w = 8, .h = 4 }, .font = .{ .family = pixel_font }, .color_fill = .red, .corners = .all(2) })) {
@@ -1498,9 +1510,9 @@ fn newerFirst(_: void, a: FolderData, b: FolderData) bool {
 }
 
 fn openGame(self: *Ui, io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
-    self.vk_ctx.swapchain_gamma.store(self.config.game_config.render_options.gamma_correction, .monotonic);
     try self.game.init(io, allocator, &self.config.game_config, self.config_lock, path, self.vk_ctx, self.generators);
     std.log.info("opening game", .{});
+    self.menu_state.page = .game;
 }
 
 fn calculateWidget(widget: *dvui.BoxWidget) void {
@@ -1568,7 +1580,7 @@ fn drawParam(self: *Ui, allocator: std.mem.Allocator, param: *generator_api.Para
     if (!paramVisible(param)) return;
 
     var label_buffer: [256]u8 = undefined;
-    const label = configLabel(param, &label_buffer);
+    const label = titleCase(if (param.spec.label.len > 0) param.spec.label else param.name, &label_buffer);
     switch (param.value) {
         .group => |*group| {
             const box = self.collapsibleSection(@src(), label, id, defaultSectionExpanded(param.name), 4) orelse return;
@@ -1577,8 +1589,8 @@ fn drawParam(self: *Ui, allocator: std.mem.Allocator, param: *generator_api.Para
         },
         .array => |*array| drawArray(self, allocator, label, array, id),
         .f32 => _ = configSlider(label, &param.value.f32, param.spec, 0, 1, id),
-        .i32 => configSliderInt(label, &param.value.i32, param.spec, id),
-        .u32 => configSliderUInt(label, &param.value.u32, param.spec, id),
+        .i32 => configSliderInt(label, &param.value.i32, param.spec, -100, 100, id),
+        .u32 => configSliderInt(label, &param.value.u32, param.spec, 0, 100, id),
         .u64 => configTextNumber(u64, label, &param.value.u64, id),
         .bool => _ = dvui.checkbox(@src(), &param.value.bool, label, .{ .id_extra = @intCast(id) }),
         .string => configTextString(allocator, label, &param.value.string, id),
@@ -1587,36 +1599,27 @@ fn drawParam(self: *Ui, allocator: std.mem.Allocator, param: *generator_api.Para
     if (param.spec.description.len == 0) return;
     dvui.labelNoFmt(@src(), param.spec.description, .{}, .{
         .id_extra = @intCast(id),
-        .color_fill = .{ .color = .{ .r = 160, .g = 180, .b = 160, .a = 255 } },
+        .color_fill = solid(160, 180, 160, 255),
         .font = .{ .size = 11 },
         .padding = .{ .x = 8, .w = 8 },
     });
 }
 
 fn drawArray(self: *Ui, allocator: std.mem.Allocator, name: []const u8, array: *generator_api.Array, id: u64) void {
-    if (!self.sectionHeader(id, true, "{s} ({d})", .{ name, array.items.len })) return;
+    if (!self.sectionHeader(id, true, section_header_style, "{s} ({d})", .{ name, array.items.len })) return;
 
-    const contents = configBox(@src(), configId(id, "contents"), .{ .r = 16, .g = 24, .b = 16, .a = 255 }, .{ .x = 8, .w = 8, .y = 4, .h = 4 });
+    const contents = configBox(@src(), configId(id, "contents"), solid(16, 24, 16, 255), .{ .x = 8, .w = 8, .y = 4, .h = 4 });
     defer contents.deinit();
 
     for (array.items, 0..) |*item, i| {
         const item_id = configIndexId(id, i);
-        const item_expanded = self.config_section_states.get(item_id) orelse (i == 0);
-        var item_title_buffer: [64]u8 = undefined;
-        const item_title = sectionTitle(&item_title_buffer, item_expanded, "Item {d}", .{i + 1});
-        if (dvui.button(@src(), item_title, .{}, .{
-            .expand = .horizontal,
-            .id_extra = @intCast(configId(item_id, "header")),
-            .color_fill = .{ .color = .{ .r = 61, .g = 107, .b = 61, .a = 255 } },
+        if (!self.sectionHeader(item_id, i == 0, .{
+            .color_fill = solid(61, 107, 61, 255),
             .margin = .{ .y = 4 },
             .padding = .{ .y = 6, .h = 6 },
-        })) {
-            self.config_section_states.put(item_id, !item_expanded) catch |err| std.log.warn("Ui: config section state store failed: {any}", .{err});
-            continue;
-        }
-        if (!item_expanded) continue;
+        }, "Item {d}", .{i + 1})) continue;
 
-        const item_box = configBox(@src(), configId(item_id, "contents"), .{ .r = 24, .g = 40, .b = 28, .a = 255 }, .{ .x = 12, .w = 12, .y = 4, .h = 4 });
+        const item_box = configBox(@src(), configId(item_id, "contents"), solid(24, 40, 28, 255), .{ .x = 12, .w = 12, .y = 4, .h = 4 });
         defer item_box.deinit();
         if (item.value == .group) drawParams(self, allocator, &item.value.group.params, item_id);
         if (dvui.button(@src(), "Remove", .{}, .{ .id_extra = @intCast(configId(item_id, "remove")) })) {
@@ -1626,10 +1629,6 @@ fn drawArray(self: *Ui, allocator: std.mem.Allocator, name: []const u8, array: *
     }
 
     if (dvui.button(@src(), "Add item", .{}, .{ .id_extra = @intCast(configId(id, "add")), .margin = .{ .y = 6 } })) generator_api.arrayAdd(allocator, array) catch |err| std.log.warn("Ui: adding array item failed: {any}", .{err});
-}
-
-fn configLabel(param: *const generator_api.Param, buffer: *[256]u8) []const u8 {
-    return titleCase(if (param.spec.label.len > 0) param.spec.label else param.name, buffer);
 }
 
 /// Writes `source` with underscores as spaces and each word capitalized, truncated to `buffer`.
@@ -1660,16 +1659,6 @@ fn configSlider(name: []const u8, value: *f32, spec: generator_api.Spec, default
     const max: f32 = @floatCast(spec.max orelse default_max);
     const step: ?f32 = if (spec.step) |s| @floatCast(s) else null;
     return dvui.sliderEntry(@src(), null, .{ .value = value, .min = min, .max = max, .interval = step }, .{ .id_extra = @intCast(id), .expand = .horizontal });
-}
-
-fn configSliderInt(name: []const u8, value: *i32, spec: generator_api.Spec, id: u64) void {
-    var float_value: f32 = @floatFromInt(value.*);
-    if (configSlider(name, &float_value, spec, -100, 100, id)) value.* = @intFromFloat(float_value);
-}
-
-fn configSliderUInt(name: []const u8, value: *u32, spec: generator_api.Spec, id: u64) void {
-    var float_value: f32 = @floatFromInt(value.*);
-    if (configSlider(name, &float_value, spec, 0, 100, id) and float_value >= 0) value.* = @intFromFloat(float_value);
 }
 
 /// Draws a labeled text entry over `buffer` and returns the text the user typed.

@@ -8,9 +8,7 @@ const wio = @import("wio");
 
 const Renderer = @import("Renderer.zig");
 const zignal = @import("zignal");
-const Mesher = @import("Renderer/Mesher.zig");
 const core = @import("Renderer/vulkan/core.zig");
-const gpu = @import("Renderer/vulkan/gpu.zig");
 const VulkanRenderer = @import("Renderer/vulkan/VulkanRenderer.zig").VulkanRenderer;
 const GpuProfiler = @import("Renderer/vulkan/tracy_gpu.zig").GpuProfiler;
 const Block = @import("world/Block.zig").Block;
@@ -60,10 +58,8 @@ pub const VulkanContext = @This();
 pub const max_frames_in_flight: u32 = 2;
 
 allocator: std.mem.Allocator,
-window: *wio.Window,
 surface: vk.SurfaceKHR = .null_handle,
 
-vkb: vk.BaseWrapper,
 instance: vk.InstanceProxy,
 
 debug_callback: vk.DebugUtilsMessengerEXT,
@@ -88,21 +84,14 @@ upload_command_pool: vk.CommandPool = .null_handle,
 cmd_buffers: [max_frames_in_flight]vk.CommandBuffer = undefined,
 
 image_acquired_semaphores: [max_frames_in_flight]vk.Semaphore = @splat(.null_handle),
-render_complete_semaphores: []vk.Semaphore = &.{},
 
 swapchain: vk.SwapchainKHR = .null_handle,
 swapchain_format: vk.Format = .b8g8r8a8_srgb,
-swapchain_gamma: std.atomic.Value(bool) = .init(false),
-swapchain_extent_actual: vk.Extent2D = .{ .width = 0, .height = 0 },
-swapchain_images: []vk.Image = &.{},
-swapchain_views: []vk.ImageView = &.{},
-swapchain_image_layouts: []vk.ImageLayout = &.{},
+swapchain_images: []SwapchainImage = &.{},
 swapchain_extent: vk.Extent2D = .{ .width = 800, .height = 600 },
-swapchain_needs_recreate: std.atomic.Value(bool) = .init(false),
-suboptimal_recreate_requested: std.atomic.Value(bool) = .init(false),
-
-present_mode: PresentMode = .mailbox,
-last_present_mode_requested: PresentMode = .mailbox,
+// The frame loop thread owns these flags, like every other swapchain field.
+swapchain_needs_recreate: bool = false,
+suboptimal_recreate_requested: bool = false,
 
 transfer_queue: vk.Queue = undefined,
 transfer_queue_family_index: u32 = undefined,
@@ -111,7 +100,7 @@ transfer_semaphore: vk.Semaphore = .null_handle,
 transfer_semaphore_value: std.atomic.Value(u64) = .init(0),
 graphics_timeline_semaphore: vk.Semaphore = .null_handle,
 gpu_profiler: GpuProfiler = .{},
-// Cross-thread frame counter: read with .acquire by submitBatch / drainInFlightFrames and
+// Cross-thread frame counter: read with .acquire by submitBatch / waitSubmittedFrames and
 // advanced with .release by submitFrameWithExtra; the pair orders the two submit paths.
 frame_number: std.atomic.Value(u64) = .init(0),
 queue_mutex: std.Io.Mutex = .init,
@@ -119,21 +108,35 @@ queue_mutex: std.Io.Mutex = .init,
 /// submit does not queue behind graphics submits, present, or scene growth stalls.
 transfer_queue_mutex: std.Io.Mutex = .init,
 
-vulkan_host_allocator: VulkanHostAllocator = undefined,
-vkalloc: vk.AllocationCallbacks = undefined,
+/// Routes Vulkan host allocations to `allocator`.
+vkalloc: vk.AllocationCallbacks,
 
-// Screenshot staging buffer (host-visible) for copy + save
-screenshot_buffer: vk.Buffer = .null_handle,
-screenshot_memory: vk.DeviceMemory = .null_handle,
-screenshot_mapped: ?[*]u8 = null,
-screenshot_buffer_size: vk.DeviceSize = 0,
-screenshot_pending_save: bool = false,
-screenshot_requested: std.atomic.Value(bool) = .init(false),
-screenshot_resolution: ScreenshotResolution = .native,
-screenshot_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
-// Grow-only resize scratch and last-path storage avoid per-save allocation.
-screenshot_scratch: []u8 = &.{},
-screenshot_path_buf: [256]u8 = undefined,
+screenshot_staging: ?ScreenshotStaging = null,
+/// Set by `requestScreenshot`; the next UI pass records the copy.
+screenshot_request: ?ScreenshotResolution = null,
+/// Set when a submitted frame copies the swapchain image; `savePendingScreenshot` saves it.
+pending_screenshot: ?PendingScreenshot = null,
+
+/// One swapchain image and the resources indexed by its image index.
+pub const SwapchainImage = struct {
+    image: vk.Image,
+    view: vk.ImageView,
+    layout: vk.ImageLayout,
+    render_complete: vk.Semaphore,
+};
+
+/// A host-visible buffer that receives screenshot copies. It grows and is never shrunk.
+const ScreenshotStaging = struct {
+    buffer: vk.Buffer,
+    memory: vk.DeviceMemory,
+    mapped: [*]u8,
+    size: vk.DeviceSize,
+};
+
+const PendingScreenshot = struct {
+    extent: vk.Extent2D,
+    resolution: ScreenshotResolution,
+};
 
 fn getProcAddr(instance: ?vk.Instance, procname: [*:0]const u8) ?*const fn () void {
     return @ptrCast(wio.vkGetInstanceProcAddr(@intFromPtr(instance), procname));
@@ -262,11 +265,9 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     errdefer allocator.destroy(self);
 
     self.* = .{
-        .vulkan_host_allocator = .{ .allocator = allocator },
+        .vkalloc = host_allocation.callbacks(&self.allocator),
         .debug_callback = .null_handle,
         .allocator = allocator,
-        .window = window,
-        .vkb = undefined,
         .instance = undefined,
         .pdev = undefined,
         .props = undefined,
@@ -279,8 +280,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
         .command_pool = undefined,
     };
 
-    self.vkalloc = self.vulkan_host_allocator.getCallbacks();
-    self.vkb = .load(getProcAddr);
+    const vkb: vk.BaseWrapper = .load(getProcAddr);
 
     const app_info: vk.ApplicationInfo = .{
         .p_application_name = "Terrafinity",
@@ -295,7 +295,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
 
     try extension_names.appendSlice(allocator, wio.getRequiredVulkanInstanceExtensions());
 
-    const extensions = try self.vkb.enumerateInstanceExtensionPropertiesAlloc(null, allocator);
+    const extensions = try vkb.enumerateInstanceExtensionPropertiesAlloc(null, allocator);
     defer allocator.free(extensions);
     const has_portability = hasExtension(extensions, vk.extensions.khr_portability_enumeration.name);
     const has_debug_utils = hasExtension(extensions, vk.extensions.ext_debug_utils.name);
@@ -305,11 +305,11 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     const validation_layer: [*:0]const u8 = "VK_LAYER_KHRONOS_validation";
     var enable_validation = false;
     if (builtin.mode == .debug) {
-        const layers = try self.vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
+        const layers = try vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
         defer allocator.free(layers);
-        for (layers) |layer| {
-            if (std.mem.eql(u8, std.mem.sliceTo(&layer.layer_name, 0), std.mem.span(validation_layer))) enable_validation = true;
-        }
+        enable_validation = for (layers) |layer| {
+            if (std.mem.eql(u8, std.mem.sliceTo(&layer.layer_name, 0), std.mem.span(validation_layer))) break true;
+        } else false;
         if (enable_validation) std.log.info("Enabling Vulkan validation layer", .{});
     }
 
@@ -325,7 +325,7 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     // Allocate the wrapper first so nothing fallible sits between creating the instance and owning it.
     const instance_wrapper = try allocator.create(vk.InstanceWrapper);
     errdefer allocator.destroy(instance_wrapper);
-    const instance_handle = try self.vkb.createInstance(&instance_create_info, &self.vkalloc);
+    const instance_handle = try vkb.createInstance(&instance_create_info, &self.vkalloc);
     instance_wrapper.* = .load(instance_handle, getProcAddr);
     self.instance = .init(instance_handle, instance_wrapper);
     errdefer self.instance.destroyInstance(&self.vkalloc);
@@ -375,17 +375,14 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     var queue_create_infos: [3]vk.DeviceQueueCreateInfo = undefined;
     var queue_count: u32 = 0;
     const families: [3]u32 = .{ queue_families.graphics, queue_families.present, queue_families.transfer };
-    for (families) |f| {
-        for (queue_create_infos[0..queue_count]) |q| {
-            if (q.queue_family_index == f) break;
-        } else {
-            queue_create_infos[queue_count] = .{
-                .queue_family_index = f,
-                .queue_count = 1,
-                .p_queue_priorities = (&queue_priority)[0..1],
-            };
-            queue_count += 1;
-        }
+    for (families, 0..) |f, i| {
+        if (std.mem.findScalar(u32, families[0..i], f) != null) continue;
+        queue_create_infos[queue_count] = .{
+            .queue_family_index = f,
+            .queue_count = 1,
+            .p_queue_priorities = (&queue_priority)[0..1],
+        };
+        queue_count += 1;
     }
 
     var robustness2_features: vk.PhysicalDeviceRobustness2FeaturesEXT = .{
@@ -488,19 +485,9 @@ pub fn init(allocator: std.mem.Allocator, window: *wio.Window) !*VulkanContext {
     self.graphics_timeline_semaphore = try self.dev.createSemaphore(&timeline_sem_info, &self.vkalloc);
     errdefer self.dev.destroySemaphore(self.graphics_timeline_semaphore, &self.vkalloc);
 
-    errdefer self.destroySemaphores(&self.image_acquired_semaphores);
-
-    self.render_complete_semaphores = try allocator.alloc(vk.Semaphore, max_frames_in_flight);
-    @memset(self.render_complete_semaphores, .null_handle);
-    errdefer {
-        self.destroySemaphores(self.render_complete_semaphores);
-        allocator.free(self.render_complete_semaphores);
-    }
-
-    const semaphore_create_info: vk.SemaphoreCreateInfo = .{};
-    for (&self.image_acquired_semaphores, self.render_complete_semaphores) |*acq, *complete| {
-        acq.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
-        complete.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
+    errdefer self.destroyImageAcquiredSemaphores();
+    for (&self.image_acquired_semaphores) |*semaphore| {
+        semaphore.* = try self.dev.createSemaphore(&.{}, &self.vkalloc);
     }
 
     const cmd_alloc_info: vk.CommandBufferAllocateInfo = .{
@@ -523,17 +510,12 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.dev.resetCommandPool(self.command_pool, .{}) catch |err| std.log.err("resetCommandPool failed during VulkanContext.deinit: {any}", .{err});
     self.dev.resetCommandPool(self.ui_command_pool, .{}) catch |err| std.log.err("resetCommandPool (ui) failed during VulkanContext.deinit: {any}", .{err});
 
-    self.destroySwapchainResources();
-
-    if (self.swapchain != .null_handle) {
-        self.dev.destroySwapchainKHR(self.swapchain, &self.vkalloc);
-        self.swapchain = .null_handle;
-    }
+    self.destroySwapchainImages(self.swapchain_images);
+    self.allocator.free(self.swapchain_images);
+    if (self.swapchain != .null_handle) self.dev.destroySwapchainKHR(self.swapchain, &self.vkalloc);
 
     self.dev.freeCommandBuffers(self.command_pool, &self.cmd_buffers);
-    self.destroySemaphores(&self.image_acquired_semaphores);
-    self.destroySemaphores(self.render_complete_semaphores);
-    self.allocator.free(self.render_complete_semaphores);
+    self.destroyImageAcquiredSemaphores();
 
     self.gpu_profiler.deinit();
 
@@ -543,8 +525,7 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
 
     self.dev.destroySemaphore(self.transfer_semaphore, &self.vkalloc);
     self.dev.destroySemaphore(self.graphics_timeline_semaphore, &self.vkalloc);
-    self.destroyScreenshotBuffer();
-    self.allocator.free(self.screenshot_scratch);
+    self.destroyScreenshotStaging();
 
     self.dev.destroyDevice(&self.vkalloc);
     self.instance.destroySurfaceKHR(self.surface, &self.vkalloc);
@@ -558,34 +539,27 @@ pub fn deinit(self: *VulkanContext, io: std.Io) void {
     self.allocator.destroy(self);
 }
 
-/// Destroys every created semaphore in `semaphores`.
-fn destroySemaphores(self: *VulkanContext, semaphores: []const vk.Semaphore) void {
-    for (semaphores) |sem| if (sem != .null_handle) self.dev.destroySemaphore(sem, &self.vkalloc);
+fn destroyImageAcquiredSemaphores(self: *VulkanContext) void {
+    for (self.image_acquired_semaphores) |semaphore| {
+        if (semaphore != .null_handle) self.dev.destroySemaphore(semaphore, &self.vkalloc);
+    }
 }
 
-fn destroySwapchainResources(self: *VulkanContext) void {
-    for (self.swapchain_views) |view| if (view != .null_handle) self.dev.destroyImageView(view, &self.vkalloc);
-    self.allocator.free(self.swapchain_images);
-    self.allocator.free(self.swapchain_views);
-    self.allocator.free(self.swapchain_image_layouts);
-    self.swapchain_images = &.{};
-    self.swapchain_views = &.{};
-    self.swapchain_image_layouts = &.{};
+/// Destroys the view and the semaphore of each entry. The caller frees the slice.
+fn destroySwapchainImages(self: *VulkanContext, images: []const SwapchainImage) void {
+    for (images) |entry| {
+        self.dev.destroyImageView(entry.view, &self.vkalloc);
+        self.dev.destroySemaphore(entry.render_complete, &self.vkalloc);
+    }
 }
 
-pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction: bool) !void {
+/// Creates the swapchain, or replaces it when a recreation is requested. Without a request,
+/// an existing swapchain stays, so a renderer init reuses the swapchain of the menu.
+pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction: bool, present_mode: PresentMode) !void {
     if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
         return error.InvalidWindowSize;
     }
-
-    // The cache only applies when nothing forced a recreation: after OUT_OF_DATE / suboptimal the
-    // configuration may be unchanged while the swapchain is still stale, so the flag must bypass it.
-    if (self.swapchain != .null_handle and !self.swapchain_needs_recreate.load(.acquire)) {
-        const current_gamma = self.swapchain_gamma.load(.monotonic);
-        const extent_same = self.swapchain_extent_actual.width == self.swapchain_extent.width and
-            self.swapchain_extent_actual.height == self.swapchain_extent.height;
-        if (current_gamma == gamma_correction and extent_same and self.present_mode == self.last_present_mode_requested) return;
-    }
+    if (self.swapchain != .null_handle and !self.swapchain_needs_recreate) return;
 
     std.log.info("VulkanContext.createSwapchain: Starting swapchain creation...", .{});
 
@@ -608,41 +582,10 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         return;
     }
 
-    const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
-    defer self.allocator.free(surface_formats);
+    const surface_format = try self.chooseSurfaceFormat(gamma_correction);
+    const vk_present_mode = try self.choosePresentMode(present_mode);
 
-    const target_formats: []const vk.Format = if (gamma_correction)
-        &.{ .b8g8r8a8_srgb, .r8g8b8a8_srgb }
-    else
-        &.{ .b8g8r8a8_unorm, .r8g8b8a8_unorm };
-
-    var surface_format = surface_formats[0];
-    blk: for (target_formats) |tf| {
-        for (surface_formats) |sfmt| {
-            if (sfmt.format == tf) {
-                surface_format = sfmt;
-                break :blk;
-            }
-        }
-    }
-    const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.pdev, self.surface, self.allocator);
-    defer self.allocator.free(present_modes);
-
-    const requested_mode: vk.PresentModeKHR = switch (self.present_mode) {
-        .vsync => .fifo_khr,
-        .mailbox => .mailbox_khr,
-        .immediate => .immediate_khr,
-    };
-    // FIFO is the only mode every surface must support.
-    const present_mode: vk.PresentModeKHR = if (std.mem.findScalar(vk.PresentModeKHR, present_modes, requested_mode) != null) requested_mode else .fifo_khr;
-    if (present_mode != requested_mode) {
-        std.log.warn("Present mode '{s}' not available, using fallback '{s}' instead", .{
-            @tagName(requested_mode),
-            @tagName(present_mode),
-        });
-    }
-
-    const min_for_mode: u32 = switch (present_mode) {
+    const min_for_mode: u32 = switch (vk_present_mode) {
         .mailbox_khr => @max(caps.min_image_count, 3),
         .immediate_khr => @max(caps.min_image_count, 2),
         else => caps.min_image_count,
@@ -650,9 +593,8 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
     const raw_count = min_for_mode + 1;
     const image_count = if (caps.max_image_count > 0) @min(raw_count, caps.max_image_count) else raw_count;
 
-    std.log.info("Swapchain: present_mode={s}, requested={s}, images={d} (min={d}, max={d})", .{
-        @tagName(present_mode),
-        @tagName(requested_mode),
+    std.log.info("Swapchain: present_mode={s}, images={d} (min={d}, max={d})", .{
+        @tagName(vk_present_mode),
         image_count,
         caps.min_image_count,
         caps.max_image_count,
@@ -669,8 +611,6 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
     try self.dev.resetCommandPool(self.ui_command_pool, .{});
 
     const old_swapchain = self.swapchain;
-    self.destroySwapchainResources();
-
     const queue_family_indices: [2]u32 = .{ self.queue_family_index, self.present_queue_family_index };
     const shared = self.queue_family_index != self.present_queue_family_index;
     const new_swapchain = try self.dev.createSwapchainKHR(&.{
@@ -686,71 +626,75 @@ pub fn createSwapchainLocked(self: *VulkanContext, io: std.Io, gamma_correction:
         .p_queue_family_indices = if (shared) &queue_family_indices else null,
         .pre_transform = caps.current_transform,
         .composite_alpha = .{ .opaque_khr = true },
-        .present_mode = present_mode,
+        .present_mode = vk_present_mode,
         .clipped = .true,
         .old_swapchain = old_swapchain,
     }, &self.vkalloc);
-
     errdefer self.dev.destroySwapchainKHR(new_swapchain, &self.vkalloc);
 
-    const new_images = try self.dev.getSwapchainImagesAllocKHR(new_swapchain, self.allocator);
-    errdefer self.allocator.free(new_images);
+    // All fallible work ends here, so after a failed recreation deinit still owns every handle in self.
+    const new_images = try self.createSwapchainImages(new_swapchain, surface_format.format);
 
-    const new_views = try self.allocator.alloc(vk.ImageView, new_images.len);
-    @memset(new_views, .null_handle);
-    errdefer {
-        for (new_views) |view| {
-            if (view != .null_handle) self.dev.destroyImageView(view, &self.vkalloc);
-        }
-        self.allocator.free(new_views);
-    }
-
-    for (new_images, new_views) |image, *view| {
-        view.* = try self.dev.createImageView(&.{
-            .image = image,
-            .view_type = .@"2d",
-            .format = surface_format.format,
-            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{ .aspect_mask = .{ .color = true }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 },
-        }, &self.vkalloc);
-    }
-
-    // Finish all fallible work before tearing down the old swapchain and semaphores:
-    // a mid-creation failure then leaves self.swapchain / self.render_complete_semaphores
-    // still referencing valid, owned resources for deinit to clean up.
-    const new_render_complete = try self.allocator.alloc(vk.Semaphore, new_images.len);
-    @memset(new_render_complete, .null_handle);
-    errdefer {
-        self.destroySemaphores(new_render_complete);
-        self.allocator.free(new_render_complete);
-    }
-    const semaphore_create_info: vk.SemaphoreCreateInfo = .{};
-    for (new_render_complete) |*complete| {
-        complete.* = try self.dev.createSemaphore(&semaphore_create_info, &self.vkalloc);
-    }
-
-    const new_layouts = try self.allocator.alloc(vk.ImageLayout, new_images.len);
-    errdefer self.allocator.free(new_layouts);
-    @memset(new_layouts, .undefined);
-
-    if (old_swapchain != .null_handle) {
-        self.dev.destroySwapchainKHR(old_swapchain, &self.vkalloc);
-    }
-    self.destroySemaphores(self.render_complete_semaphores);
-    self.allocator.free(self.render_complete_semaphores);
-    self.render_complete_semaphores = new_render_complete;
+    self.destroySwapchainImages(self.swapchain_images);
+    self.allocator.free(self.swapchain_images);
+    if (old_swapchain != .null_handle) self.dev.destroySwapchainKHR(old_swapchain, &self.vkalloc);
     self.swapchain = new_swapchain;
     self.swapchain_images = new_images;
-    self.swapchain_views = new_views;
-    self.swapchain_image_layouts = new_layouts;
-    self.last_present_mode_requested = self.present_mode;
-    // Cache/state fields commit only after creation succeeds, so a failed recreation cannot leave
-    // a stale config that makes a retry early-return without a valid replacement swapchain.
     self.swapchain_extent = actual_extent;
-    self.swapchain_extent_actual = actual_extent;
-    self.swapchain_gamma.store(gamma_correction, .monotonic);
     self.swapchain_format = surface_format.format;
-    self.swapchain_needs_recreate.store(false, .monotonic);
+    self.swapchain_needs_recreate = false;
+}
+
+/// Returns the first preferred format that the surface supports, else the first surface format.
+fn chooseSurfaceFormat(self: *VulkanContext, gamma_correction: bool) !vk.SurfaceFormatKHR {
+    const surface_formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.pdev, self.surface, self.allocator);
+    defer self.allocator.free(surface_formats);
+
+    const preferred_formats: [2]vk.Format = if (gamma_correction)
+        .{ .b8g8r8a8_srgb, .r8g8b8a8_srgb }
+    else
+        .{ .b8g8r8a8_unorm, .r8g8b8a8_unorm };
+    for (preferred_formats) |preferred| {
+        for (surface_formats) |surface_format| {
+            if (surface_format.format == preferred) return surface_format;
+        }
+    }
+    return surface_formats[0];
+}
+
+/// Returns the Vulkan mode for `present_mode`, or FIFO when the surface does not support it.
+fn choosePresentMode(self: *VulkanContext, present_mode: PresentMode) !vk.PresentModeKHR {
+    const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.pdev, self.surface, self.allocator);
+    defer self.allocator.free(present_modes);
+
+    const requested_mode: vk.PresentModeKHR = switch (present_mode) {
+        .vsync => .fifo_khr,
+        .mailbox => .mailbox_khr,
+        .immediate => .immediate_khr,
+    };
+    if (std.mem.findScalar(vk.PresentModeKHR, present_modes, requested_mode) != null) return requested_mode;
+    // FIFO is the only mode every surface must support.
+    std.log.warn("Present mode '{s}' not available, using fallback 'fifo_khr' instead", .{@tagName(requested_mode)});
+    return .fifo_khr;
+}
+
+/// Creates a view and a render-complete semaphore for each image of `swapchain`.
+fn createSwapchainImages(self: *VulkanContext, swapchain: vk.SwapchainKHR, format: vk.Format) ![]SwapchainImage {
+    const images = try self.dev.getSwapchainImagesAllocKHR(swapchain, self.allocator);
+    defer self.allocator.free(images);
+    const entries = try self.allocator.alloc(SwapchainImage, images.len);
+    var created: usize = 0;
+    errdefer {
+        self.destroySwapchainImages(entries[0..created]);
+        self.allocator.free(entries);
+    }
+    for (images, entries) |image, *entry| {
+        const view = try self.dev.createImageView(&core.imageViewCreateInfo(image, format, .{ .color = true }), &self.vkalloc);
+        errdefer self.dev.destroyImageView(view, &self.vkalloc);
+        entry.* = .{ .image = image, .view = view, .layout = .undefined, .render_complete = try self.dev.createSemaphore(&.{}, &self.vkalloc) };
+        created += 1;
+    }
+    return entries;
 }
 
 pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, old_layout: vk.ImageLayout, new_layout: vk.ImageLayout) void {
@@ -790,22 +734,25 @@ pub fn transitionImageLayout(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: 
     });
 }
 
-/// Waits for device idle while excluding both submit paths: deviceWaitIdle must
-/// not run concurrently with any queue submission, and transfer submits only hold
-/// the transfer mutex. Lock order is transfer then graphics, like allocRegion.
 /// Waits until every submitted frame finishes on the GPU. Unlike deviceWaitIdle it
 /// takes no queue lock and does not wait out the transfer queue's upload backlog.
 pub fn waitSubmittedFrames(self: *VulkanContext) !void {
-    const last_frame = self.frame_number.load(.acquire);
-    if (last_frame == 0) return;
+    return self.waitFrame(self.frame_number.load(.acquire));
+}
+
+/// Waits until the GPU finishes frame `frame_number`. Frame 0 is the initial timeline value, so it never blocks.
+fn waitFrame(self: *VulkanContext, frame_number: u64) !void {
     const wait_info: vk.SemaphoreWaitInfo = .{
         .semaphore_count = 1,
         .p_semaphores = (&self.graphics_timeline_semaphore)[0..1],
-        .p_values = (&last_frame)[0..1],
+        .p_values = (&frame_number)[0..1],
     };
     if (try self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64)) != .success) return error.WaitFailed;
 }
 
+/// Waits for device idle while excluding both submit paths: deviceWaitIdle must
+/// not run concurrently with any queue submission, and transfer submits only hold
+/// the transfer mutex. Lock order is transfer then graphics, like allocRegion.
 pub fn deviceWaitIdleLocked(self: *VulkanContext, io: std.Io) !void {
     self.transfer_queue_mutex.lockUncancelable(io);
     defer self.transfer_queue_mutex.unlock(io);
@@ -814,71 +761,60 @@ pub fn deviceWaitIdleLocked(self: *VulkanContext, io: std.Io) !void {
     _ = try self.dev.deviceWaitIdle();
 }
 
+/// Requests a swapchain recreation before the next frame and resets the suboptimal guard.
 pub fn requestSwapchainRecreate(self: *VulkanContext) void {
-    self.suboptimal_recreate_requested.store(false, .release);
-    self.swapchain_needs_recreate.store(true, .release);
+    self.suboptimal_recreate_requested = false;
+    self.swapchain_needs_recreate = true;
 }
 
+/// Sets the swapchain extent to the window size and requests a recreation.
 pub fn setExtentFromWindow(self: *VulkanContext, size: wio.Size) void {
     // xdg-shell reports a 0x0 content size while the window is minimized; keep the last
     // valid extent so rendering keeps working until the window is shown again.
     if (size.width == 0 or size.height == 0) return;
-    self.swapchain_extent = .{ .width = @as(u32, @intCast(size.width)), .height = @as(u32, @intCast(size.height)) };
+    self.swapchain_extent = .{ .width = @intCast(size.width), .height = @intCast(size.height) };
     self.requestSwapchainRecreate();
 }
 
+/// The frame slot, the acquired swapchain image, and the command buffer of one frame.
 pub const FrameContext = struct {
     frame_index: u32,
     image_index: u32,
     cmd_buffer: vk.CommandBuffer,
 };
 
+/// Waits until the frame slot is free, then acquires the next swapchain image.
 pub fn beginFrame(self: *VulkanContext) !FrameContext {
     const frame_number = self.frame_number.load(.acquire);
     const current_frame: u32 = @intCast(frame_number % max_frames_in_flight);
     if (frame_number >= max_frames_in_flight) {
-        const wait_value: u64 = frame_number - max_frames_in_flight + 1;
-        const wait_info: vk.SemaphoreWaitInfo = .{
-            .semaphore_count = 1,
-            .p_semaphores = (&self.graphics_timeline_semaphore)[0..1],
-            .p_values = (&wait_value)[0..1],
-        };
-        const wait_result = self.dev.waitSemaphores(&wait_info, std.math.maxInt(u64)) catch return error.DrawFailed;
-        if (wait_result != .success) return error.DrawFailed;
+        self.waitFrame(frame_number - max_frames_in_flight + 1) catch return error.DrawFailed;
     }
     self.gpu_profiler.prepareFrame(current_frame);
-    const image_index = try self.acquireSwapchainImage(current_frame);
-    return .{
-        .frame_index = current_frame,
-        .image_index = image_index,
-        .cmd_buffer = self.cmd_buffers[current_frame],
-    };
-}
 
-pub fn acquireSwapchainImage(self: *VulkanContext, current_frame_idx: u32) !u32 {
-    const zone = tracy.Zone.begin(.{ .src = @src(), .name = "acquireSwapchainImage" });
-    defer zone.end();
-
-    const acquire_result = blk: {
-        const zone_acquire = tracy.Zone.begin(.{ .src = @src(), .name = "acquireNextImage" });
-        defer zone_acquire.end();
-        break :blk self.dev.acquireNextImageKHR(
+    const acquired = acquire: {
+        const zone = tracy.Zone.begin(.{ .src = @src(), .name = "acquireNextImage" });
+        defer zone.end();
+        break :acquire self.dev.acquireNextImageKHR(
             self.swapchain,
             std.math.maxInt(u64),
-            self.image_acquired_semaphores[current_frame_idx],
+            self.image_acquired_semaphores[current_frame],
             .null_handle,
         ) catch |err| try self.swapchainError(err);
     };
-
-    self.noteSuboptimal(acquire_result.result);
-    return acquire_result.image_index;
+    self.noteSuboptimal(acquired.result);
+    return .{
+        .frame_index = current_frame,
+        .image_index = acquired.image_index,
+        .cmd_buffer = self.cmd_buffers[current_frame],
+    };
 }
 
 /// Maps acquire/present failures to the frame loop's errors, flagging recreation when the swapchain is out of date.
 fn swapchainError(self: *VulkanContext, err: anytype) !noreturn {
     switch (err) {
         error.OutOfDateKHR => {
-            self.swapchain_needs_recreate.store(true, .monotonic);
+            self.swapchain_needs_recreate = true;
             return error.OutOfDate;
         },
         error.SurfaceLostKHR => return error.SurfaceLost,
@@ -888,9 +824,9 @@ fn swapchainError(self: *VulkanContext, err: anytype) !noreturn {
 
 /// Requests one recreation on the first suboptimal result; some platforms keep reporting it after a valid recreation.
 fn noteSuboptimal(self: *VulkanContext, result: vk.Result) void {
-    if (result == .suboptimal_khr and !self.suboptimal_recreate_requested.swap(true, .acq_rel)) {
-        self.swapchain_needs_recreate.store(true, .release);
-    }
+    if (result != .suboptimal_khr or self.suboptimal_recreate_requested) return;
+    self.suboptimal_recreate_requested = true;
+    self.swapchain_needs_recreate = true;
 }
 
 pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext, prepass_cmd_buffer: ?vk.CommandBuffer, ui_cmd_buffer: ?vk.CommandBuffer, include_game: bool) !void {
@@ -922,7 +858,7 @@ pub fn submitFrameWithExtra(self: *VulkanContext, io: std.Io, ctx: FrameContext,
     };
 
     const signal_semaphore_infos: [2]vk.SemaphoreSubmitInfo = .{
-        .{ .semaphore = self.render_complete_semaphores[ctx.image_index], .value = 0, .stage_mask = .{ .bottom_of_pipe = true }, .device_index = 0 },
+        .{ .semaphore = self.swapchain_images[ctx.image_index].render_complete, .value = 0, .stage_mask = .{ .bottom_of_pipe = true }, .device_index = 0 },
         .{ .semaphore = self.graphics_timeline_semaphore, .value = current_graphics_val, .stage_mask = .{ .all_commands = true }, .device_index = 0 },
     };
 
@@ -956,7 +892,7 @@ pub fn present(self: *VulkanContext, io: std.Io, ctx: FrameContext) !void {
 
     const present_info: vk.PresentInfoKHR = .{
         .wait_semaphore_count = 1,
-        .p_wait_semaphores = (&self.render_complete_semaphores[ctx.image_index])[0..1],
+        .p_wait_semaphores = (&self.swapchain_images[ctx.image_index].render_complete)[0..1],
         .swapchain_count = 1,
         .p_swapchains = (&self.swapchain)[0..1],
         .p_image_indices = (&ctx.image_index)[0..1],
@@ -998,214 +934,164 @@ fn debugCallback(
     return .false;
 }
 
+/// Requests a screenshot of the next frame at `resolution`.
 pub fn requestScreenshot(self: *VulkanContext, resolution: ScreenshotResolution) void {
-    self.screenshot_resolution = resolution;
-    self.screenshot_requested.store(true, .release);
+    self.screenshot_request = resolution;
 }
 
-pub fn ensureScreenshotBuffer(self: *VulkanContext, width: u32, height: u32) !void {
-    const needed: vk.DeviceSize = @as(vk.DeviceSize, width) * height * 4;
-    if (self.screenshot_buffer_size >= needed and self.screenshot_buffer != .null_handle) return;
-    self.destroyScreenshotBuffer();
-    self.screenshot_buffer = try self.dev.createBuffer(&.{ .size = needed, .usage = .{ .transfer_dst = true }, .sharing_mode = .exclusive }, &self.vkalloc);
-    const reqs = self.dev.getBufferMemoryRequirements(self.screenshot_buffer);
+/// Returns a staging buffer of at least `size` bytes.
+fn ensureScreenshotStaging(self: *VulkanContext, size: vk.DeviceSize) !vk.Buffer {
+    if (self.screenshot_staging) |staging| if (staging.size >= size) return staging.buffer;
+    self.destroyScreenshotStaging();
+    const buffer = try self.dev.createBuffer(&.{ .size = size, .usage = .{ .transfer_dst = true }, .sharing_mode = .exclusive }, &self.vkalloc);
+    errdefer self.dev.destroyBuffer(buffer, &self.vkalloc);
+    const reqs = self.dev.getBufferMemoryRequirements(buffer);
     const mem_type = try core.findMemoryType(self.mem_props, reqs.memory_type_bits, .{ .host_visible = true, .host_coherent = true });
-    self.screenshot_memory = try self.dev.allocateMemory(&.{ .allocation_size = reqs.size, .memory_type_index = mem_type }, &self.vkalloc);
-    try self.dev.bindBufferMemory(self.screenshot_buffer, self.screenshot_memory, 0);
-    self.screenshot_mapped = @ptrCast(try self.dev.mapMemory(self.screenshot_memory, 0, reqs.size, .{}));
-    self.screenshot_buffer_size = reqs.size;
+    const memory = try self.dev.allocateMemory(&.{ .allocation_size = reqs.size, .memory_type_index = mem_type }, &self.vkalloc);
+    errdefer self.dev.freeMemory(memory, &self.vkalloc);
+    try self.dev.bindBufferMemory(buffer, memory, 0);
+    const mapped: [*]u8 = @ptrCast(try self.dev.mapMemory(memory, 0, reqs.size, .{}));
+    self.screenshot_staging = .{ .buffer = buffer, .memory = memory, .mapped = mapped, .size = reqs.size };
+    return buffer;
 }
 
-/// Clears the fields as it goes, so a failed reallocation afterwards cannot double-free.
-fn destroyScreenshotBuffer(self: *VulkanContext) void {
-    if (self.screenshot_mapped) |_| self.dev.unmapMemory(self.screenshot_memory);
-    if (self.screenshot_buffer != .null_handle) self.dev.destroyBuffer(self.screenshot_buffer, &self.vkalloc);
-    if (self.screenshot_memory != .null_handle) self.dev.freeMemory(self.screenshot_memory, &self.vkalloc);
-    self.screenshot_mapped = null;
-    self.screenshot_buffer = .null_handle;
-    self.screenshot_memory = .null_handle;
+fn destroyScreenshotStaging(self: *VulkanContext) void {
+    const staging = self.screenshot_staging orelse return;
+    self.dev.unmapMemory(staging.memory);
+    self.dev.destroyBuffer(staging.buffer, &self.vkalloc);
+    self.dev.freeMemory(staging.memory, &self.vkalloc);
+    self.screenshot_staging = null;
 }
 
-pub fn recordScreenshotCopyFromColorAttachment(self: *VulkanContext, cmd: vk.CommandBuffer, image: vk.Image, extent: vk.Extent2D) !void {
-    try self.ensureScreenshotBuffer(extent.width, extent.height);
+/// Records the requested screenshot copy of `image`, which also moves `image` to present layout.
+/// Returns false and records nothing when no screenshot is requested.
+pub fn recordRequestedScreenshot(self: *VulkanContext, cmd: vk.CommandBuffer, image: vk.Image, extent: vk.Extent2D) !bool {
+    const resolution = self.screenshot_request orelse return false;
+    self.screenshot_request = null;
+    const buffer = try self.ensureScreenshotStaging(@as(vk.DeviceSize, extent.width) * extent.height * 4);
     const to_transfer = core.makeImageBarrier2(image, .color_attachment_optimal, .transfer_src_optimal, .{ .color_attachment_output = true }, .{ .color_attachment_write = true }, .{ .copy = true }, .{ .transfer_read = true }, .{ .color = true });
     core.pipelineBarrier(cmd, self.dev, vk.ImageMemoryBarrier2, (&to_transfer)[0..1]);
     const region: vk.BufferImageCopy = .{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = .{ .color = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = extent.width, .height = extent.height, .depth = 1 } };
-    self.dev.cmdCopyImageToBuffer(cmd, image, .transfer_src_optimal, self.screenshot_buffer, (&region)[0..1]);
+    self.dev.cmdCopyImageToBuffer(cmd, image, .transfer_src_optimal, buffer, (&region)[0..1]);
     const to_present = core.makeImageBarrier2(image, .transfer_src_optimal, .present_src_khr, .{ .copy = true }, .{ .transfer_read = true }, .{ .bottom_of_pipe = true }, .{}, .{ .color = true });
     core.pipelineBarrier(cmd, self.dev, vk.ImageMemoryBarrier2, (&to_present)[0..1]);
-    self.screenshot_extent = extent;
-    self.screenshot_pending_save = true;
+    self.pending_screenshot = .{ .extent = extent, .resolution = resolution };
+    return true;
 }
 
-/// Saves the pending screenshot and returns a borrowed path in the fixed `screenshot_path_buf`.
-/// The path stays valid only until the next call or deinit, so dupe it to keep it longer.
-pub fn savePendingScreenshot(self: *VulkanContext, io: std.Io, allocator: std.mem.Allocator) ![]const u8 {
-    if (!self.screenshot_pending_save) return error.NoPendingScreenshot;
-    const native_w = self.screenshot_extent.width;
-    const native_h = self.screenshot_extent.height;
-    const target = self.screenshot_resolution.targetExtent(self.screenshot_extent);
+/// Waits for the submitted copy, then saves the pending screenshot as a PNG.
+/// Returns false when no screenshot is pending. A failed save discards the screenshot.
+pub fn savePendingScreenshot(self: *VulkanContext, io: std.Io, allocator: std.mem.Allocator) !bool {
+    const pending = self.pending_screenshot orelse return false;
+    self.pending_screenshot = null;
+    // A failed wait leaves the staging contents undefined, so the save does not run.
+    try self.waitSubmittedFrames();
+
+    const native = pending.extent;
+    const target = pending.resolution.targetExtent(native);
     try std.Io.Dir.cwd().createDirPath(io, "screenshots");
     // In-place BGRA->RGBA swizzle for the BGRA swapchain formats only: the r8g8b8a8
     // fallback already stores the bytes in the order zignal writes out.
-    const pixel_count = @as(usize, native_w) * native_h;
-    const src_bytes = self.screenshot_mapped.?[0 .. pixel_count * 4];
+    const src_bytes = self.screenshot_staging.?.mapped[0 .. @as(usize, native.width) * native.height * 4];
     if (self.swapchain_format == .b8g8r8a8_srgb or self.swapchain_format == .b8g8r8a8_unorm) {
         for (std.mem.bytesAsSlice([4]u8, src_bytes)) |*pixel| std.mem.swap(u8, &pixel[0], &pixel[2]);
     }
-    const src_img = zignal.Image(zignal.Rgba(u8)).initFromBytes(native_h, native_w, src_bytes);
-    var to_save = src_img;
-    if (target.width != native_w or target.height != native_h) {
-        const dst_len = @as(usize, target.width) * target.height * 4;
-        if (self.screenshot_scratch.len < dst_len) {
-            self.allocator.free(self.screenshot_scratch);
-            // Empty BEFORE the fallible alloc: OOM (`try` throws) leaves cleanly
-            // empty, never a dangling nonzero-length slice that deinit would free.
-            self.screenshot_scratch = &.{};
-            self.screenshot_scratch = try self.allocator.alloc(u8, dst_len);
-        }
-        const dst_img = zignal.Image(zignal.Rgba(u8)).initFromBytes(target.height, target.width, self.screenshot_scratch[0..dst_len]);
-        src_img.resize(io, allocator, dst_img, .bilinear);
-        to_save = dst_img;
-    }
+    const Image = zignal.Image(zignal.Rgba(u8));
+    const src_img: Image = .initFromBytes(native.height, native.width, src_bytes);
+
+    var path_buf: [256]u8 = undefined;
     const ts = std.Io.Timestamp.now(io, .real).toSeconds();
-    const must_not_free_path = try std.mem.print(&self.screenshot_path_buf, "screenshots/screenshot_{d}_{d}x{d}.png", .{ ts, target.width, target.height });
-    try to_save.save(io, allocator, must_not_free_path);
-    self.screenshot_pending_save = false;
-    return must_not_free_path;
+    const path = try std.mem.print(&path_buf, "screenshots/screenshot_{d}_{d}x{d}.png", .{ ts, target.width, target.height });
+    if (std.meta.eql(target, native)) {
+        try src_img.save(io, allocator, path);
+    } else {
+        const dst_bytes = try allocator.alloc(u8, @as(usize, target.width) * target.height * 4);
+        defer allocator.free(dst_bytes);
+        const dst_img: Image = .initFromBytes(target.height, target.width, dst_bytes);
+        src_img.resize(io, allocator, dst_img, .bilinear);
+        try dst_img.save(io, allocator, path);
+    }
+    std.log.info("Screenshot saved: {s}", .{path});
+    return true;
 }
 
-const VulkanHostAllocator = struct {
-    allocator: std.mem.Allocator,
-
+/// Vulkan host allocation callbacks backed by a Zig allocator. A header before each block records its layout.
+const host_allocation = struct {
     const Header = struct {
         size: usize,
         padding: usize,
         align_bytes: usize,
     };
 
-    pub fn getCallbacks(self: *VulkanHostAllocator) vk.AllocationCallbacks {
+    /// Returns callbacks that allocate from `allocator`, which must outlive every Vulkan object.
+    fn callbacks(allocator: *std.mem.Allocator) vk.AllocationCallbacks {
         return .{
-            .p_user_data = self,
-            .pfn_allocation = allocationCallback,
-            .pfn_reallocation = reallocationCallback,
-            .pfn_free = freeCallback,
+            .p_user_data = allocator,
+            .pfn_allocation = allocate,
+            .pfn_reallocation = reallocate,
+            .pfn_free = free,
         };
     }
 
-    fn allocationCallback(
-        p_user_data: ?*anyopaque,
-        size: usize,
-        alignment: usize,
-        _: vk.SystemAllocationScope,
-    ) callconv(.c) ?*anyopaque {
+    fn header(memory: [*]u8) *Header {
+        return @ptrCast(@alignCast(memory - @sizeOf(Header)));
+    }
+
+    fn allocate(p_user_data: ?*anyopaque, size: usize, alignment: usize, _: vk.SystemAllocationScope) callconv(.c) ?*anyopaque {
         if (size == 0) return null;
-
-        const user_data = p_user_data orelse return null;
-        const self: *VulkanHostAllocator = @ptrCast(@alignCast(user_data));
-
+        const allocator: *std.mem.Allocator = @ptrCast(@alignCast(p_user_data orelse return null));
         const align_bytes = @max(alignment, @alignOf(usize));
         const padding = std.mem.alignForward(usize, @sizeOf(Header), align_bytes);
-        const total_bytes = size + padding;
-
-        const raw_mem = self.allocator.rawAlloc(
-            total_bytes,
-            .fromByteUnits(align_bytes),
-            @returnAddress(),
-        ) orelse return null;
-
-        const header_ptr: *Header = @ptrCast(@alignCast(raw_mem + padding - @sizeOf(Header)));
-        header_ptr.* = .{
-            .size = total_bytes,
-            .padding = padding,
-            .align_bytes = align_bytes,
-        };
-
-        return raw_mem + padding;
+        const raw = allocator.rawAlloc(size + padding, .fromByteUnits(align_bytes), @returnAddress()) orelse return null;
+        const memory = raw + padding;
+        header(memory).* = .{ .size = size + padding, .padding = padding, .align_bytes = align_bytes };
+        return memory;
     }
 
-    fn reallocationCallback(
+    fn reallocate(
         p_user_data: ?*anyopaque,
         p_original: ?*anyopaque,
         size: usize,
         alignment: usize,
         allocation_scope: vk.SystemAllocationScope,
     ) callconv(.c) ?*anyopaque {
-        const original_ptr = p_original orelse {
-            return allocationCallback(p_user_data, size, alignment, allocation_scope);
-        };
-
+        const original: [*]u8 = @ptrCast(p_original orelse return allocate(p_user_data, size, alignment, allocation_scope));
         if (size == 0) {
-            freeCallback(p_user_data, p_original);
+            free(p_user_data, original);
             return null;
         }
-
-        const new_ptr = allocationCallback(p_user_data, size, alignment, allocation_scope) orelse return null;
-
-        const orig_bytes: [*]u8 = @ptrCast(original_ptr);
-        const header_ptr: *Header = @ptrCast(@alignCast(orig_bytes - @sizeOf(Header)));
-
-        const old_payload_size = header_ptr.size - header_ptr.padding;
-        const copy_size = @min(size, old_payload_size);
-
-        const new_bytes: [*]u8 = @ptrCast(new_ptr);
-        @memcpy(new_bytes[0..copy_size], orig_bytes[0..copy_size]);
-
-        freeCallback(p_user_data, p_original);
-        return new_ptr;
+        const new_memory: [*]u8 = @ptrCast(allocate(p_user_data, size, alignment, allocation_scope) orelse return null);
+        const old_header = header(original);
+        const copy_size = @min(size, old_header.size - old_header.padding);
+        @memcpy(new_memory[0..copy_size], original[0..copy_size]);
+        free(p_user_data, original);
+        return new_memory;
     }
 
-    fn freeCallback(p_user_data: ?*anyopaque, p_memory: ?*anyopaque) callconv(.c) void {
-        const memory = p_memory orelse return;
-        const user_data = p_user_data orelse return;
-        const self: *VulkanHostAllocator = @ptrCast(@alignCast(user_data));
-
-        const mem_bytes: [*]u8 = @ptrCast(memory);
-        const header_ptr: *Header = @ptrCast(@alignCast(mem_bytes - @sizeOf(Header)));
-
-        const raw_ptr = mem_bytes - header_ptr.padding;
-        const full_slice = raw_ptr[0..header_ptr.size];
-
-        self.allocator.rawFree(
-            full_slice,
-            .fromByteUnits(header_ptr.align_bytes),
-            @returnAddress(),
-        );
+    fn free(p_user_data: ?*anyopaque, p_memory: ?*anyopaque) callconv(.c) void {
+        const memory: [*]u8 = @ptrCast(p_memory orelse return);
+        const allocator: *std.mem.Allocator = @ptrCast(@alignCast(p_user_data orelse return));
+        const block = header(memory);
+        allocator.rawFree((memory - block.padding)[0..block.size], .fromByteUnits(block.align_bytes), @returnAddress());
     }
 };
 
-/// A window plus a VulkanContext for GPU tests. Initialize in place: the context keeps a pointer to `window`.
-const TestHarness = struct {
-    events: wio.EventQueue,
-    window: wio.Window,
-    ctx: *VulkanContext,
-
-    fn init(self: *TestHarness) !void {
-        try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
-        errdefer wio.deinit();
-        self.events = .empty;
-        errdefer self.events.deinit();
-        self.window = try wio.Window.create(.{ .title = "test", .event_fn_data = &self.events });
-        errdefer self.window.destroy();
-        self.ctx = try VulkanContext.init(std.testing.allocator, &self.window);
-    }
-
-    fn deinit(self: *TestHarness) void {
-        self.ctx.deinit(std.testing.io);
-        self.window.destroy();
-        self.events.deinit();
-        wio.deinit();
-    }
-};
+test {
+    std.testing.refAllDecls(@This());
+}
 
 test "VulkanRenderer mesh upload" {
-    var harness: TestHarness = undefined;
-    try harness.init();
-    defer harness.deinit();
-    const ctx = harness.ctx;
+    try wio.init(.{ .allocator = std.testing.allocator, .io = std.testing.io, .eventFn = wio.EventQueue.eventFn });
+    defer wio.deinit();
+    var events: wio.EventQueue = .empty;
+    defer events.deinit();
+    var window = try wio.Window.create(.{ .title = "test", .event_fn_data = &events });
+    defer window.destroy();
+    const ctx = try VulkanContext.init(std.testing.allocator, &window);
+    defer ctx.deinit(std.testing.io);
 
     ctx.swapchain_extent = .{ .width = 640, .height = 480 };
-    try ctx.createSwapchainLocked(std.testing.io, false);
+    try ctx.createSwapchainLocked(std.testing.io, false, .mailbox);
 
     var render_opts: Renderer.RenderOptions = .{};
     var render_opts_lock: std.Io.RwLock = .init;
@@ -1222,118 +1108,4 @@ test "VulkanRenderer mesh upload" {
 
     const chunk_pos: World.ChunkPos = .{ .level = 0, .position = .{ 0, 0, 0 } };
     try iface.addChunk(std.testing.io, chunk_pos, .{ .grid = &grid }, &neighbor_faces);
-}
-
-test "StagingRing alloc wrap-around" {
-    var harness: TestHarness = undefined;
-    try harness.init();
-    defer harness.deinit();
-    const ctx = harness.ctx;
-
-    var backing = core.VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
-    defer backing.deinit();
-
-    const cpu_alloc = backing.allocator(.cpu_to_gpu);
-
-    const ring_capacity: vk.DeviceSize = Mesher.max_face_bytes;
-    var ring = try gpu.StagingRing.init(std.testing.allocator, cpu_alloc, ring_capacity);
-    defer ring.deinit(cpu_alloc);
-
-    const staging_info = backing.getBufferAndOffset(.cpu_to_gpu, ring.mapping.ptr);
-    ring.resolve(staging_info.buffer);
-
-    const s1 = (try ring.alloc(std.testing.io, 8)).?;
-    @memset(s1, 0xab);
-    const s2 = (try ring.alloc(std.testing.io, 8)).?;
-    @memset(s2, 0xcd);
-    try std.testing.expectEqual(0xab, s1[0]);
-    try std.testing.expectEqual(0xcd, s2[0]);
-
-    try std.testing.expectEqual(null, try ring.alloc(std.testing.io, ring.mapping.len));
-
-    ring.retire(std.testing.io, 1);
-    try std.testing.expect(try ring.alloc(std.testing.io, 8) != null);
-}
-
-fn stagingRingAllocDeinit(alloc: std.mem.Allocator) !void {
-    var ring = try gpu.StagingRing.init(alloc, alloc, Mesher.max_face_bytes);
-    defer ring.deinit(alloc);
-    ring.resolve(@fromBackingInt(@intCast(1)));
-    // Exercises the alloc path, whose entry bookkeeping allocation must propagate
-    // OutOfMemory instead of being mistaken for a full ring.
-    const slice = try ring.alloc(std.testing.io, 8);
-    try std.testing.expect(slice != null);
-}
-
-test "StagingRing checkAllAllocationFailures" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocDeinit, .{});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, stagingRingAllocPairDeinit, .{});
-}
-
-test "StagingRing allocPair atomicity" {
-    const io = std.testing.io;
-    var ring = try gpu.StagingRing.init(std.testing.allocator, std.testing.allocator, 1024);
-    defer ring.deinit(std.testing.allocator);
-    ring.resolve(@fromBackingInt(@intCast(1)));
-
-    // Zero sizes yield null slots without consuming space.
-    const empty = (try ring.allocPair(io, .{ 0, 0 })).?;
-    try std.testing.expectEqual(null, empty[0]);
-    try std.testing.expectEqual(null, empty[1]);
-
-    const pair = (try ring.allocPair(io, .{ 8, 16 })).?;
-    try std.testing.expectEqual(@as(usize, 8), pair[0].?.len);
-    try std.testing.expectEqual(@as(usize, 16), pair[1].?.len);
-
-    // A pair that does not fit as a whole is refused entirely; nothing is consumed.
-    try std.testing.expectEqual(null, try ring.allocPair(io, .{ 512, 512 }));
-
-    // After both slices retire, the refused pair fits again.
-    ring.bind(io, pair[0].?, 1);
-    ring.bind(io, pair[1].?, 1);
-    ring.retire(io, 1);
-    const big = (try ring.allocPair(io, .{ 512, 512 })).?;
-    try std.testing.expect(big[0] != null and big[1] != null);
-
-    // A pair larger than the whole ring fails loudly instead of spinning forever.
-    try std.testing.expectError(error.StagingTooLarge, ring.allocPair(io, .{ 1024, 1024 }));
-}
-
-fn stagingRingAllocPairDeinit(alloc: std.mem.Allocator) !void {
-    var ring = try gpu.StagingRing.init(alloc, alloc, Mesher.max_face_bytes);
-    defer ring.deinit(alloc);
-    ring.resolve(@fromBackingInt(@intCast(1)));
-    // The entry bookkeeping reservation must propagate OutOfMemory before mutating
-    // the ring, so a failed pair leaves no partial state behind.
-    const pair = try ring.allocPair(std.testing.io, .{ 8, 8 });
-    try std.testing.expect(pair != null);
-}
-
-test "GpuRegionAllocator grow and retire old buffer" {
-    var harness: TestHarness = undefined;
-    try harness.init();
-    defer harness.deinit();
-    const ctx = harness.ctx;
-
-    var backing = core.VulkanBackingAllocator.init(ctx.dev, ctx.mem_props, std.testing.io, std.testing.allocator, ctx.queue_family_index, ctx.transfer_queue_family_index, ctx.vkalloc);
-    defer backing.deinit();
-
-    const gpu_alloc = backing.allocator(.gpu_only);
-
-    var alloc = try gpu.GpuRegionAllocator.init(std.testing.allocator, gpu_alloc, 64 * 1024 * 1024);
-
-    const buf_info = backing.getBufferAndOffset(.gpu_only, alloc.buffer_slice.ptr);
-    alloc.resolve(buf_info.buffer, buf_info.offset);
-
-    for (0..2) |_| {
-        const new_slice = try gpu_alloc.alignedAlloc(u8, .fromByteUnits(256), try alloc.nextCapacity(std.testing.io));
-        const grow_info = alloc.grow(std.testing.io, new_slice).?;
-        gpu_alloc.free(grow_info.old_slice);
-    }
-    // A slice no larger than the current buffer means another thread already grew it.
-    const stale_slice = try gpu_alloc.alignedAlloc(u8, .fromByteUnits(256), alloc.buffer_slice.len);
-    defer gpu_alloc.free(stale_slice);
-    try std.testing.expect(alloc.grow(std.testing.io, stale_slice) == null);
-
-    alloc.deinit(gpu_alloc);
 }
